@@ -35,7 +35,8 @@ export class AuthFailed extends Schema.TaggedError<AuthFailed>()("AuthFailed", {
 /** The run's spend cap was reached. `estimated` when the cost is computed from tokens (Codex). */
 export class SpendCapReached extends Schema.TaggedError<SpendCapReached>()("SpendCapReached", {
   message: Schema.String,
-  capUsd: Schema.Number,
+  /** Null when the provider enforced its own budget without saying what it was. */
+  capUsd: Schema.NullOr(Schema.Number),
   spentUsd: Schema.NullOr(Schema.Number),
   estimated: Schema.Boolean,
 }) {}

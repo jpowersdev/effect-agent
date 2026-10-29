@@ -11,6 +11,11 @@ export type TurnId = typeof TurnId.Type
 export const MessageId = Schema.String.pipe(Schema.brand("effect-agent/MessageId"))
 export type MessageId = typeof MessageId.Type
 
+/**
+ * `inputTokens` includes `cachedInputTokens`. `outputTokens` excludes
+ * `reasoningTokens` when those are reported separately; when
+ * `reasoningTokens` is null, any reasoning is already inside `outputTokens`.
+ */
 export const TokenUsage = Schema.Struct({
   inputTokens: Schema.Number,
   cachedInputTokens: Schema.Number,

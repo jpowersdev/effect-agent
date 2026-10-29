@@ -1,0 +1,361 @@
+/**
+ * Pure mapping from app-server frames to `AgentEvent`s, and classification
+ * of a completed turn into a `TurnOutcome`. No effects: the session in
+ * `CodexAgent` owns the state and the turn lifecycle (TurnStarted,
+ * MessageLanded, TurnEnded); this module maps everything else.
+ */
+import { DateTime } from "effect"
+import {
+  AgentFailed,
+  AuthFailed,
+  ContextExhausted,
+  Interrupted,
+  ProcessKilled,
+  SpendCapReached,
+  Throttled,
+  UsageLimited,
+} from "../AgentError.ts"
+import type { AgentEvent, TurnOutcome } from "../AgentEvent.ts"
+import { type LimitWindow, type LimitWindowStatus, type TokenUsage, TurnId } from "../Domain.ts"
+import type * as P from "./protocol.ts"
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+/** `codexErrorInfo` as a string: the tag, or the key of a single-key object variant. */
+export const errorKind = (info: P.CodexErrorInfo | null | undefined): string | null => {
+  if (info === null || info === undefined) return null
+  if (typeof info === "string") return info
+  const keys = Object.keys(info)
+  return keys.length > 0 ? keys[0]! : null
+}
+
+/**
+ * Codex counts reasoning tokens inside `outputTokens`. `TokenUsage` keeps them
+ * apart (`Pricing.costOf` bills `reasoningTokens` on top of `outputTokens`), so
+ * `outputTokens` here excludes reasoning and the sum is unchanged.
+ */
+export const toTokenUsage = (b: P.TokenUsageBreakdown): TokenUsage => ({
+  inputTokens: b.inputTokens,
+  cachedInputTokens: b.cachedInputTokens,
+  outputTokens: Math.max(0, b.outputTokens - b.reasoningOutputTokens),
+  reasoningTokens: b.reasoningOutputTokens,
+})
+
+export const zeroUsage: TokenUsage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningTokens: 0 }
+
+export const subtractUsage = (a: TokenUsage, b: TokenUsage): TokenUsage => ({
+  inputTokens: Math.max(0, a.inputTokens - b.inputTokens),
+  cachedInputTokens: Math.max(0, a.cachedInputTokens - b.cachedInputTokens),
+  outputTokens: Math.max(0, a.outputTokens - b.outputTokens),
+  reasoningTokens: Math.max(0, (a.reasoningTokens ?? 0) - (b.reasoningTokens ?? 0)),
+})
+
+/** `windowDurationMins`: 300 -> five_hour, 10080 -> weekly, anything else -> other. */
+export const limitWindowOf = (mins: number | null | undefined): LimitWindow =>
+  mins === 300 ? "five_hour" : mins === 10080 ? "weekly" : "other"
+
+const resetsAtOf = (seconds: number | null | undefined) =>
+  seconds === null || seconds === undefined ? null : DateTime.makeUnsafe(seconds * 1000)
+
+/** "Reconnecting... 2/5 (...)" -> { attempt: 2, maxAttempts: 5 } */
+export const parseRetry = (message: string): { attempt: number | null; maxAttempts: number | null } => {
+  const m = /(\d+)\s*\/\s*(\d+)/.exec(message)
+  return m ? { attempt: Number(m[1]), maxAttempts: Number(m[2]) } : { attempt: null, maxAttempts: null }
+}
+
+// ---------------------------------------------------------------------------
+// Rate limits
+// ---------------------------------------------------------------------------
+
+/**
+ * Merge a sparse `account/rateLimits/updated` snapshot into the previous one:
+ * null fields don't clear known values.
+ */
+export const mergeRateLimits = (prev: P.RateLimitSnapshot | null, next: P.RateLimitSnapshot): P.RateLimitSnapshot =>
+  prev === null || (prev.limitId !== null && next.limitId !== null && prev.limitId !== next.limitId)
+    ? next
+    : {
+        limitId: next.limitId ?? prev.limitId,
+        limitName: next.limitName ?? prev.limitName ?? null,
+        primary: next.primary ?? prev.primary,
+        secondary: next.secondary ?? prev.secondary,
+        credits: next.credits ?? prev.credits,
+        planType: next.planType ?? prev.planType ?? null,
+        rateLimitReachedType: next.rateLimitReachedType ?? prev.rateLimitReachedType,
+      }
+
+export const limitWindows = (snapshot: P.RateLimitSnapshot): Array<LimitWindowStatus> => {
+  const prefix = snapshot.limitId === null || snapshot.limitId === "codex" ? "" : `${snapshot.limitId}.`
+  const out: Array<LimitWindowStatus> = []
+  for (const [label, w] of [
+    ["primary", snapshot.primary],
+    ["secondary", snapshot.secondary],
+  ] as const) {
+    if (w === null || w === undefined) continue
+    out.push({
+      window: limitWindowOf(w.windowDurationMins),
+      label: `${prefix}${label}`,
+      usedPercent: w.usedPercent,
+      resetsAt: resetsAtOf(w.resetsAt),
+    })
+  }
+  return out
+}
+
+/**
+ * The exhausted window for a `usageLimitExceeded` turn, from
+ * `account/rateLimits/read`: the window at >= 100%, else the most used one.
+ *
+ * `overageAvailable` is true when the account has credits (or unlimited
+ * credits) that could have paid past the included usage, false when it has
+ * none, and null when the snapshot doesn't say. `ordinaryUsageAllowed` is
+ * about included usage, which is by definition exhausted here, so it isn't
+ * used.
+ */
+export const usageLimitDetails = (
+  limits: P.GetAccountRateLimitsResponse | null,
+): Pick<UsageLimited, "window" | "resetsAt" | "overageAvailable"> => {
+  if (limits === null) return { window: "other", resetsAt: null, overageAvailable: null }
+  const snapshot = limits.rateLimitsByLimitId?.["codex"] ?? limits.rateLimits
+  const windows = [snapshot.primary, snapshot.secondary].filter((w): w is P.RateLimitWindow => w !== null && w !== undefined)
+  const exhausted =
+    windows.find((w) => w.usedPercent >= 100) ?? [...windows].sort((a, b) => b.usedPercent - a.usedPercent)[0]
+  const credits = snapshot.credits
+  return {
+    window: exhausted ? limitWindowOf(exhausted.windowDurationMins) : "other",
+    resetsAt: exhausted ? resetsAtOf(exhausted.resetsAt) : null,
+    overageAvailable: credits === null || credits === undefined ? null : credits.unlimited || credits.hasCredits,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Outcome classification
+// ---------------------------------------------------------------------------
+
+export interface OutcomeContext {
+  /** We sent `turn/interrupt` for this turn (via `interrupt`). */
+  readonly interruptRequested: boolean
+  /** The estimated spend cap stopped the turn: the cap and the spend when it was hit. */
+  readonly spendCap: { readonly capUsd: number; readonly spentUsd: number } | null
+  /** `RunOptions.spendCapUsd`, reported if Codex's own session budget stops the turn. */
+  readonly capUsd: number | null
+  /** app-server died; set when the turn ends because the process exited. */
+  readonly processExit: { readonly exitCode: number | null; readonly signal: string | null } | null
+  /** Last `final_answer` (else last) agent message of the turn. */
+  readonly finalText: string
+  /** `account/rateLimits/read`, fetched for `usageLimitExceeded`. */
+  readonly rateLimits: P.GetAccountRateLimitsResponse | null
+}
+
+const throttleKinds = new Set([
+  "rateLimitExceeded",
+  "serverOverloaded",
+  "responseStreamDisconnected",
+  "responseTooManyFailedAttempts",
+])
+
+export const classifyOutcome = (turn: P.Turn, ctx: OutcomeContext): TurnOutcome => {
+  const turnId = TurnId.make(turn.id)
+  if (ctx.processExit !== null) {
+    const { exitCode, signal } = ctx.processExit
+    return new ProcessKilled({
+      message: `codex app-server exited (${signal ?? `code ${exitCode}`})`,
+      signal,
+      exitCode,
+    })
+  }
+  if (turn.status === "completed") return { _tag: "Succeeded", turnId, finalText: ctx.finalText }
+  if (turn.status === "interrupted") {
+    if (ctx.spendCap !== null) {
+      return new SpendCapReached({
+        message: `estimated spend $${ctx.spendCap.spentUsd.toFixed(4)} reached the cap of $${ctx.spendCap.capUsd}`,
+        capUsd: ctx.spendCap.capUsd,
+        spentUsd: ctx.spendCap.spentUsd,
+        estimated: true,
+      })
+    }
+    return new Interrupted({ message: ctx.interruptRequested ? "interrupted" : "interrupted by codex app-server" })
+  }
+  const error = turn.error
+  const message = error?.message ?? `turn ${turn.status}`
+  const kind = errorKind(error?.codexErrorInfo)
+  switch (kind) {
+    case "usageLimitExceeded":
+      return new UsageLimited({ message, ...usageLimitDetails(ctx.rateLimits) })
+    case "unauthorized":
+      return new AuthFailed({ message })
+    case "contextWindowExceeded":
+      return new ContextExhausted({ message })
+    case "sessionBudgetExceeded":
+      return new SpendCapReached({ message, capUsd: ctx.capUsd ?? 0, spentUsd: null, estimated: false })
+  }
+  if (kind !== null && throttleKinds.has(kind)) return new Throttled({ message, retriesLeft: 0 })
+  return new AgentFailed({ message, kind })
+}
+
+// ---------------------------------------------------------------------------
+// Items -> tool events
+// ---------------------------------------------------------------------------
+
+export interface ToolCallInfo {
+  readonly name: string
+  readonly summary: string
+  readonly input: unknown
+}
+
+export const toolCallOf = (item: P.ThreadItem): ToolCallInfo | null => {
+  const i = item as any
+  switch (item.type) {
+    case "commandExecution": {
+      const actions: ReadonlyArray<P.CommandAction> = i.commandActions ?? []
+      // `command` is wrapped in the login shell (`zsh -lc '...'`); the parsed actions are what the model wrote.
+      const summary = actions.length > 0 ? actions.map((a) => a.command).join(" | ") : i.command
+      return { name: "shell", summary, input: { command: i.command, cwd: i.cwd } }
+    }
+    case "fileChange": {
+      const changes: ReadonlyArray<{ path: string; kind: unknown }> = i.changes ?? []
+      return { name: "apply_patch", summary: changes.map((c) => c.path).join(", "), input: { changes: i.changes } }
+    }
+    case "mcpToolCall":
+      return { name: `mcp__${i.server}__${i.tool}`, summary: `${i.server}.${i.tool}`, input: i.arguments }
+    case "dynamicToolCall": {
+      const name = i.namespace ? `${i.namespace}.${i.tool}` : i.tool
+      return { name, summary: name, input: i.arguments }
+    }
+    case "webSearch":
+      return { name: "web_search", summary: i.query ?? "", input: { query: i.query, action: i.action } }
+    case "collabAgentToolCall":
+      return { name: `collab.${i.tool}`, summary: i.prompt ?? i.tool, input: { prompt: i.prompt } }
+    default:
+      return null
+  }
+}
+
+const textOfContent = (content: ReadonlyArray<unknown> | null | undefined): string =>
+  (content ?? [])
+    .map((c: any) => (typeof c?.text === "string" ? c.text : JSON.stringify(c)))
+    .join("\n")
+
+export const toolResultOf = (item: P.ThreadItem): { readonly isError: boolean; readonly output: string } | null => {
+  const i = item as any
+  switch (item.type) {
+    case "commandExecution":
+      return {
+        isError: i.status === "failed" || i.status === "declined" || (i.exitCode !== null && i.exitCode !== 0),
+        output: i.aggregatedOutput ?? "",
+      }
+    case "fileChange":
+      return {
+        isError: i.status === "failed" || i.status === "declined",
+        output: (i.changes ?? []).map((c: any) => c.diff ?? c.path).join("\n"),
+      }
+    case "mcpToolCall":
+      return {
+        isError: i.status === "failed" || (i.error !== null && i.error !== undefined),
+        output: i.error?.message ?? textOfContent(i.result?.content),
+      }
+    case "dynamicToolCall":
+      return {
+        isError: i.status === "failed" || i.success === false,
+        output: textOfContent(i.contentItems),
+      }
+    case "webSearch":
+      return { isError: false, output: i.results ? JSON.stringify(i.results) : "" }
+    case "collabAgentToolCall":
+      return { isError: i.status === "failed", output: i.status ?? "" }
+    default:
+      return null
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Notification -> events
+// ---------------------------------------------------------------------------
+
+export interface MapState {
+  /** Tool calls already announced (by item id). */
+  readonly announced: Set<string>
+  lastHeartbeatMs: number
+  rateLimits: P.RateLimitSnapshot | null
+}
+
+export const makeMapState = (): MapState => ({ announced: new Set(), lastHeartbeatMs: -Infinity, rateLimits: null })
+
+export const HEARTBEAT_INTERVAL_MS = 1000
+
+const heartbeatMethods = new Set([
+  "item/agentMessage/delta",
+  "item/reasoning/textDelta",
+  "item/reasoning/summaryTextDelta",
+  "item/reasoning/summaryPartAdded",
+  "item/commandExecution/outputDelta",
+  "item/fileChange/outputDelta",
+  "item/plan/delta",
+  "item/mcpToolCall/progress",
+  "thread/tokenUsage/updated",
+  "turn/plan/updated",
+  "turn/diff/updated",
+])
+
+/**
+ * Maps one frame that isn't part of the turn lifecycle. Returns the events
+ * to emit (possibly none: throttled heartbeats are dropped). `turn/started`,
+ * `turn/completed` and `userMessage` items are the session's job.
+ */
+export const mapNotification = (msg: P.Incoming, state: MapState, nowMs: number): Array<AgentEvent> => {
+  const raw = msg
+  const params: any = msg.params ?? {}
+  const turnId = typeof params.turnId === "string" && params.turnId !== "" ? TurnId.make(params.turnId) : null
+
+  const heartbeat = (): Array<AgentEvent> => {
+    if (nowMs - state.lastHeartbeatMs < HEARTBEAT_INTERVAL_MS) return []
+    state.lastHeartbeatMs = nowMs
+    return [{ _tag: "Heartbeat", turnId, raw }]
+  }
+  const call = (item: P.ThreadItem): Array<AgentEvent> => {
+    const info = toolCallOf(item)
+    if (info === null || state.announced.has(item.id)) return []
+    state.announced.add(item.id)
+    return [{ _tag: "ToolCall", turnId, callId: item.id, ...info, raw }]
+  }
+
+  if ("id" in msg && msg.id !== undefined) return [{ _tag: "Other", raw }] // server request
+
+  switch (msg.method) {
+    case "item/started": {
+      const item: P.ThreadItem = params.item
+      if (item.type === "reasoning" || item.type === "agentMessage") return heartbeat()
+      const events = call(item)
+      return events.length > 0 ? events : [{ _tag: "Other", raw }]
+    }
+    case "item/completed": {
+      const item: P.ThreadItem = params.item
+      if (item.type === "agentMessage") return [{ _tag: "Text", turnId, text: (item as any).text ?? "", raw }]
+      if (item.type === "contextCompaction") return [{ _tag: "Compacted", turnId, trigger: null, raw }]
+      if (item.type === "reasoning") return heartbeat()
+      const result = toolResultOf(item)
+      if (result === null) return [{ _tag: "Other", raw }]
+      return [...call(item), { _tag: "ToolResult", turnId, callId: item.id, ...result, raw }]
+    }
+    case "account/rateLimits/updated": {
+      state.rateLimits = mergeRateLimits(state.rateLimits, params.rateLimits)
+      return [{ _tag: "LimitsUpdated", windows: limitWindows(state.rateLimits), raw }]
+    }
+    case "error": {
+      const n = params as P.ErrorNotification
+      if (!n.willRetry) return [{ _tag: "Other", raw }]
+      const message = n.error?.message ?? "retrying"
+      return [{ _tag: "Retrying", turnId, ...parseRetry(message), delayMs: null, message, raw }]
+    }
+  }
+  if (heartbeatMethods.has(msg.method)) return heartbeat()
+  return [{ _tag: "Other", raw }]
+}
+
+/** The final text of a turn: the last `final_answer` message, else the last message. */
+export const finalTextOf = (messages: ReadonlyArray<{ readonly text: string; readonly phase: string | null }>): string => {
+  for (let i = messages.length - 1; i >= 0; i--) if (messages[i]!.phase === "final_answer") return messages[i]!.text
+  return messages.at(-1)?.text ?? ""
+}

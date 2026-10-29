@@ -56,6 +56,13 @@ export const Capabilities = Schema.Struct({
   resetTimes: Schema.Boolean,
   hooks: Schema.Boolean,
   reattach: Schema.Boolean,
+  /** Which `RunOptions.disable` settings are enforced (not merely requested). */
+  disable: Schema.Struct({
+    askUser: Schema.Boolean,
+    subagents: Schema.Boolean,
+    /** `any`: every native tool name; `some`: only names the provider can turn off (others fail `open`). */
+    tools: Schema.Literals(["any", "some"]),
+  }),
 })
 export type Capabilities = typeof Capabilities.Type
 
@@ -73,9 +80,12 @@ export interface AgentSession {
   /** Where the provider stores this session (a transcript file), when known. */
   readonly location: Option.Option<string>
   /**
-   * Live events from the moment the stream is run; run it before sending if
-   * you need every event. Each run is an independent subscription.
+   * Subscribe now; the returned stream holds every event from this point on,
+   * starting with the session's `SessionStarted` once it is known. Use this
+   * (then fork the stream) when you must not miss events after a `send`.
    */
+  readonly subscribe: Effect.Effect<Stream.Stream<AgentEvent, AgentError>, never, Scope.Scope>
+  /** `subscribe`, deferred until the stream runs. Events sent before it runs are missed. */
   readonly events: Stream.Stream<AgentEvent, AgentError>
   /** Start a turn now if idle, otherwise after the running turn. */
   readonly send: (input: Input) => Effect.Effect<MessageId, AgentError>

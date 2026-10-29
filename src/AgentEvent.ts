@@ -28,6 +28,13 @@ export const MessageLanded = Schema.TaggedStruct("MessageLanded", {
   raw,
 })
 
+/** The provider refused, cancelled or discarded a message before it reached a turn. */
+export const MessageDropped = Schema.TaggedStruct("MessageDropped", {
+  messageId: MessageId,
+  reason: Schema.String,
+  raw,
+})
+
 /** A complete block of assistant text. */
 export const Text = Schema.TaggedStruct("Text", { turnId: Schema.NullOr(TurnId), text: Schema.String, raw })
 
@@ -98,6 +105,7 @@ export const AgentEvent = Schema.Union([
   SessionStarted,
   TurnStarted,
   MessageLanded,
+  MessageDropped,
   Text,
   ToolCall,
   ToolResult,

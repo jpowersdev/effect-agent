@@ -1,0 +1,5 @@
+{"dir":"out","msg":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"effect_agent","title":null,"version":"0.0.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false,"optOutNotificationMethods":["turn/moderationMetadata","remoteControl/status/changed","rawResponse/completed","rawResponseItem/completed"]}}}}
+{"dir":"in","msg":{"id":1,"result":{"userAgent":"effect_agent/0.162.1 (NixOS 26.11.0; x86_64) unknown (effect_agent; 0.0.0)","codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"linux"}}}
+{"dir":"out","msg":{"method":"initialized"}}
+{"dir":"out","msg":{"id":2,"method":"thread/resume","params":{"threadId":"019a0000-0000-7000-8000-000000000000","excludeTurns":true,"cwd":"/tmp/effect-agent-live/codex/work","approvalPolicy":"never","sandbox":"danger-full-access","config":{"mcp_servers":{},"features.apps":false,"model_reasoning_effort":"low"},"developerInstructions":"Keep every reply under ten words."}}}
+{"dir":"in","msg":{"error":{"code":-32600,"message":"no rollout found for thread id 019a0000-0000-7000-8000-000000000000"},"id":2}}

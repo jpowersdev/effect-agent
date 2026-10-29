@@ -1,0 +1,278 @@
+/**
+ * The same programs against both providers (over their recorded sessions),
+ * checking the guarantees `Agent` makes regardless of provider.
+ */
+import { describe, expect, it } from "@effect/vitest"
+import { Cause, Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
+import { ClaudeAgent, ClaudeReplay } from "../src/claude/index.ts"
+import { CodexAgent, CodexReplay } from "../src/codex/index.ts"
+import { Agent, AgentEvent, type AgentSession, type RunOptions, SessionId } from "../src/index.ts"
+
+type Scenario = "simple" | "tool" | "steer" | "interrupt" | "queue" | "spendCap" | "killed" | "usageLimit" | "resumeMissing"
+
+interface Provider {
+  readonly name: string
+  readonly cwd: string
+  readonly missingId: string
+  readonly spendCapUsd: number
+  readonly layer: (scenario: Scenario) => Layer.Layer<Agent>
+}
+
+const fixture = (provider: string, name: string) => join(import.meta.dirname, "fixtures", provider, `${name}.jsonl`)
+
+const claude: Provider = {
+  name: "claude",
+  cwd: "/tmp/effect-agent-replay",
+  missingId: "33333333-3333-4333-8333-333333333333",
+  spendCapUsd: 0.0001,
+  layer: (scenario) => {
+    const name = {
+      simple: "simple-turn",
+      tool: "bash-tool",
+      steer: "steer",
+      interrupt: "interrupt-then-turn",
+      queue: "queue",
+      spendCap: "spend-cap",
+      killed: "process-killed",
+      usageLimit: "usage-limit",
+      resumeMissing: "resume-missing",
+    }[scenario]
+    // Skip the transcript precheck so the CLI's own "not found" path is exercised.
+    const options = scenario === "resumeMissing" ? { knownSessions: "all" as const } : undefined
+    return ClaudeAgent.layer().pipe(Layer.provide(ClaudeReplay.layerFile(fixture("claude", name), options)))
+  },
+}
+
+const codex: Provider = {
+  name: "codex",
+  cwd: "/tmp/effect-agent-live/codex/work",
+  missingId: "019a0000-0000-7000-8000-000000000000",
+  spendCapUsd: 0.01,
+  layer: (scenario) => {
+    const name = {
+      simple: "simple",
+      tool: "command",
+      steer: "steer-landed",
+      interrupt: "interrupt",
+      queue: "queue",
+      spendCap: "spend-cap",
+      killed: "process-killed",
+      usageLimit: "usage-limit",
+      resumeMissing: "resume-missing",
+    }[scenario]
+    const pricing = scenario === "spendCap" ? { "*": { input: 1000, output: 1000 } } : undefined
+    return CodexAgent.layer(pricing ? { pricing } : {}).pipe(
+      Layer.provide(CodexReplay.layer(readFileSync(fixture("codex", name), "utf8"))),
+    )
+  },
+}
+
+const failureOf = <A, E>(exit: Exit.Exit<A, E>) =>
+  Exit.isFailure(exit) ? Option.getOrUndefined(Cause.findErrorOption(exit.cause)) : undefined
+
+/** Subscribe eagerly (the point of `subscribe`) and collect into an array. */
+const collect = (session: AgentSession) =>
+  Effect.gen(function* () {
+    const events: Array<AgentEvent> = []
+    const stream = yield* session.subscribe
+    const fiber = yield* stream.pipe(
+      Stream.runForEach((e) => Effect.sync(() => events.push(e))),
+      Effect.exit,
+      Effect.forkScoped,
+    )
+    return { events, fiber }
+  })
+
+const waitFor = (events: ReadonlyArray<AgentEvent>, tag: AgentEvent["_tag"], count = 1) =>
+  Effect.gen(function* () {
+    for (let i = 0; i < 2_000; i++) {
+      if (events.filter((e) => e._tag === tag).length >= count) return
+      yield* Effect.sleep("1 millis")
+    }
+    return yield* Effect.die(new Error(`never saw ${count} × ${tag}`))
+  })
+
+/** Guarantees every provider's stream must satisfy. */
+const checkStream = (events: ReadonlyArray<AgentEvent>, sessionId: string) => {
+  // Every event is a valid AgentEvent (ids, outcomes, timestamps) and serializes.
+  for (const event of events) Schema.encodeUnknownSync(AgentEvent)(event)
+
+  expect(events[0]).toMatchObject({ _tag: "SessionStarted", sessionId })
+  expect(events.filter((e) => e._tag === "SessionStarted")).toHaveLength(1)
+
+  const open = new Set<string>()
+  const ended = new Set<string>()
+  const calls = new Set<string>()
+  for (const event of events) {
+    expect(event).toHaveProperty("raw")
+    switch (event._tag) {
+      case "TurnStarted":
+        expect(open.size, "turns don't overlap").toBe(0)
+        open.add(event.turnId)
+        break
+      case "MessageLanded":
+        expect(open.has(event.turnId), "a message lands in the running turn").toBe(true)
+        break
+      case "ToolCall":
+        calls.add(event.callId)
+        expect(event.summary.length).toBeGreaterThan(0)
+        break
+      case "ToolResult":
+        expect(calls.has(event.callId), "a result follows its call").toBe(true)
+        break
+      case "TurnEnded":
+        expect(open.has(event.turnId), "a turn ends after it starts").toBe(true)
+        expect(ended.has(event.turnId), "a turn ends once").toBe(false)
+        open.delete(event.turnId)
+        ended.add(event.turnId)
+        break
+    }
+  }
+  return { ended: [...ended] }
+}
+
+const outcomes = (events: ReadonlyArray<AgentEvent>) =>
+  events.flatMap((e) => (e._tag === "TurnEnded" ? [e.outcome._tag] : []))
+
+for (const provider of [claude, codex]) {
+  const base: RunOptions = { cwd: provider.cwd }
+
+  describe(`conformance: ${provider.name}`, () => {
+    it.live("a turn succeeds, with a landed message, usage and cost-or-null", () =>
+      Effect.gen(function* () {
+        const session = yield* (yield* Agent).open(base)
+        const { events } = yield* collect(session)
+        const done = yield* session.turn("Reply with just the word: pong")
+        expect(done.finalText.toLowerCase()).toContain("pong")
+        yield* waitFor(events, "TurnEnded")
+        const { ended } = checkStream(events, session.sessionId)
+        expect(ended).toEqual([done.turnId])
+        expect(events.some((e) => e._tag === "MessageLanded" && e.turnId === done.turnId)).toBe(true)
+        const end = events.find((e) => e._tag === "TurnEnded")!
+        expect(end._tag === "TurnEnded" && end.usage?.inputTokens).toBeGreaterThan(0)
+        yield* session.end
+      }).pipe(Effect.provide(provider.layer("simple"))),
+    )
+
+    it.live("a tool call is followed by its result", () =>
+      Effect.gen(function* () {
+        const session = yield* (yield* Agent).open(base)
+        const { events } = yield* collect(session)
+        yield* session.turn("run a command")
+        yield* waitFor(events, "TurnEnded")
+        checkStream(events, session.sessionId)
+        const call = events.find((e) => e._tag === "ToolCall")
+        const result = events.find((e) => e._tag === "ToolResult")
+        expect(call && result && call._tag === "ToolCall" && result._tag === "ToolResult" && result.callId === call.callId).toBe(true)
+        expect(result?._tag === "ToolResult" && result.isError).toBe(false)
+      }).pipe(Effect.provide(provider.layer("tool"))),
+    )
+
+    it.live("steer lands in the running turn", () =>
+      Effect.gen(function* () {
+        const session = yield* (yield* Agent).open(base)
+        const { events } = yield* collect(session)
+        yield* session.send("do some slow work")
+        yield* waitFor(events, "ToolCall")
+        const outcome = yield* session.steer("steering note")
+        yield* waitFor(events, "TurnEnded")
+        const { ended } = checkStream(events, session.sessionId)
+        expect(outcome._tag).toBe("Landed")
+        expect(ended).toEqual([outcome.turnId])
+        expect(events.some((e) => e._tag === "MessageLanded" && e.messageId === outcome.messageId && e.turnId === outcome.turnId)).toBe(true)
+        expect(outcomes(events)).toEqual(["Succeeded"])
+      }).pipe(Effect.provide(provider.layer("steer"))),
+    )
+
+    it.live("interrupt ends the turn Interrupted and the session keeps working", () =>
+      Effect.gen(function* () {
+        const session = yield* (yield* Agent).open(base)
+        const { events } = yield* collect(session)
+        yield* session.send("sleep for a long time")
+        yield* waitFor(events, "ToolCall")
+        yield* session.interrupt
+        yield* waitFor(events, "TurnEnded")
+        const next = yield* session.turn("Reply with just the word: pong")
+        yield* waitFor(events, "TurnEnded", 2)
+        checkStream(events, session.sessionId)
+        expect(outcomes(events)).toEqual(["Interrupted", "Succeeded"])
+        expect(next.finalText.length).toBeGreaterThan(0)
+      }).pipe(Effect.provide(provider.layer("interrupt"))),
+    )
+
+    it.live("a message sent during a turn runs as the next turn", () =>
+      Effect.gen(function* () {
+        const session = yield* (yield* Agent).open(base)
+        const { events } = yield* collect(session)
+        const first = yield* session.send("first")
+        yield* waitFor(events, "TurnStarted")
+        const second = yield* session.send("second")
+        yield* waitFor(events, "TurnEnded", 2)
+        const { ended } = checkStream(events, session.sessionId)
+        expect(ended).toHaveLength(2)
+        const landedIn = (id: string) => events.find((e) => e._tag === "MessageLanded" && e.messageId === id)
+        const [a, b] = [landedIn(first), landedIn(second)]
+        expect(a?._tag === "MessageLanded" && b?._tag === "MessageLanded" && a.turnId !== b.turnId).toBe(true)
+        expect(outcomes(events)).toEqual(["Succeeded", "Succeeded"])
+      }).pipe(Effect.provide(provider.layer("queue"))),
+    )
+
+    it.live("the spend cap ends the turn SpendCapReached", () =>
+      Effect.gen(function* () {
+        const session = yield* (yield* Agent).open({ ...base, spendCapUsd: provider.spendCapUsd })
+        const { events } = yield* collect(session)
+        const failure = failureOf(yield* session.turn("spend some money").pipe(Effect.exit))
+        expect(failure).toMatchObject({ _tag: "SpendCapReached", capUsd: provider.spendCapUsd })
+        yield* waitFor(events, "TurnEnded")
+        checkStream(events, session.sessionId)
+        expect(outcomes(events)).toEqual(["SpendCapReached"])
+      }).pipe(Effect.provide(provider.layer("spendCap"))),
+    )
+
+    it.live("process death ends the turn ProcessKilled and fails everything after", () =>
+      Effect.gen(function* () {
+        const session = yield* (yield* Agent).open(base)
+        const { events, fiber } = yield* collect(session)
+        const failure = failureOf(yield* session.turn("sleep").pipe(Effect.exit))
+        expect(failure?._tag).toBe("ProcessKilled")
+        expect(failureOf(yield* session.send("hello?").pipe(Effect.exit))?._tag).toBe("AgentError")
+        expect(failureOf(yield* session.interrupt.pipe(Effect.exit))?._tag).toBe("AgentError")
+        expect(failureOf(yield* Fiber.join(fiber))?._tag).toBe("AgentError")
+        checkStream(events, session.sessionId)
+        expect(outcomes(events)).toEqual(["ProcessKilled"])
+      }).pipe(Effect.provide(provider.layer("killed"))),
+    )
+
+    it.live("a usage limit is UsageLimited with a window and a reset time", () =>
+      Effect.gen(function* () {
+        const session = yield* (yield* Agent).open(base)
+        const { events } = yield* collect(session)
+        const failure = failureOf(yield* session.turn("hello").pipe(Effect.exit))
+        expect(failure?._tag).toBe("UsageLimited")
+        if (failure?._tag !== "UsageLimited") return
+        expect(["five_hour", "weekly"]).toContain(failure.window)
+        expect(failure.resetsAt).not.toBeNull()
+        yield* waitFor(events, "TurnEnded")
+        checkStream(events, session.sessionId)
+      }).pipe(Effect.provide(provider.layer("usageLimit"))),
+    )
+
+    it.live("resuming an unknown session fails open with SessionNotFound", () =>
+      Effect.gen(function* () {
+        const id = SessionId.make(provider.missingId)
+        const failure = failureOf(yield* (yield* Agent).open({ ...base, resume: id }).pipe(Effect.exit))
+        expect(failure).toMatchObject({ _tag: "SessionNotFound", sessionId: id })
+      }).pipe(Effect.provide(provider.layer("resumeMissing"))),
+    )
+
+    it.live("capabilities decode as Capabilities", () =>
+      Effect.gen(function* () {
+        const caps = yield* (yield* Agent).capabilities
+        expect(caps.provider).toBe(provider.name)
+        expect(caps.version).toMatch(/^\d+\.\d+\.\d+/)
+      }).pipe(Effect.provide(provider.layer("simple"))),
+    )
+  })
+}
