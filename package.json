@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "description": "Effect-native control of coding-agent CLIs (Claude Code, Codex): live sessions, steering, typed endings.",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "private": true,
   "repository": {
     "type": "git",
