@@ -5,7 +5,9 @@
  * `AwaitTurn` / `AwaitMessage` after a reattach).
  *
  * Settled messages and turns are remembered (the last `limit` of each), so
- * asking after the fact answers at once.
+ * asking after the fact answers at once. Asking about one that has been
+ * forgotten fails rather than waiting for something that already happened
+ * (ids are remembered as forgotten up to ten times `limit`).
  *
  * @internal
  */
@@ -39,11 +41,15 @@ export interface TurnTracker {
   readonly oldestUnlanded: () => string | null
 }
 
-/** Set `key` in `map`, dropping the oldest entries past `limit`. */
-const remember = <K, V>(map: Map<K, V>, key: K, value: V, limit: number) => {
+/** Set `key` in `map`, dropping the oldest entries past `limit` (each passed to `dropped`). */
+const remember = <K, V>(map: Map<K, V>, key: K, value: V, limit: number, dropped: (key: K) => void) => {
   map.delete(key)
   map.set(key, value)
-  while (map.size > limit) map.delete(map.keys().next().value!)
+  while (map.size > limit) {
+    const oldest = map.keys().next().value!
+    map.delete(oldest)
+    dropped(oldest)
+  }
 }
 
 /** @internal */
@@ -64,11 +70,19 @@ export const make = (options: {
   const landedIn = new Map<string, TurnId>()
   const dropped = new Map<string, string>()
   const outcomes = new Map<string, TurnOutcome>()
+  /** Settled, then dropped to stay within `limit`. */
+  const forgotten = new Set<string>()
+  const forget = (id: string) => {
+    forgotten.add(id)
+    if (forgotten.size > limit * 10) forgotten.delete(forgotten.values().next().value!)
+  }
   const messageWaiters = new Map<string, Deferred.Deferred<TurnId, AgentError | SessionClosed>>()
   const turnWaiters = new Map<string, Deferred.Deferred<TurnOutcome, AgentError | SessionClosed>>()
 
   const droppedError = (messageId: string, reason: string) =>
     error(`message ${messageId} was ${reason} before it reached a turn`)
+  const tooOld = (what: string, id: string) =>
+    error(`${what} ${id} was settled too long ago to look up (the last ${limit} are kept)`)
   const closed = (message: string) => new SessionClosed({ message, provider })
   const neverLanded = (messageId: string) => closed(`the session ended before message ${messageId} reached a turn`)
   const neverEnded = (turnId: string) => closed(`the session ended before turn ${turnId} did`)
@@ -86,21 +100,21 @@ export const make = (options: {
         running = event.turnId
         // Claude names a turn after the message that started it.
         if (unlanded.has(event.turnId)) {
-          remember(landedIn, event.turnId as string, event.turnId, limit)
+          remember(landedIn, event.turnId as string, event.turnId, limit, forget)
           settleMessage(event.turnId, Exit.succeed(event.turnId))
         }
         break
       case "MessageLanded":
-        remember(landedIn, event.messageId as string, event.turnId, limit)
+        remember(landedIn, event.messageId as string, event.turnId, limit, forget)
         settleMessage(event.messageId, Exit.succeed(event.turnId))
         break
       case "MessageDropped":
-        remember(dropped, event.messageId as string, event.reason, limit)
+        remember(dropped, event.messageId as string, event.reason, limit, forget)
         settleMessage(event.messageId, Exit.fail(droppedError(event.messageId, event.reason)))
         break
       case "TurnEnded": {
         if (running === event.turnId) running = null
-        remember(outcomes, event.turnId as string, event.outcome, limit)
+        remember(outcomes, event.turnId as string, event.outcome, limit, forget)
         const waiter = turnWaiters.get(event.turnId)
         turnWaiters.delete(event.turnId)
         if (waiter !== undefined) Deferred.doneUnsafe(waiter, Exit.succeed(event.outcome))
@@ -113,6 +127,7 @@ export const make = (options: {
     Effect.suspend(() => {
       const known = outcomes.get(turnId)
       if (known !== undefined) return Effect.succeed(known)
+      if (forgotten.has(turnId)) return Effect.fail(tooOld("turn", turnId))
       if (ended !== null) return Effect.fail(ended.error ?? neverEnded(turnId))
       let waiter = turnWaiters.get(turnId)
       if (waiter === undefined) {
@@ -128,6 +143,7 @@ export const make = (options: {
       if (turnId !== undefined) return Effect.succeed(turnId)
       const reason = dropped.get(messageId)
       if (reason !== undefined) return Effect.fail(droppedError(messageId, reason))
+      if (forgotten.has(messageId)) return Effect.fail(tooOld("message", messageId))
       if (ended !== null) return Effect.fail(ended.error ?? neverLanded(messageId))
       if (!unlanded.has(messageId)) {
         return Effect.fail(error(`message ${messageId} was not sent through this ${options.owner ?? "session"}`))

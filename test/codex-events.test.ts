@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { DateTime, Option, Schema } from "effect"
 import { AccountStatus, AgentEvent, MessageId, ProcessKilled, TurnId } from "../src/index.ts"
+import { ClaudeAgent } from "../src/claude/index.ts"
 import { CodexAgent, CodexAppServer } from "../src/codex/index.ts"
 import * as CodexEvents from "../src/codex/CodexEvents.ts"
 import type * as P from "../src/codex/protocol.ts"
@@ -246,6 +247,14 @@ describe("helpers", () => {
     expect(built.overrides.developerInstructions).toMatch(/^Be brief\.\n\nDo not spawn sub-agents/)
     expect("baseInstructions" in built.overrides).toBe(false)
     expect(CodexAgent.threadOverrides({ cwd: "/w", disable: { tools: ["apply_patch"] } })).toMatchObject({ error: expect.stringMatching(/apply_patch/) })
+  })
+
+  it("removes the same nesting markers as Claude; credentials pass through", () => {
+    const host = { AI_AGENT: "claude-code", CLAUDE_CODE_SESSION_ID: "p", CLAUDE_CODE_OAUTH_TOKEN: "token", CLAUDE_CONFIG_DIR: "/c" }
+    expect(CodexAgent.sessionEnv(host)).toEqual({ AI_AGENT: undefined, CLAUDE_CODE_SESSION_ID: undefined })
+    expect(Object.keys(ClaudeAgent.buildEnv(host)).sort()).toEqual(["CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "ENABLE_CLAUDEAI_MCP_SERVERS"])
+    // An override wins over removal.
+    expect(CodexAgent.sessionEnv(host, { AI_AGENT: "mine" })).toMatchObject({ AI_AGENT: "mine" })
   })
 
   it("removes nesting markers and applies env overrides", () => {

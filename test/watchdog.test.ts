@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Fiber, Stream } from "effect"
+import { Deferred, Effect, Fiber, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { type AgentEvent, TurnId, Watchdog } from "../src/index.ts"
 
@@ -85,6 +85,41 @@ describe("Watchdog", () => {
       const fiber = yield* Effect.scoped(setup({ idle: "1 second" })).pipe(Effect.forkChild)
       yield* Fiber.join(fiber)
       yield* TestClock.adjust("1 minute")
+    }),
+  )
+})
+
+describe("Watchdog.supervise", () => {
+  const supervised = (turnEnds: boolean) =>
+    Effect.gen(function* () {
+      const dog = yield* Watchdog.make({ idle: "10 seconds" })
+      const log: Array<string> = []
+      const ended = yield* Deferred.make<void>()
+      yield* Watchdog.supervise(dog, {
+        grace: "5 seconds",
+        stall: (expiry) => Effect.sync(() => (log.push(`stall ${expiry.turnId}`), true)),
+        // A wedged process: the interrupt never returns.
+        interrupt: () => Effect.sync(() => log.push("interrupt")).pipe(Effect.andThen(Effect.never)),
+        turnEnded: () => Deferred.await(ended),
+        kill: Effect.sync(() => log.push("kill")),
+      })
+      yield* Effect.yieldNow
+      yield* dog.observe(started)
+      yield* TestClock.adjust("11 seconds")
+      if (turnEnds) yield* Deferred.succeed(ended, undefined)
+      yield* TestClock.adjust("6 seconds")
+      return log
+    }).pipe(Effect.scoped)
+
+  it.effect("a hung interrupt doesn't hold up the kill after the grace period", () =>
+    Effect.gen(function* () {
+      expect(yield* supervised(false)).toEqual(["stall t1", "interrupt", "kill"])
+    }),
+  )
+
+  it.effect("no kill when the turn ends within the grace period", () =>
+    Effect.gen(function* () {
+      expect(yield* supervised(true)).toEqual(["stall t1", "interrupt"])
     }),
   )
 })

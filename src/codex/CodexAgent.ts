@@ -823,12 +823,15 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
 
   // ---- public API ----
 
-  /** Queue a message (at the front for a steer) and start it if nothing is running. */
-  const enqueue = (input: string, front: boolean) =>
+  /**
+   * Queue a message (at the front for a steer) and start it if nothing is
+   * running. A steer that lost its turn keeps the id it was steered with.
+   */
+  const enqueue = (input: string, front: boolean, messageId: MessageId = Session.newMessageId()) =>
     Effect.suspend(() => {
       const error = unavailable()
       if (error !== null) return Effect.fail(error)
-      const q: Queued = { messageId: Session.newMessageId(), input, started: Deferred.makeUnsafe() }
+      const q: Queued = { messageId, input, started: Deferred.makeUnsafe() }
       if (front) queue.unshift(q)
       else queue.push(q)
       return Effect.as(startNext, q)
@@ -858,8 +861,8 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
     if (error !== null) return yield* error
     if (state.capReached !== null) return yield* agentError(capFailure(state.capReached).message)
     const run = state.run
+    const messageId = Session.newMessageId()
     if (steerable(run)) {
-      const messageId = Session.newMessageId()
       state = addSteer(state, run.seq, messageId)
       const exit = yield* timed(
         "turn/steer",
@@ -874,7 +877,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
       if (!stale) return yield* causeError("turn/steer failed", exit.cause)
       // The turn ended first: this message starts the next turn, ahead of anything queued.
     }
-    const q = yield* enqueue(input, true)
+    const q = yield* enqueue(input, true, messageId)
     const turnId = yield* Deferred.await(q.started).pipe(Effect.mapError(asAgentError))
     return { _tag: "StartedNewTurn", messageId: q.messageId, turnId } satisfies SteerOutcome
   })

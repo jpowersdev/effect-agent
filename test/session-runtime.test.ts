@@ -97,13 +97,20 @@ describe("TurnTracker", () => {
     }),
   )
 
-  it("remembers at most `limit` settled turns", () => {
-    const turns = TurnTracker.make({ provider: "test", limit: 2 })
-    for (const id of ["a", "b", "c"]) turns.observe({ ...ended, turnId: TurnId.make(id) })
-    turns.end(null)
-    const known = (id: string) => Exit.isSuccess(Effect.runSyncExit(turns.outcome(id)))
-    expect(["a", "b", "c"].map(known)).toEqual([false, true, true])
-  })
+  it.effect("remembers at most `limit` settled turns; asking about a forgotten one fails at once", () =>
+    Effect.gen(function* () {
+      const turns = TurnTracker.make({ provider: "test", limit: 2 })
+      for (const id of ["a", "b", "c"]) {
+        turns.observe({ _tag: "MessageLanded", messageId: MessageId.make(`m-${id}`), turnId: TurnId.make(id), raw: null })
+        turns.observe({ ...ended, turnId: TurnId.make(id) })
+      }
+      expect((yield* turns.outcome("c"))._tag).toBe("Succeeded")
+      expect(yield* turns.landing("m-b")).toBe("b")
+      // Still running, so waiting would be forever: it fails instead.
+      expect((yield* Effect.flip(turns.outcome("a"))).message).toMatch(/turn a was settled too long ago/)
+      expect((yield* Effect.flip(turns.landing("m-a"))).message).toMatch(/message m-a was settled too long ago/)
+    }),
+  )
 })
 
 describe("Recorder", () => {

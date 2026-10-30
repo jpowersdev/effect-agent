@@ -44,13 +44,16 @@ describe("ClaudeAgent.buildEnv", () => {
     CLAUDE_CODE_MESSAGING_TOKEN: "secret",
     CLAUDE_PID: "42",
     AI_AGENT: "claude-code_2-1-301_agent",
+    CODEX_THREAD_ID: "parent-thread",
+    CODEX_SESSION_ID: "parent-session",
     CLAUDE_CODE_OAUTH_TOKEN: "keep-me",
     ENABLE_CLAUDEAI_MCP_SERVERS: "true",
   }
 
   it("removes nesting markers but keeps real configuration", () => {
     const env = ClaudeAgent.buildEnv(host)
-    for (const k of ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID", "AI_AGENT"]) {
+    // A parent Codex session's markers too.
+    for (const k of ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID", "AI_AGENT", "CODEX_THREAD_ID", "CODEX_SESSION_ID"]) {
       expect(env).not.toHaveProperty(k)
     }
     expect(env).toMatchObject({ PATH: "/bin", HOME: "/home/u", CLAUDE_CODE_OAUTH_TOKEN: "keep-me" })
