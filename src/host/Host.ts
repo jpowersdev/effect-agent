@@ -12,7 +12,8 @@
  * death so connected clients get the last events. It removes its socket and
  * manifest on the way out; the events file stays for `retainEvents`.
  */
-import { NodeSocket, NodeSocketServer } from "@effect/platform-node"
+import * as NodeSocket from "@effect/platform-node/NodeSocket"
+import * as NodeSocketServer from "@effect/platform-node/NodeSocketServer"
 import { Cause, Context, DateTime, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, PubSub, Schema, Scope, Stream } from "effect"
 import { RpcSerialization, RpcServer } from "effect/rpc"
 import { SocketServer } from "effect/socket"

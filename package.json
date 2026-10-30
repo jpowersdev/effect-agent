@@ -9,12 +9,28 @@
     "type": "git",
     "url": "git+https://github.com/jpowersdev/effect-agent.git"
   },
+  "sideEffects": [
+    "./src/host/main.ts",
+    "./dist/host/main.js",
+    "./dist/host/main.bundle.js"
+  ],
   "exports": {
-    ".": "./src/index.ts",
-    "./claude": "./src/claude/index.ts",
-    "./codex": "./src/codex/index.ts",
-    "./host": "./src/host/index.ts"
+    "./package.json": "./package.json",
+    ".": "./dist/index.js",
+    "./claude": "./dist/claude/index.js",
+    "./codex": "./dist/codex/index.js",
+    "./host": "./dist/host/index.js"
   },
+  "files": [
+    "src/**/*.ts",
+    "dist/**/*.js",
+    "dist/**/*.js.map",
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map",
+    "!dist/host/main.bundle.js.map",
+    "README.md",
+    "LICENSE"
+  ],
   "engines": {
     "node": ">=24"
   },
@@ -23,7 +39,11 @@
     "test": "vitest run",
     "live:claude": "node scripts/live-claude.ts",
     "live:codex": "node scripts/live-codex.ts",
-    "live:reattach": "node scripts/live-reattach.ts"
+    "live:reattach": "node scripts/live-reattach.ts",
+    "build": "pnpm build:tsc && pnpm build:babel && pnpm build:host",
+    "build:tsc": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build:babel": "babel dist --plugins annotate-pure-calls --out-dir dist --source-maps",
+    "build:host": "rollup -c"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.312",
@@ -31,8 +51,16 @@
     "effect": "4.1.0"
   },
   "devDependencies": {
+    "@babel/cli": "^8.0.6",
+    "@babel/core": "^8.0.9",
     "@effect/vitest": "4.1.0",
+    "@rollup/plugin-commonjs": "^29.0.3",
+    "@rollup/plugin-node-resolve": "^16.0.3",
     "@types/node": "^26.6.6",
+    "babel-plugin-annotate-pure-calls": "^0.5.0",
+    "esbuild": "^0.28.2",
+    "rollup": "^4.66.0",
+    "rollup-plugin-esbuild": "^6.2.1",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
   }

@@ -154,6 +154,8 @@ const session = yield* (yield* AgentHosts).attach(sessionId, { hooks: { beforeTo
 
 **A SIGKILLed host** (`kill -9`, the OOM killer) can't run any cleanup. Its agent process, and the commands that agent started, may be left running: Node has no parent-death signal, and the host is the only thing that would have stopped them. Stopping them is up to you, since they are your process tree. Either run hosts under a cgroup `Launcher` (a systemd scope, as above), so that stopping the scope stops the host, the agent and its commands together, or have your own supervisor reap them. The host's socket and manifest stay behind until `list` or `attach` notices the dead pid. Its events file has no ending line (see above).
 
+**Startup:** each session starts one host process. The published package runs a single-file bundle of the host (`dist/host/main.bundle.js`), which is ready in about 0.1 s versus about 0.25 s for the per-file build, because module loading dominates startup. To run it under another runtime, set `hostCommand`, e.g. `{ command: "bun", args: [RemoteAgent.mainPath] }`; Bun saves little more once the host is bundled.
+
 `node scripts/live-reattach.ts` checks this end to end with the real CLIs: process A starts a slow turn and exits mid-turn; process B attaches, catches up, and drops its connection mid-turn twice: once while A's turn runs, once during a `turn()` call. Both turns' results still arrive, the subscription sees every event exactly once, and it matches the events file read back with `AgentHosts.events` after the host has exited.
 
 ## Testing
@@ -171,6 +173,14 @@ Record with the transports' `record` option. Claude recordings also capture SDK 
 pnpm typecheck && pnpm test
 node scripts/live-claude.ts   # live, against the real CLIs (small cost)
 node scripts/live-codex.ts
+```
+
+## Building
+
+The package is built like Effect's: `tsc -p tsconfig.build.json` emits one ESM module per source file into `dist/` (with `.d.ts` files and source maps; `.ts` imports are rewritten to `.js`), and Babel adds pure-call annotations so bundlers can tree-shake. The library is not bundled. The only bundle is the session host, built with rollup and esbuild (`rollup.config.mjs`), because it is started as its own process per session. The package ships `src/` too, for go-to-source.
+
+```sh
+pnpm build   # build:tsc, build:babel, build:host
 ```
 
 ## License

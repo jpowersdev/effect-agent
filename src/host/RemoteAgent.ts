@@ -27,7 +27,7 @@
  * `Launcher.ts`); it applies to the host command, so the host and the agent
  * CLI it runs live in that scope.
  */
-import { NodeSocket } from "@effect/platform-node"
+import * as NodeSocket from "@effect/platform-node/NodeSocket"
 import { Cause, Context, Deferred, Duration, Effect, Exit, Layer, Option, Schedule, Schema, Scope, Stream } from "effect"
 import { RpcClient, RpcClientError, RpcSerialization } from "effect/rpc"
 import { Socket } from "effect/socket"
@@ -58,7 +58,18 @@ import {
 } from "./HostSpec.ts"
 import { type EventsTrimmed, type HookName, type HookRequest, type HostInfo, HostRpcs, type SeqEvent } from "./protocol.ts"
 
-export const mainPath = fileURLToPath(new URL("./main.ts", import.meta.url))
+const sibling = (file: string) => fileURLToPath(new URL(file, import.meta.url))
+
+/**
+ * The host entry point: `main.ts` when running from source; in the build, the
+ * single-file `main.bundle.js` (about 2x faster to start) when present, else
+ * `main.js`. A URL isn't rewritten like an import, hence the explicit choice.
+ */
+export const mainPath = import.meta.url.endsWith(".ts")
+  ? sibling("./main.ts")
+  : existsSync(sibling("./main.bundle.js"))
+    ? sibling("./main.bundle.js")
+    : sibling("./main.js")
 
 export interface RemoteAgentOptions extends ProviderSpec {
   /** Where hosts keep their sockets, manifests and logs. Default `HostSpec.defaultDir()`. */
@@ -103,7 +114,7 @@ export interface RemoteAgentOptions extends ProviderSpec {
   readonly orphanTimeout?: Duration.Input
   /** How long a host keeps serving after its session ends. Default 5 seconds. */
   readonly linger?: Duration.Input
-  /** The command that runs `main.ts`. Default `node <path to main.ts>`. */
+  /** The command that runs the host entry point. Default `node <mainPath>`. */
   readonly hostCommand?: Launcher.Command
   /** How long `open` waits for the host to report it is ready. Default 60 seconds. */
   readonly readyTimeout?: Duration.Input

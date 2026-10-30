@@ -6,7 +6,7 @@
  * that serialize, `RunOptions` without hooks (durations as strings such as
  * `"30 seconds"` or millis), and the host's own settings.
  */
-import { NodeServices } from "@effect/platform-node"
+import * as NodeServices from "@effect/platform-node/NodeServices"
 import { Duration, Layer, Option, Schema } from "effect"
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
