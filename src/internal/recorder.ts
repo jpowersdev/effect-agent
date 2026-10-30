@@ -27,23 +27,36 @@ export const none: Recorder = { record: () => {}, flush: Effect.void }
  *
  * @internal
  */
-export const make = Effect.fnUntraced(function* (path: string, options: { readonly truncate: boolean }) {
+export const make = Effect.fnUntraced(function* (
+  path: string,
+  options: {
+    readonly truncate: boolean
+    /** Appends `data` to the file. Tests use it to slow a write down. */
+    readonly append?: (path: string, data: string) => Promise<void>
+  },
+) {
+  const append = options.append ?? appendFile
   yield* Effect.tryPromise(async () => {
     await mkdir(dirname(path), { recursive: true })
     if (options.truncate) await writeFile(path, "")
   })
   let buffer: Array<string> = []
-  // One write at a time, so concurrent flushes can't reorder lines.
+  // One write at a time, so concurrent flushes can't reorder lines. A write,
+  // once its lines are taken from the buffer, finishes before the next one
+  // starts, even if its flush is interrupted (as the periodic one is when the
+  // Scope closes): the promise would run on regardless.
   const lock = yield* Semaphore.make(1)
   const flush = lock.withPermit(
-    Effect.suspend(() => {
-      if (buffer.length === 0) return Effect.void
-      const data = buffer.join("")
-      buffer = []
-      return Effect.tryPromise(() => appendFile(path, data)).pipe(
-        Effect.catch((error) => Effect.logError(`cannot write recording ${path}`, error)),
-      )
-    }),
+    Effect.uninterruptible(
+      Effect.suspend(() => {
+        if (buffer.length === 0) return Effect.void
+        const data = buffer.join("")
+        buffer = []
+        return Effect.tryPromise(() => append(path, data)).pipe(
+          Effect.catch((error) => Effect.logError(`cannot write recording ${path}`, error)),
+        )
+      }),
+    ),
   )
   yield* Effect.addFinalizer(() => flush)
   yield* flush.pipe(Effect.repeat(Schedule.spaced("200 millis")), Effect.forkScoped)

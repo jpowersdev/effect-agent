@@ -63,7 +63,7 @@ const scripted = Effect.gen(function* () {
   const notify = (method: string, params: unknown) => Effect.asVoid(rpc.dispatch({ method, params }))
   const turn = (id: string, status: P.TurnStatus = "inProgress"): P.Turn => ({ id, items: [], status, error: null })
   const started = (id: string) => notify("turn/started", { threadId, turn: turn(id) })
-  const completed = (id: string) => notify("turn/completed", { threadId, turn: turn(id, "completed") })
+  const completed = (id: string, status: P.TurnStatus = "completed") => notify("turn/completed", { threadId, turn: turn(id, status) })
   const landed = (turnId: string, clientId: string) =>
     notify("item/started", { threadId, turnId, item: { type: "userMessage", id: `item-${clientId}`, clientId, content: [] } })
 
@@ -72,7 +72,7 @@ const scripted = Effect.gen(function* () {
       Layer.succeed(CodexAppServer.CodexAppServer, CodexAppServer.CodexAppServer.of({ connect: () => Effect.succeed(connection), version: Effect.succeed("0.162.1") })),
     ),
   )
-  return { next, idle, started, completed, landed, layer }
+  return { next, idle, notify, started, completed, landed, layer }
 })
 
 type Server = Effect.Success<typeof scripted>
@@ -117,6 +117,39 @@ describe("CodexAgent session races", () => {
       const nextStart = yield* server.next("turn/start")
       expect(nextStart.params.clientUserMessageId).toBe(queued)
       expect(stuck.method).toBe("turn/start")
+    }).pipe(Effect.scoped),
+  )
+
+  it.effect("a turn/start that times out after its turn started keeps that turn, even mid-completion", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted
+      const session = yield* open(server)
+      const first = yield* session.turn("first").pipe(Effect.exit, Effect.forkScoped)
+      const start = yield* server.next("turn/start")
+      // app-server runs the turn but its answer to turn/start never comes.
+      yield* server.started("t-1")
+      yield* server.landed("t-1", start.params.clientUserMessageId as string)
+      yield* server.notify("item/started", {
+        threadId,
+        turnId: "t-1",
+        item: { type: "commandExecution", id: "cmd-1", command: "sleep 60", cwd: "/w", processId: null, status: "inProgress", commandActions: [], aggregatedOutput: null, exitCode: null },
+      })
+      const second = yield* session.turn("second").pipe(Effect.exit, Effect.forkScoped)
+      // It ends interrupted with a command started, so the session looks for that command first...
+      yield* server.completed("t-1", "interrupted")
+      yield* server.next("thread/backgroundTerminals/list")
+      // ...and while it does, turn/start times out. The turn it started is still t-1.
+      yield* TestClock.adjust("61 seconds")
+      yield* TestClock.adjust("2 seconds")
+      const ended = yield* Fiber.join(first)
+      expect(Exit.isFailure(ended) && Option.getOrUndefined(Exit.findErrorOption(ended))).toMatchObject({ _tag: "Interrupted" })
+      // Only now does the queued message start, as the next turn.
+      const next = yield* server.next("turn/start")
+      yield* next.reply({ turn: { id: "t-2", items: [], status: "inProgress", error: null } } satisfies P.TurnStartResponse)
+      yield* server.started("t-2")
+      yield* server.completed("t-2")
+      const outcome = yield* Fiber.join(second)
+      expect(Exit.isSuccess(outcome) && outcome.value).toMatchObject({ _tag: "Succeeded", turnId: "t-2" })
     }).pipe(Effect.scoped),
   )
 

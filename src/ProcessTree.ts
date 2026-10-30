@@ -86,8 +86,9 @@ export const markedProcesses = (marker: string): Array<number> => {
 
 /**
  * SIGTERM the process group of `pid` (when given) and every process carrying
- * `marker`, then SIGKILL whatever is left after `grace`. A no-op once they are
- * all gone.
+ * `marker`, then SIGKILL whatever is left after `grace`. Processes they start
+ * while stopping (carrying the marker) are found and stopped too. A no-op once
+ * they are all gone.
  *
  * @since 0.1.0
  * @category utils
@@ -98,21 +99,33 @@ export const kill = (
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
     const group = options.pid !== undefined ? -options.pid : undefined
-    // One sweep of /proc to find them; after that, only those pids are checked.
-    const marked = markedProcesses(marker)
-    const send = (pids: ReadonlyArray<number>, sig: NodeJS.Signals | 0) => {
+    /** Marked processes signalled so far. /proc is swept only when they have all gone. */
+    const known = new Set(markedProcesses(marker))
+    const send = (sig: NodeJS.Signals | 0) => {
       let alive = group !== undefined ? signal(group, sig) : false
-      for (const p of pids) alive = signal(p, sig) || alive
+      for (const p of known) alive = signal(p, sig) || alive
       return alive
     }
-    if (!send(marked, "SIGTERM")) return
-    const exited = yield* Effect.sync(() => !send(marked, 0)).pipe(
+    /** Look again: a process may have started more (with the marker) while it was stopping. */
+    const sweep = () => {
+      const found = markedProcesses(marker).filter((p) => !known.has(p))
+      for (const p of found) known.add(p)
+      return found.length > 0
+    }
+    if (!send("SIGTERM") && !sweep()) return
+    send("SIGTERM")
+    const done = yield* Effect.sync(() => {
+      if (send(0)) return false
+      if (!sweep()) return true
+      send("SIGTERM")
+      return false
+    }).pipe(
       Effect.repeat({ schedule: Schedule.spaced("50 millis"), until: (gone) => gone }),
       Effect.timeoutOption(options.grace ?? Duration.seconds(3)),
     )
-    if (exited._tag === "Some") return
-    // Sweep again for the SIGKILL: anything started during the grace period goes too.
-    send([...new Set([...marked, ...markedProcesses(marker)])], "SIGKILL")
+    if (done._tag === "Some") return
+    sweep()
+    send("SIGKILL")
   })
 
 /**

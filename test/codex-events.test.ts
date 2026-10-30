@@ -501,6 +501,7 @@ describe("CodexAgent.step", () => {
     // Not announced yet: the TurnStarted comes first.
     expect(completed.events).toMatchObject([{ _tag: "TurnStarted", turnId: "t-1" }])
     const done = CodexAgent.completeTurn({ cap: null }, completed.state, {
+      seq: completed.state.run!.seq,
       turn: turn("completed"),
       raw: null as never,
       price: undefined,
@@ -536,10 +537,19 @@ describe("CodexAgent.step", () => {
     expect(exited.events).toMatchObject([{ _tag: "TurnEnded", outcome: { _tag: "Stalled", inTool: true } }])
   })
 
-  it("a failed turn/start frees the run only if it is still that run", () => {
+  it("a failed turn/start frees the run only if it is still that run, and not once its turn started", () => {
     const claimed = CodexAgent.startRun(CodexAgent.initialState, messageId)
     const seq = claimed.run!.seq
-    expect(CodexAgent.runFailed(claimed, seq).run).toBeNull()
-    expect(CodexAgent.runFailed(claimed, seq + 1).run).not.toBeNull()
+    expect(CodexAgent.runFailed(claimed, seq)).toEqual({ state: { ...claimed, run: null }, running: null })
+    expect(CodexAgent.runFailed(claimed, seq + 1).state.run).not.toBeNull()
+    const announced = CodexAgent.step(stepCtx(), claimed, note("turn/started", { threadId, turn: turn("inProgress") })).state
+    expect(CodexAgent.runFailed(announced, seq)).toEqual({ state: announced, running: "t-1" })
+  })
+
+  it("completeTurn only ends the run it was issued for", () => {
+    const state = running()
+    const input = { turn: turn("completed"), raw: null as never, price: undefined, rateLimits: null, processExit: null }
+    expect(CodexAgent.completeTurn({ cap: null }, state, { ...input, seq: state.run!.seq + 1 })).toEqual({ state, events: [] })
+    expect(CodexAgent.completeTurn({ cap: null }, state, { ...input, seq: state.run!.seq }).events).toHaveLength(1)
   })
 })

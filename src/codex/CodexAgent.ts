@@ -320,12 +320,18 @@ export const runStarted = (state: State, seq: number, turnId: string): State =>
   updateRun(state, seq, (run) => ({ ...run, turnId: run.turnId ?? TurnId.make(turnId) }))
 
 /**
- * `turn/start` failed: no turn is running.
+ * `turn/start` failed (or timed out). If app-server announced the turn
+ * anyway (`turn/started`), it is running: keep it and return its id.
+ * Otherwise no turn is running.
  *
  * @internal
  */
-export const runFailed = (state: State, seq: number): State =>
-  state.run?.seq === seq ? { ...state, run: null } : state
+export const runFailed = (state: State, seq: number): { readonly state: State; readonly running: TurnId | null } => {
+  const run = state.run
+  if (run === null || run.seq !== seq) return { state, running: null }
+  if (run.announced && run.turnId !== null) return { state, running: run.turnId }
+  return { state: { ...state, run: null }, running: null }
+}
 
 /**
  * Whether `steer` can go into the running turn.
@@ -504,6 +510,8 @@ export const completeTurn = (
   ctx: Pick<StepContext, "cap">,
   state: State,
   input: {
+    /** The run `Complete` was issued for. */
+    readonly seq: number
     readonly turn: P.Turn
     readonly raw: P.Incoming
     readonly price: Pricing.ModelPrice | undefined
@@ -512,7 +520,8 @@ export const completeTurn = (
   },
 ): { readonly state: State; readonly events: ReadonlyArray<AgentEvent> } => {
   const run = state.run
-  if (run === null || run.turnId === null) return { state, events: [] }
+  // Only the run the completion was for: if it was ended meanwhile (app-server died), nothing to do.
+  if (run === null || run.seq !== input.seq || run.turnId === null) return { state, events: [] }
   const { turn } = input
   const messages =
     run.agentMessages.length > 0
@@ -709,7 +718,13 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
       Effect.matchCauseEffect({
         onFailure: (cause) =>
           Effect.suspend(() => {
-            state = runFailed(state, seq)
+            const failed = runFailed(state, seq)
+            state = failed.state
+            // The answer was lost, but the turn is running: it ends as any turn does.
+            if (failed.running !== null) {
+              Deferred.doneUnsafe(q.started, Exit.succeed(failed.running))
+              return Effect.void
+            }
             Deferred.doneUnsafe(q.started, Exit.fail(causeError("turn/start failed", cause)))
             return startNext
           }),
@@ -760,7 +775,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
             ? Option.getOrNull(yield* timed("account/rateLimits/read", conn.request("account/rateLimits/read", undefined)).pipe(Effect.option))
             : null
           const processExit = needs.processExit ? Option.getOrNull(yield* conn.exit.pipe(Effect.timeoutOption(Duration.seconds(1)))) : null
-          const done = completeTurn({ cap }, state, { turn: c.turn, raw: c.raw, price, rateLimits, processExit })
+          const done = completeTurn({ cap }, state, { seq: run.seq, turn: c.turn, raw: c.raw, price, rateLimits, processExit })
           state = done.state
           yield* runtime.emitAll(done.events)
           yield* startNext

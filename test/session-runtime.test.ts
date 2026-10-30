@@ -111,9 +111,45 @@ describe("TurnTracker", () => {
       expect((yield* Effect.flip(turns.landing("m-a"))).message).toMatch(/message m-a was settled too long ago/)
     }),
   )
+
+  it.effect("a forgotten turn still fails at once however many turns come after it", () =>
+    Effect.gen(function* () {
+      const turns = TurnTracker.make({ provider: "test", limit: 2 })
+      for (let i = 0; i < 100; i++) turns.observe({ ...ended, turnId: TurnId.make(`t${i}`) })
+      const old = yield* turns.outcome("t0").pipe(Effect.flip, Effect.timeoutOption("1 second"))
+      expect(old._tag === "Some" && old.value.message).toMatch(/settled too long ago/)
+    }),
+  )
 })
 
 describe("Recorder", () => {
+  it.live("a write in flight when the scope closes finishes before the last one", () =>
+    Effect.gen(function* () {
+      const path = join(mkdtempSync(join(tmpdir(), "ea-rec-")), "rec.jsonl")
+      const writes: Array<string> = []
+      let first = true
+      // The first write is slow; a later one must still land after it.
+      const append = async (_path: string, data: string) => {
+        if (first) {
+          first = false
+          await new Promise((resolve) => setTimeout(resolve, 300))
+        }
+        writes.push(data)
+      }
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const recorder = yield* Recorder.make(path, { truncate: true, append })
+          recorder.record({ i: 0 })
+          // The periodic flush picks up the first line and starts its slow write...
+          yield* Effect.sleep("250 millis")
+          // ...and this one is written when the scope closes, interrupting that flush.
+          recorder.record({ i: 1 })
+        }),
+      )
+      expect(writes).toEqual(['{"i":0}\n', '{"i":1}\n'])
+    }),
+  )
+
   it.live("writes lines in order, truncating first, and flushes when its scope closes", () =>
     Effect.gen(function* () {
       const path = join(mkdtempSync(join(tmpdir(), "ea-rec-")), "nested", "rec.jsonl")

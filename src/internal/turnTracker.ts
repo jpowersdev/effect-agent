@@ -6,8 +6,9 @@
  *
  * Settled messages and turns are remembered (the last `limit` of each), so
  * asking after the fact answers at once. Asking about one that has been
- * forgotten fails rather than waiting for something that already happened
- * (ids are remembered as forgotten up to ten times `limit`).
+ * forgotten fails rather than waiting for something that already happened:
+ * a forgotten id is kept for the life of the tracker (just the id; the
+ * outcome, with its final text, is what `limit` bounds).
  *
  * @internal
  */
@@ -70,11 +71,10 @@ export const make = (options: {
   const landedIn = new Map<string, TurnId>()
   const dropped = new Map<string, string>()
   const outcomes = new Map<string, TurnOutcome>()
-  /** Settled, then dropped to stay within `limit`. */
+  /** Settled, then dropped to stay within `limit`. Never dropped: waiting on one would never end. */
   const forgotten = new Set<string>()
   const forget = (id: string) => {
     forgotten.add(id)
-    if (forgotten.size > limit * 10) forgotten.delete(forgotten.values().next().value!)
   }
   const messageWaiters = new Map<string, Deferred.Deferred<TurnId, AgentError | SessionClosed>>()
   const turnWaiters = new Map<string, Deferred.Deferred<TurnOutcome, AgentError | SessionClosed>>()
