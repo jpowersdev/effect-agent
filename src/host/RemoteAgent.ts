@@ -1,10 +1,17 @@
 /**
  * Sessions that outlive the process that started them. Each session runs in
- * its own host process (`main.ts`), started detached; clients talk to it over
- * a unix socket, and any process can `attach` to it again by session id,
- * catch up on the events it missed, and keep controlling it.
+ * its own host process, started detached; clients talk to it over a unix
+ * socket, and any process can `attach` to it again by session id, catch up on
+ * the events it missed, and keep controlling it.
  *
- *   const layer = RemoteAgent.layer({ provider: "claude", onScopeClose: "detach" })
+ * The host process runs your own entry point, which runs `SessionHost.run`
+ * (see `SessionHost.ts`); `host` says how to start it:
+ *
+ *   const layer = RemoteAgent.layer({
+ *     provider: "claude",
+ *     host: { command: process.execPath, args: [fileURLToPath(new URL("./host.ts", import.meta.url))] },
+ *     onScopeClose: "detach",
+ *   })
  *
  *   // process A
  *   const session = yield* (yield* Agent).open({ cwd })
@@ -35,7 +42,6 @@ import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { closeSync, existsSync, openSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
-import { fileURLToPath } from "node:url"
 import { Agent, type AgentSession, type Hooks, type RunOptions } from "../Agent.ts"
 import { AgentError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnSucceeded } from "../AgentEvent.ts"
@@ -57,19 +63,6 @@ import {
   socketPath,
 } from "./HostSpec.ts"
 import { type EventsTrimmed, type HookName, type HookRequest, type HostInfo, HostRpcs, type SeqEvent } from "./protocol.ts"
-
-const sibling = (file: string) => fileURLToPath(new URL(file, import.meta.url))
-
-/**
- * The host entry point: `main.ts` when running from source; in the build, the
- * single-file `main.bundle.js` (about 2x faster to start) when present, else
- * `main.js`. A URL isn't rewritten like an import, hence the explicit choice.
- */
-export const mainPath = import.meta.url.endsWith(".ts")
-  ? sibling("./main.ts")
-  : existsSync(sibling("./main.bundle.js"))
-    ? sibling("./main.bundle.js")
-    : sibling("./main.js")
 
 export interface RemoteAgentOptions extends ProviderSpec {
   /** Where hosts keep their sockets, manifests and logs. Default `HostSpec.defaultDir()`. */
@@ -114,8 +107,11 @@ export interface RemoteAgentOptions extends ProviderSpec {
   readonly orphanTimeout?: Duration.Input
   /** How long a host keeps serving after its session ends. Default 5 seconds. */
   readonly linger?: Duration.Input
-  /** The command that runs the host entry point. Default `node <mainPath>`. */
-  readonly hostCommand?: Launcher.Command
+  /**
+   * How to start a host process: a command that runs your entry point, which
+   * runs `SessionHost.run`. The `Launcher`, if any, wraps it.
+   */
+  readonly host: Launcher.Command
   /** How long `open` waits for the host to report it is ready. Default 60 seconds. */
   readonly readyTimeout?: Duration.Input
   /**
@@ -279,7 +275,7 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
       const retainEvents = Duration.fromInputUnsafe(options.retainEvents ?? hostDefaults.retainEvents)
       const prune = () => pruneEvents(dir, retainEvents)
       const readyTimeout = options.readyTimeout ?? Duration.seconds(60)
-      const hostCommand = options.hostCommand ?? { command: process.execPath, args: [mainPath] }
+      const hostCommand = options.host
       const local = Context.get(yield* Layer.build(providerLayer(options)), Agent)
       const layerLauncher = yield* Effect.serviceOption(Launcher.Launcher)
 

@@ -17,6 +17,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Hooks } from "../src/index.ts"
 import { AgentHosts, HostProtocol, HostSpec, RemoteAgent } from "../src/host/index.ts"
+import { host } from "./support/hostCommand.ts"
 
 const dir = mkdtempSync(join(tmpdir(), "ea-hooks-"))
 const started = new Set<number>()
@@ -38,7 +39,7 @@ afterAll(() => {
 
 const cwd = "/tmp/effect-agent-replay"
 const layer = (options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
-  RemoteAgent.layer({
+  RemoteAgent.layer({ host,
     provider: "claude",
     replay: join(import.meta.dirname, "fixtures", "claude", "simple-turn.jsonl"),
     dir,
@@ -267,7 +268,7 @@ describe("remote hooks", () => {
 describe("remote hooks over a recording with hook calls", () => {
   const prompt = "Use the Bash tool once to run `echo hello`, then reply with the secret word."
   const replayLayer = (hookLog: string, options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
-    RemoteAgent.layer({
+    RemoteAgent.layer({ host,
       provider: "claude",
       replay: join(import.meta.dirname, "fixtures", "claude", "hooks.jsonl"),
       replayHookLog: hookLog,

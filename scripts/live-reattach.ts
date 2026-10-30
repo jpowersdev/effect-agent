@@ -36,6 +36,7 @@ import { fileURLToPath } from "node:url"
 import { Duration, Effect, Fiber, Option, Ref, Stream } from "effect"
 import { type RunOptions, SessionId, TurnId } from "../src/index.ts"
 import { AgentHosts, HostSpec, RemoteAgent, type SeqEvent } from "../src/host/index.ts"
+import { host } from "../test/support/hostCommand.ts"
 
 const root = "/tmp/effect-agent-live/reattach"
 const dir = join(root, "hosts")
@@ -58,6 +59,7 @@ const isAlive = (pid: number) => {
 
 const options = (provider: Provider): RemoteAgent.RemoteAgentOptions => ({
   provider,
+  host,
   dir,
   onScopeClose: "detach",
   ...(provider === "claude" && { claude: { model: "claude-haiku-5-5" } }),

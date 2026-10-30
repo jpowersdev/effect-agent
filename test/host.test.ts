@@ -11,6 +11,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Agent, AgentError, MessageId, SessionId, SessionNotFound, type TurnId, UsageLimited } from "../src/index.ts"
 import { AgentHosts, EventsTrimmed, HostSpec, RemoteAgent } from "../src/host/index.ts"
+import { host } from "./support/hostCommand.ts"
 
 const dir = mkdtempSync(join(tmpdir(), "ea-host-"))
 const started = new Set<number>()
@@ -62,7 +63,7 @@ const timeout = 30_000
 
 for (const p of providers) {
   const layer = (name: string, options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
-    RemoteAgent.layer({ provider: p.name, replay: fixture(p.name, name), dir, ...options })
+    RemoteAgent.layer({ host, provider: p.name, replay: fixture(p.name, name), dir, ...options })
 
   /** Open a session, send one message and return as soon as it lands, leaving the session running. */
   const startTurn = (name: string, options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
@@ -355,6 +356,6 @@ describe("host: attach", () => {
       const failure = failureOf(yield* (yield* AgentHosts).attach(id).pipe(Effect.scoped, Effect.exit))
       expect(failure).toBeInstanceOf(SessionNotFound)
       expect(failure).toMatchObject({ sessionId: id })
-    }).pipe(Effect.provide(RemoteAgent.layer({ provider: "codex", replay: fixture("codex", "simple"), dir }))),
+    }).pipe(Effect.provide(RemoteAgent.layer({ host, provider: "codex", replay: fixture("codex", "simple"), dir }))),
   )
 })

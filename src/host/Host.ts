@@ -4,8 +4,8 @@
  * to the session's events file (`EventFile.ts`), with the latest in a ring
  * buffer, so a client that reattaches (or reconnects) can catch up from any
  * seq. `Send` / `Steer` / `Turn` are answered once per client request id, so
- * a client may retry them after a reconnect. `main.ts` is the process entry
- * point; this module is the program.
+ * a client may retry them after a reconnect. `SessionHost.run` wraps this
+ * for a process (stdin spec, readiness line, log file, signals).
  *
  * Lifecycle: the host exits after its session ends (`End`, `Stop`, the agent
  * dying, the orphan timeout, SIGTERM), lingering briefly on `End`/`Stop`/agent

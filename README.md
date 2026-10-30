@@ -104,10 +104,25 @@ Without one, processes are still stopped when the session ends, and as soon as a
 
 `RemoteAgent.layer` runs each session in its own host process, so it survives the process that opened it (e.g. a runner restarting to deploy). Another process can reattach by id, catch up on what it missed, and keep controlling it.
 
+The host process runs an entry point in *your* app; the library ships no executable:
+
+```ts
+// host.ts
+import { NodeRuntime } from "@effect/platform-node"
+import { SessionHost } from "effect-agent/host"
+
+NodeRuntime.runMain(SessionHost.run)
+```
+
 ```ts
 import { AgentHosts, RemoteAgent } from "effect-agent/host"
 
-const layer = RemoteAgent.layer({ provider: "claude", claude: { model }, onScopeClose: "detach" })
+const layer = RemoteAgent.layer({
+  provider: "claude",
+  claude: { model },
+  host: { command: process.execPath, args: [fileURLToPath(new URL("./host.ts", import.meta.url))] },
+  onScopeClose: "detach",
+})
 
 // before the restart: persist the session id and the MessageId
 const session = yield* (yield* Agent).open({ cwd })   // Agent works unchanged; capabilities.reattach is true
@@ -118,6 +133,8 @@ const session = yield* (yield* AgentHosts).attach(sessionId)    // SessionNotFou
 yield* session.subscribeFrom(lastPersistedSeq + 1).pipe(Stream.runForEach(persist), Effect.forkScoped)
 const result = yield* session.awaitMessage(messageId)         // even if the turn ended while nobody was attached
 ```
+
+`host` is just a command, so the runtime (Node, Bun) and whether you bundle are up to you: if you bundle your app, make `host.ts` a second entry point, as you would a worker. Module loading dominates host startup, so a bundled entry starts noticeably faster (about 0.1 s versus 0.25 s here).
 
 A `RemoteSession` is an `AgentSession` plus `subscribeFrom(seq)` (a stream of `{ seq, event }` from any seq, then live), `lastSeq`, `awaitTurn` / `awaitMessage` (by turn id, or by the `MessageId` that `send` returned), `detach` and `stop`. `subscribe`/`events` are live from now, as for a local session. `onScopeClose` is `"stop"` by default (closing the scope ends the session, as locally); set `"detach"` to leave it running. `AgentHosts.list` lists live hosts. `status` and `history` run locally.
 
@@ -154,8 +171,6 @@ const session = yield* (yield* AgentHosts).attach(sessionId, { hooks: { beforeTo
 
 **A SIGKILLed host** (`kill -9`, the OOM killer) can't run any cleanup. Its agent process, and the commands that agent started, may be left running: Node has no parent-death signal, and the host is the only thing that would have stopped them. Stopping them is up to you, since they are your process tree. Either run hosts under a cgroup `Launcher` (a systemd scope, as above), so that stopping the scope stops the host, the agent and its commands together, or have your own supervisor reap them. The host's socket and manifest stay behind until `list` or `attach` notices the dead pid. Its events file has no ending line (see above).
 
-**Startup:** each session starts one host process. The published package runs a single-file bundle of the host (`dist/host/main.bundle.js`), which is ready in about 0.1 s versus about 0.25 s for the per-file build, because module loading dominates startup. To run it under another runtime, set `hostCommand`, e.g. `{ command: "bun", args: [RemoteAgent.mainPath] }`; Bun saves little more once the host is bundled.
-
 `node scripts/live-reattach.ts` checks this end to end with the real CLIs: process A starts a slow turn and exits mid-turn; process B attaches, catches up, and drops its connection mid-turn twice: once while A's turn runs, once during a `turn()` call. Both turns' results still arrive, the subscription sees every event exactly once, and it matches the events file read back with `AgentHosts.events` after the host has exited.
 
 ## Testing
@@ -177,10 +192,10 @@ node scripts/live-codex.ts
 
 ## Building
 
-The package is built like Effect's: `tsc -p tsconfig.build.json` emits one ESM module per source file into `dist/` (with `.d.ts` files and source maps; `.ts` imports are rewritten to `.js`), and Babel adds pure-call annotations so bundlers can tree-shake. The library is not bundled. The only bundle is the session host, built with rollup and esbuild (`rollup.config.mjs`), because it is started as its own process per session. The package ships `src/` too, for go-to-source.
+The package is built like Effect's: `tsc -p tsconfig.build.json` emits one ESM module per source file into `dist/` (with `.d.ts` files and source maps; `.ts` imports are rewritten to `.js`), and Babel adds pure-call annotations so bundlers can tree-shake. Nothing is bundled and nothing runs on import (`sideEffects: false`). The package ships `src/` too, for go-to-source.
 
 ```sh
-pnpm build   # build:tsc, build:babel, build:host
+pnpm build   # build:tsc, build:babel
 ```
 
 ## License

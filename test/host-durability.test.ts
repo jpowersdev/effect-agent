@@ -24,6 +24,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AgentError, type AgentEvent, type MessageId, SessionId, SessionNotFound, TurnId } from "../src/index.ts"
 import { AgentHosts, Host, HostSpec, RemoteAgent, type SeqEvent } from "../src/host/index.ts"
+import { host } from "./support/hostCommand.ts"
 
 const root = mkdtempSync(join(tmpdir(), "ea-hostd-"))
 const dir = join(root, "hosts")
@@ -121,7 +122,7 @@ const timeout = 30_000
 
 for (const p of providers) {
   const layer = (name: string, options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
-    RemoteAgent.layer({ provider: p.name, replay: fixture(p.name, name), dir, ...options })
+    RemoteAgent.layer({ host, provider: p.name, replay: fixture(p.name, name), dir, ...options })
 
   const toolCallTurn = (events: ReadonlyArray<AgentEvent>) => {
     const call = events.find((e) => e._tag === "ToolCall")

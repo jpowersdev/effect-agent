@@ -11,6 +11,7 @@ import { ClaudeAgent, ClaudeReplay } from "../src/claude/index.ts"
 import { CodexAgent, CodexReplay } from "../src/codex/index.ts"
 import { RemoteAgent } from "../src/host/index.ts"
 import { AccountStatus, Agent, AgentEvent, type AgentSession, type RunOptions, SessionId } from "../src/index.ts"
+import { host } from "./support/hostCommand.ts"
 
 type Scenario =
   | "simple"
@@ -133,7 +134,7 @@ const remote = (local: Provider): Provider => ({
   layer: (scenario) => {
     const fixtures = local.kind === "claude" ? claudeFixtures : codexFixtures
     const pricing = local.kind === "codex" ? codexPricing(scenario) : undefined
-    return RemoteAgent.layer({
+    return RemoteAgent.layer({ host,
       provider: local.kind,
       replay: fixture(local.kind, fixtures[scenario]),
       dir: hostDir,
