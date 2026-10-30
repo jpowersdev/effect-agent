@@ -25,6 +25,7 @@ import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { Agent, type AgentSession, type Hooks, type RunOptions } from "../Agent.ts"
 import { AgentError, type SessionClosed, SessionNotFound, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnOutcome, TurnSucceeded } from "../AgentEvent.ts"
+import * as Session from "../internal/session.ts"
 import * as TurnTracker from "../internal/turnTracker.ts"
 import * as ProcessTree from "../ProcessTree.ts"
 import * as EventFile from "./EventFile.ts"
@@ -346,8 +347,7 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       const linger = Duration.toMillis(spec.linger !== undefined ? toDuration(spec.linger) : defaults.linger)
       const persist = spec.persistEvents ?? true
       pruneEvents(spec.dir, spec.retainEvents !== undefined ? toDuration(spec.retainEvents) : defaults.retainEvents)
-      const agentError = (message: string, cause?: unknown) =>
-        new AgentError({ message, provider, ...(cause !== undefined && { cause }) })
+      const agentError = Session.agentError(provider)
 
       const agent = Context.get(yield* Layer.build(providerLayer(spec)), Agent)
 
@@ -479,6 +479,8 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       // ---- server ----
       const sessionClosed = yield* Deferred.make<void>()
       const once = makeOnce(yield* Effect.scope, defaults.requestResults)
+      /** A span per call (the RPC server's own tracing is off: clients don't send trace context). */
+      const traced = (rpc: string) => Effect.withSpan(`Host.${rpc}`, { attributes: { provider, sessionId } })
       const handlers = HostRpcs.toLayer({
         Info: () =>
           Effect.gen(function* () {
@@ -495,24 +497,25 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
               oldestSeq: log.oldest(),
               ended: log.ended() !== null,
             }
-          }),
+          }).pipe(traced("Info")),
         Subscribe: ({ fromSeq, live }) => log.subscribe(fromSeq, live),
         // `once`: a client that disconnects mid-call doesn't cut a provider call in half,
         // and one that retries it after reconnecting gets the first call's result.
         Send: ({ input, requestId }) =>
-          once("Send", requestId, session.send(input).pipe(Effect.tap((id) => Effect.sync(() => log.sent(id))))).pipe(replyOrDrop("Send")),
+          once("Send", requestId, session.send(input).pipe(Effect.tap((id) => Effect.sync(() => log.sent(id))))).pipe(replyOrDrop("Send"), traced("Send")),
         Steer: ({ input, requestId }) =>
           once("Steer", requestId, session.steer(input).pipe(Effect.tap((o) => Effect.sync(() => log.sent(o.messageId))))).pipe(
             replyOrDrop("Steer"),
+            traced("Steer"),
           ),
         // Deduped like `Send`: a retry after a reconnect must not interrupt a newer turn.
-        Interrupt: ({ requestId }) => once("Interrupt", requestId, session.interrupt).pipe(replyOrDrop("Interrupt")),
-        End: () => session.end,
-        Stop: () => Deferred.succeed(shutdown, "stop").pipe(Effect.andThen(Deferred.await(sessionClosed))),
+        Interrupt: ({ requestId }) => once("Interrupt", requestId, session.interrupt).pipe(replyOrDrop("Interrupt"), traced("Interrupt")),
+        End: () => session.end.pipe(traced("End")),
+        Stop: () => Deferred.succeed(shutdown, "stop").pipe(Effect.andThen(Deferred.await(sessionClosed)), traced("Stop")),
         // A retried `Turn` waits on the original turn.
-        Turn: ({ input, requestId }) => once("Turn", requestId, session.turn(input)).pipe(replyOrDrop("Turn")),
-        AwaitTurn: ({ turnId }) => log.awaitTurn(turnId).pipe(Effect.flatMap(settle), replyOrDrop("AwaitTurn")),
-        AwaitMessage: ({ messageId }) => log.awaitMessage(messageId).pipe(Effect.flatMap(settle), replyOrDrop("AwaitMessage")),
+        Turn: ({ input, requestId }) => once("Turn", requestId, session.turn(input)).pipe(replyOrDrop("Turn"), traced("Turn")),
+        AwaitTurn: ({ turnId }) => log.awaitTurn(turnId).pipe(Effect.flatMap(settle), replyOrDrop("AwaitTurn"), traced("AwaitTurn")),
+        AwaitMessage: ({ messageId }) => log.awaitMessage(messageId).pipe(Effect.flatMap(settle), replyOrDrop("AwaitMessage"), traced("AwaitMessage")),
         HookRequests: (answerer) => hookBridge.register(answerer),
         HookResponse: ({ hookId, result }) => hookBridge.respond(hookId, result),
         TestInvokeHook: ({ requestId, hook, call }) =>
