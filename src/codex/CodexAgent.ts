@@ -955,7 +955,7 @@ export const readStatus = (
       yield* conn.close
       return Events.accountStatus(account, limits, now)
     }),
-  )
+  ).pipe(Effect.withSpan("CodexAgent.status"))
 
 /**
  * Reads the stored turns with `thread/turns/list`, which works on threads
@@ -993,7 +993,7 @@ export const readHistory = (
       yield* conn.close
       return Events.historyEvents(turns)
     }),
-  )
+  ).pipe(Effect.withSpan("CodexAgent.history"))
 
 /**
  * The Codex `Agent`, on top of a `CodexAppServer`.

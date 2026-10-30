@@ -73,7 +73,7 @@ import {
   socketPath,
 } from "./HostSpec.ts"
 import { providerLayer } from "./providers.ts"
-import { type EventsTrimmed, type HookName, type HookRequest, type HostInfo, HostRpcs, type SeqEvent } from "./protocol.ts"
+import { type EventsTrimmed, type HookName, type HookRequest, type HookStreamItem, type HostInfo, HostRpcs, type SeqEvent } from "./protocol.ts"
 
 /**
  * Options for `layer`.
@@ -254,6 +254,92 @@ const removeHostFiles = (dir: string, sessionId: string) => {
   rmSync(manifestPath(dir, sessionId), { force: true })
   rmSync(socketPath(dir, sessionId), { force: true })
 }
+
+/** What `answerHooks` needs from a connection to a host. */
+interface HookChannel {
+  /** `HookRequests`, followed across reconnects. */
+  readonly requests: (registration: {
+    readonly clientId: string
+    readonly hooks: ReadonlyArray<HookName>
+    readonly timeoutMs: number
+  }) => Stream.Stream<HookStreamItem, unknown>
+  readonly respond: (hookId: string, result: string | null) => Effect.Effect<void>
+  /** Hooks run here, so they outlive the request that delivered them. */
+  readonly scope: Scope.Scope
+  readonly agentError: (message: string) => AgentError
+}
+
+/** A hook request run with this client's hooks. */
+const runHook = (hooks: Hooks, request: HookRequest): Effect.Effect<Option.Option<string>> => {
+  const c = request.call
+  switch (request.hook) {
+    case "beforeTool":
+      return hooks.beforeTool !== undefined && c !== null
+        ? hooks.beforeTool({ callId: c.callId, name: c.name, input: c.input })
+        : Effect.succeedNone
+    case "afterTool":
+      return hooks.afterTool !== undefined && c !== null
+        ? hooks.afterTool({ callId: c.callId, name: c.name, input: c.input, output: c.output ?? "", isError: c.isError ?? false })
+        : Effect.succeedNone
+    case "beforeStop":
+      return hooks.beforeStop !== undefined ? hooks.beforeStop() : Effect.succeedNone
+  }
+}
+
+/**
+ * Register to answer hook calls (again after each reconnect, keeping
+ * `clientId`), and answer each by running the hook here. Returns once the
+ * host has the registration.
+ */
+const answerHooks = (channel: HookChannel, hooks: Hooks, timeout: Duration.Duration) =>
+  Effect.gen(function* () {
+    const names = hookNames(hooks)
+    if (names.length === 0) return
+    const clientId = randomUUID()
+    const timeoutMs = Duration.toMillis(timeout)
+    /** Results by hook id: a request delivered again after a reconnect doesn't run twice. */
+    const runs = new Map<string, Deferred.Deferred<string | null>>()
+    const answer = (request: HookRequest) =>
+      Effect.gen(function* () {
+        let result = runs.get(request.hookId)
+        if (result === undefined) {
+          result = Deferred.makeUnsafe<string | null>()
+          runs.set(request.hookId, result)
+          if (runs.size > 1_000) runs.delete(runs.keys().next().value!)
+          // As locally: a failure, defect or timeout adds nothing. The host's timer
+          // decides (and logs) a timeout; this one, a second later, only stops a hook
+          // that is still running. With the same deadline, a busy host could take
+          // this "nothing" as the answer and never log the timeout.
+          yield* Effect.suspend(() => runHook(hooks, request)).pipe(
+            Effect.timeoutOption(Duration.sum(timeout, Duration.seconds(1))),
+            Effect.map((text) => (Option.isSome(text) && Option.isSome(text.value) && text.value.value !== "" ? text.value.value : null)),
+            Effect.catchCause(() => Effect.succeed(null)),
+            Effect.flatMap((text) => Deferred.succeed(result!, text)),
+            Effect.forkIn(channel.scope),
+          )
+        }
+        yield* channel.respond(request.hookId, yield* Deferred.await(result))
+      })
+    const registered = Deferred.makeUnsafe<void, AgentError>()
+    yield* channel.requests({ clientId, hooks: names, timeoutMs }).pipe(
+      Stream.runForEach((item) =>
+        item._tag === "Registered"
+          ? Deferred.succeed(registered, undefined).pipe(Effect.asVoid)
+          : answer(item).pipe(Effect.forkIn(channel.scope), Effect.asVoid),
+      ),
+      Effect.onExit((exit) =>
+        Deferred.done(registered, Exit.isSuccess(exit) ? Exit.void : Exit.fail(channel.agentError("could not register to answer hooks"))),
+      ),
+      Effect.ignore,
+      Effect.forkIn(channel.scope),
+    )
+    yield* Deferred.await(registered).pipe(
+      Effect.timeoutOrElse({
+        duration: Duration.seconds(10),
+        orElse: () => Effect.fail(channel.agentError("the host did not take the hook registration")),
+      }),
+    )
+  })
 
 /**
  * Live manifests in `dir`; stale ones (dead pid) are removed with their sockets.
@@ -660,83 +746,6 @@ export const layer = (
             }),
           )
 
-          /**
-           * Register to answer hook calls (again after each reconnect, keeping
-           * `clientId`), and answer each by running the hook here. Returns once
-           * the host has the registration.
-           */
-          const answerHooks = (hooks: Hooks, timeout: Duration.Duration) =>
-            Effect.gen(function* () {
-              const names = hookNames(hooks)
-              if (names.length === 0) return
-              const clientId = randomUUID()
-              const timeoutMs = Duration.toMillis(timeout)
-              /** Results by hook id: a request delivered again after a reconnect doesn't run twice. */
-              const runs = new Map<string, Deferred.Deferred<string | null>>()
-              const runHook = (request: HookRequest): Effect.Effect<Option.Option<string>> => {
-                const c = request.call
-                switch (request.hook) {
-                  case "beforeTool":
-                    return hooks.beforeTool !== undefined && c !== null
-                      ? hooks.beforeTool({ callId: c.callId, name: c.name, input: c.input })
-                      : Effect.succeedNone
-                  case "afterTool":
-                    return hooks.afterTool !== undefined && c !== null
-                      ? hooks.afterTool({
-                          callId: c.callId,
-                          name: c.name,
-                          input: c.input,
-                          output: c.output ?? "",
-                          isError: c.isError ?? false,
-                        })
-                      : Effect.succeedNone
-                  case "beforeStop":
-                    return hooks.beforeStop !== undefined ? hooks.beforeStop() : Effect.succeedNone
-                }
-              }
-              const answer = (request: HookRequest) =>
-                Effect.gen(function* () {
-                  let result = runs.get(request.hookId)
-                  if (result === undefined) {
-                    result = Deferred.makeUnsafe<string | null>()
-                    runs.set(request.hookId, result)
-                    if (runs.size > 1_000) runs.delete(runs.keys().next().value!)
-                    // As locally: a failure, defect or timeout adds nothing. The host's timer
-                    // decides (and logs) a timeout; this one, a second later, only stops a hook
-                    // that is still running. With the same deadline, a busy host could take
-                    // this "nothing" as the answer and never log the timeout.
-                    yield* Effect.suspend(() => runHook(request)).pipe(
-                      Effect.timeoutOption(Duration.sum(timeout, Duration.seconds(1))),
-                      Effect.map((text) => (Option.isSome(text) && Option.isSome(text.value) && text.value.value !== "" ? text.value.value : null)),
-                      Effect.catchCause(() => Effect.succeed(null)),
-                      Effect.flatMap((text) => Deferred.succeed(result!, text)),
-                      Effect.forkIn(sessionScope),
-                    )
-                  }
-                  const text = yield* Deferred.await(result)
-                  yield* call((c) => c.HookResponse({ hookId: request.hookId, result: text })).pipe(Effect.ignore)
-                })
-              const registered = Deferred.makeUnsafe<void, AgentError>()
-              yield* follow((client) => client.HookRequests({ clientId, hooks: names, timeoutMs })).pipe(
-                Stream.runForEach((item) =>
-                  item._tag === "Registered"
-                    ? Deferred.succeed(registered, undefined).pipe(Effect.asVoid)
-                    : answer(item).pipe(Effect.forkIn(sessionScope), Effect.asVoid),
-                ),
-                Effect.onExit((exit) =>
-                  Deferred.done(registered, Exit.isSuccess(exit) ? Exit.void : Exit.fail(agentError("could not register to answer hooks"))),
-                ),
-                Effect.ignore,
-                Effect.forkIn(sessionScope),
-              )
-              yield* Deferred.await(registered).pipe(
-                Effect.timeoutOrElse({
-                  duration: Duration.seconds(10),
-                  orElse: () => Effect.fail(agentError("the host did not take the hook registration")),
-                }),
-              )
-            })
-
           /** One request id per call, repeated by its retries, so the host acts on it once. */
           const once = <A, E>(make: (requestId: string) => Effect.Effect<A, E>) => Effect.suspend(() => make(randomUUID()))
           const session: RemoteSession = {
@@ -763,7 +772,18 @@ export const layer = (
           }
 
           yield* Effect.addFinalizer(() => (onClose === "stop" && !detached ? Effect.ignore(stop) : detach))
-          if (answering !== undefined) yield* answerHooks(answering.hooks, Duration.fromInputUnsafe(answering.timeout))
+          if (answering !== undefined) {
+            yield* answerHooks(
+              {
+                requests: (registration) => follow((client) => client.HookRequests(registration)),
+                respond: (hookId, result) => call((c) => c.HookResponse({ hookId, result })).pipe(Effect.ignore),
+                scope: sessionScope,
+                agentError,
+              },
+              answering.hooks,
+              Duration.fromInputUnsafe(answering.timeout),
+            )
+          }
           return session
         })
 
@@ -783,6 +803,7 @@ export const layer = (
         session: { readonly hookTimeout?: Duration.Input } = {},
       ): Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope> =>
         Effect.gen(function* () {
+          yield* Effect.annotateCurrentSpan({ provider, resume: run.resume !== undefined })
           yield* refuseHooks(run.hooks)
           if (run.resume !== undefined) {
             const existing = readManifest(manifestPath(dir, run.resume))
@@ -816,13 +837,14 @@ export const layer = (
           return yield* connect(ready, onScopeClose, answering).pipe(
             Effect.tapError(() => Effect.sync(() => signal(ready.pid, "SIGTERM"))),
           )
-        })
+        }).pipe(Effect.withSpan("RemoteAgent.open"))
 
       const attach = (
         sessionId: SessionId,
         attachOptions: AttachOptions = {},
       ): Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope> =>
         Effect.gen(function* () {
+          yield* Effect.annotateCurrentSpan({ provider, sessionId })
           yield* refuseHooks(attachOptions.hooks)
           prune()
           const manifest = readManifest(manifestPath(dir, sessionId))
@@ -841,7 +863,7 @@ export const layer = (
               return Effect.fail(notFound(sessionId, e.message))
             }),
           )
-        })
+        }).pipe(Effect.withSpan("RemoteAgent.attach"))
 
       const fromFile = (sessionId: SessionId, fromSeq: number): Stream.Stream<SeqEvent, AgentError> =>
         EventFile.read(eventsPath(dir, sessionId), fromSeq).pipe(
