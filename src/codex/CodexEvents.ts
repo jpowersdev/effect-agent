@@ -5,6 +5,7 @@
  * MessageLanded, TurnEnded); this module maps everything else.
  */
 import { DateTime } from "effect"
+import type { AccountStatus } from "../Agent.ts"
 import {
   AgentFailed,
   AuthFailed,
@@ -12,11 +13,12 @@ import {
   Interrupted,
   ProcessKilled,
   SpendCapReached,
+  Stalled,
   Throttled,
   UsageLimited,
 } from "../AgentError.ts"
 import type { AgentEvent, TurnOutcome } from "../AgentEvent.ts"
-import { type LimitWindow, type LimitWindowStatus, type TokenUsage, TurnId } from "../Domain.ts"
+import { type LimitWindow, type LimitWindowStatus, MessageId, type TokenUsage, TurnId } from "../Domain.ts"
 import type * as P from "./protocol.ts"
 
 // ---------------------------------------------------------------------------
@@ -147,7 +149,16 @@ export interface OutcomeContext {
   readonly finalText: string
   /** `account/rateLimits/read`, fetched for `usageLimitExceeded`. */
   readonly rateLimits: P.GetAccountRateLimitsResponse | null
+  /** The watchdog stopped the turn (by interrupt, or by killing app-server). */
+  readonly stalled?: { readonly idleMs: number; readonly inTool: boolean } | null
 }
+
+export const stalledFailure = (stall: { readonly idleMs: number; readonly inTool: boolean }): Stalled =>
+  new Stalled({
+    message: `no events for ${(stall.idleMs / 1000).toFixed(1)}s${stall.inTool ? " while a tool call was running" : ""}; the watchdog stopped the turn`,
+    idleMs: stall.idleMs,
+    inTool: stall.inTool,
+  })
 
 const throttleKinds = new Set([
   "rateLimitExceeded",
@@ -158,6 +169,9 @@ const throttleKinds = new Set([
 
 export const classifyOutcome = (turn: P.Turn, ctx: OutcomeContext): TurnOutcome => {
   const turnId = TurnId.make(turn.id)
+  // A stalled turn that still completed on its own is a success; anything else
+  // (interrupted, failed, app-server killed) is the watchdog's doing.
+  if (ctx.stalled != null && turn.status !== "completed") return stalledFailure(ctx.stalled)
   if (ctx.processExit !== null) {
     const { exitCode, signal } = ctx.processExit
     return new ProcessKilled({
@@ -358,4 +372,125 @@ export const mapNotification = (msg: P.Incoming, state: MapState, nowMs: number)
 export const finalTextOf = (messages: ReadonlyArray<{ readonly text: string; readonly phase: string | null }>): string => {
   for (let i = messages.length - 1; i >= 0; i--) if (messages[i]!.phase === "final_answer") return messages[i]!.text
   return messages.at(-1)?.text ?? ""
+}
+
+// ---------------------------------------------------------------------------
+// Account status (`account/read` + `account/rateLimits/read`)
+// ---------------------------------------------------------------------------
+
+/** The snapshot that governs Codex usage: the `codex` bucket, else the single-bucket view. */
+const mainSnapshot = (limits: P.GetAccountRateLimitsResponse): P.RateLimitSnapshot =>
+  limits.rateLimitsByLimitId?.["codex"] ?? limits.rateLimits
+
+/**
+ * `limits` is null when it couldn't be read (not signed in, or an API-key
+ * account without subscription limits).
+ *
+ * Usability is decided by included usage only: credits that could pay past
+ * an exhausted window don't make the account usable, because effect-agent
+ * reports limits and never opts into spending credits.
+ */
+export const accountStatus = (
+  account: P.GetAccountResponse,
+  limits: P.GetAccountRateLimitsResponse | null,
+  checkedAtMs: number,
+): AccountStatus => {
+  const main = limits === null ? null : mainSnapshot(limits)
+  const others =
+    limits === null
+      ? []
+      : Object.entries(limits.rateLimitsByLimitId ?? {}).flatMap(([id, snapshot]) =>
+          snapshot === undefined || id === "codex" || id === main?.limitId ? [] : [snapshot],
+        )
+  const windows = [...(main === null ? [] : limitWindows(main)), ...others.flatMap(limitWindows)]
+  const mainWindows = [main?.primary, main?.secondary].filter((w): w is P.RateLimitWindow => w != null)
+  const signedIn = account.account !== null || !account.requiresOpenaiAuth
+  const usageLimited =
+    main !== null &&
+    ((main.rateLimitReachedType ?? null) !== null ||
+      mainWindows.some((w) => w.usedPercent >= 100) ||
+      limits?.ordinaryUsageAllowed === false)
+  const spendLimited = main?.spendControlReached === true
+  const reason: AccountStatus["reason"] = !signedIn
+    ? "unauthenticated"
+    : usageLimited
+      ? "usage_limited"
+      : spendLimited
+        ? "spend_limited"
+        : null
+  const acct = account.account as { readonly planType?: string | null } | null
+  return {
+    provider: "codex",
+    usable: reason === null,
+    reason,
+    windows,
+    plan: acct?.planType ?? main?.planType ?? null,
+    checkedAt: DateTime.makeUnsafe(checkedAtMs),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stored history (`thread/turns/list` with `itemsView: "full"`)
+// ---------------------------------------------------------------------------
+
+const userText = (content: ReadonlyArray<unknown>): string =>
+  content
+    .flatMap((c: any) => (c?.type === "text" && typeof c.text === "string" ? [c.text] : []))
+    .join("\n")
+
+/**
+ * Stored turns -> `TurnStarted`, then each turn's user messages, assistant
+ * text, tool calls with their results and compactions, then `TurnEnded`
+ * (unless the turn is still in progress). Usage and cost aren't stored per
+ * turn, so they are null. Every `raw` is the stored item or the turn
+ * (without its items).
+ */
+export const historyEvents = (turns: ReadonlyArray<P.Turn>): Array<AgentEvent> => {
+  const out: Array<AgentEvent> = []
+  for (const turn of turns) {
+    const turnId = TurnId.make(turn.id)
+    const { items, ...turnRaw } = turn
+    out.push({ _tag: "TurnStarted", turnId, raw: turnRaw })
+    const messages: Array<{ text: string; phase: string | null }> = []
+    for (const item of items) {
+      const i = item as any
+      switch (item.type) {
+        case "userMessage":
+          out.push({
+            _tag: "UserMessage",
+            turnId,
+            messageId: typeof i.clientId === "string" ? MessageId.make(i.clientId) : null,
+            text: userText(i.content ?? []),
+            raw: item,
+          })
+          continue
+        case "agentMessage":
+          messages.push({ text: i.text ?? "", phase: i.phase ?? null })
+          out.push({ _tag: "Text", turnId, text: i.text ?? "", raw: item })
+          continue
+        case "contextCompaction":
+          out.push({ _tag: "Compacted", turnId, trigger: null, raw: item })
+          continue
+      }
+      const call = toolCallOf(item)
+      if (call === null) continue
+      out.push({ _tag: "ToolCall", turnId, callId: item.id, ...call, raw: item })
+      const result = toolResultOf(item)
+      if (result !== null && i.status !== "inProgress") {
+        out.push({ _tag: "ToolResult", turnId, callId: item.id, ...result, raw: item })
+      }
+    }
+    if (turn.status === "inProgress") continue
+    const outcome = classifyOutcome(turn, {
+      // Who interrupted isn't stored; report it plainly.
+      interruptRequested: true,
+      spendCap: null,
+      capUsd: null,
+      processExit: null,
+      finalText: finalTextOf(messages),
+      rateLimits: null,
+    })
+    out.push({ _tag: "TurnEnded", turnId, outcome, usage: null, cost: null, raw: turnRaw })
+  }
+  return out
 }

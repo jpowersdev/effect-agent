@@ -11,13 +11,26 @@
  * Every thread runs with approvals and the sandbox off
  * (`approvalPolicy: "never"`, `sandbox: "danger-full-access"`) and with MCP
  * isolated (no configured MCP servers, no built-in `codex_apps`).
+ *
+ * `status` and `history` each start a short-lived app-server (through the
+ * `Launcher`, if any) and stop it before returning. `RunOptions.hooks` is
+ * refused: Codex hooks are config-only, with no runtime callbacks.
  */
 import { Cause, Clock, Deferred, Duration, Effect, Exit, Layer, Option, PubSub, Scope, Semaphore, Stream } from "effect"
-import { Agent, type AgentSession, type Capabilities, type Effort, type RunOptions, type SteerOutcome } from "../Agent.ts"
+import {
+  type AccountStatus,
+  Agent,
+  type AgentSession,
+  type Capabilities,
+  type Effort,
+  type RunOptions,
+  type SteerOutcome,
+} from "../Agent.ts"
 import { AgentError, ProcessKilled, SessionNotFound, SpendCapReached, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnOutcome, TurnSucceeded } from "../AgentEvent.ts"
 import { MessageId, SessionId, type TokenUsage, TurnId } from "../Domain.ts"
 import * as Pricing from "../Pricing.ts"
+import * as Watchdog from "../Watchdog.ts"
 import { CodexAppServer, CodexRpcError, type Connection, type ProcessExit, parseUserAgentVersion } from "./CodexAppServer.ts"
 import * as Events from "./CodexEvents.ts"
 import * as P from "./protocol.ts"
@@ -29,6 +42,8 @@ export interface CodexAgentOptions {
   readonly pricing?: Pricing.PriceTable
   /** Extra per-thread config overrides (dotted config.toml keys). effect-agent's own settings win on conflict. */
   readonly config?: Readonly<Record<string, unknown>>
+  /** Default for `RunOptions.watchdog.grace` (10 seconds when neither is set). */
+  readonly stallGrace?: Duration.Input
 }
 
 // ---------------------------------------------------------------------------
@@ -137,7 +152,17 @@ const hostEnv = (): Readonly<Record<string, string | undefined>> =>
 
 /** app-server's answers for a thread it has no record of. */
 export const isSessionNotFoundError = (e: CodexRpcError): boolean =>
-  /no rollout found|invalid session id|thread not found|invalid thread id/i.test(e.message)
+  /no rollout found|invalid session id|thread not found|thread not loaded|invalid thread id/i.test(e.message)
+
+/** Codex has no runtime hook callbacks; refuse rather than silently ignore them. */
+export const hooksError = (options: RunOptions): string | null => {
+  const hooks = options.hooks
+  if (hooks === undefined) return null
+  const set = (["beforeTool", "afterTool", "beforeStop"] as const).filter((k) => hooks[k] !== undefined)
+  return set.length === 0
+    ? null
+    : `Codex does not support RunOptions.hooks (${set.join(", ")}): its hooks are config-only (capabilities.hooks is false)`
+}
 
 /** `turn/steer` failed because the expected turn is no longer running. */
 export const isStaleSteerError = (e: CodexRpcError): boolean =>
@@ -171,6 +196,8 @@ interface RunningTurn {
   announced: boolean
   interruptRequested: boolean
   spendCap: { readonly capUsd: number; readonly spentUsd: number } | null
+  /** The watchdog stopped this turn. */
+  stalled: { readonly idleMs: number; readonly inTool: boolean } | null
   readonly agentMessages: Array<{ readonly text: string; readonly phase: string | null }>
   /** commandExecution items started in this turn. */
   readonly commandItems: Set<string>
@@ -195,6 +222,8 @@ const openSession = Effect.fnUntraced(function* (
 ) {
   const built = threadOverrides(options, agentOptions.config)
   if ("error" in built) return yield* agentError(built.error)
+  const hooksRefused = hooksError(options)
+  if (hooksRefused !== null) return yield* agentError(hooksRefused)
   const pricing = agentOptions.pricing
   const cap = options.spendCapUsd
   if (cap !== undefined) {
@@ -262,7 +291,12 @@ const openSession = Effect.fnUntraced(function* (
     capReached: null as number | null,
   }
 
-  const publish = (event: AgentEvent) => PubSub.publish(pubsub, { _tag: "event", event })
+  const dog = options.watchdog !== undefined ? yield* Watchdog.make(options.watchdog) : null
+  const stallGrace = options.watchdog?.grace ?? agentOptions.stallGrace ?? Duration.seconds(10)
+  const publish = (event: AgentEvent) =>
+    dog === null
+      ? PubSub.publish(pubsub, { _tag: "event", event })
+      : Effect.andThen(dog.observe(event), PubSub.publish(pubsub, { _tag: "event", event }))
   const finish = (item: Published) =>
     Effect.suspend(() => {
       if (state.finished !== null) return Effect.void
@@ -293,6 +327,7 @@ const openSession = Effect.fnUntraced(function* (
     announced: false,
     interruptRequested: false,
     spendCap: null,
+    stalled: null,
     agentMessages: [],
     commandItems: new Set(),
     usageAtStart: state.sessionUsage,
@@ -378,7 +413,7 @@ const openSession = Effect.fnUntraced(function* (
       const spent = Pricing.costOf(price, state.sessionUsage)
       if (spent < cap) return
       state.capReached ??= spent
-      if (run !== null && run.turnId !== null && run.spendCap === null && !run.interruptRequested) {
+      if (run !== null && run.turnId !== null && run.spendCap === null && run.stalled === null && !run.interruptRequested) {
         run.spendCap = { capUsd: cap, spentUsd: spent }
         yield* conn
           .request("turn/interrupt", { threadId, turnId: run.turnId })
@@ -404,7 +439,7 @@ const openSession = Effect.fnUntraced(function* (
           : null
       // An interrupt we didn't ask for usually means app-server is shutting down.
       const processExit =
-        turn.status === "interrupted" && !run.interruptRequested && run.spendCap === null
+        turn.status === "interrupted" && !run.interruptRequested && run.spendCap === null && run.stalled === null
           ? Option.getOrNull(yield* conn.exit.pipe(Effect.timeoutOption(Duration.seconds(1))))
           : null
       const messages =
@@ -418,6 +453,7 @@ const openSession = Effect.fnUntraced(function* (
         processExit,
         finalText: Events.finalTextOf(messages),
         rateLimits,
+        stalled: run.stalled,
       })
       yield* publish({
         _tag: "TurnEnded",
@@ -497,17 +533,19 @@ const openSession = Effect.fnUntraced(function* (
     const run = state.running
     state.running = null
     if (run !== null) {
+      // A stalled turn whose app-server we killed ended Stalled, not ProcessKilled.
+      const outcome = run.stalled !== null ? Events.stalledFailure(run.stalled) : dead
       if (run.turnId !== null) {
         yield* publish({
           _tag: "TurnEnded",
           turnId: run.turnId,
-          outcome: dead,
+          outcome,
           usage: run.sawUsage ? Events.subtractUsage(state.sessionUsage, run.usageAtStart) : null,
           cost: costNow(),
           raw: { exit },
         })
       }
-      yield* resolveRun(run, dead)
+      yield* resolveRun(run, outcome)
     }
     for (const q of queue.splice(0)) {
       yield* Deferred.fail(q.started, agentError(dead.message))
@@ -538,6 +576,23 @@ const openSession = Effect.fnUntraced(function* (
     Effect.andThen(onTransportEnd),
     Effect.forkScoped,
   )
+
+  /**
+   * Watchdog expiry: mark the turn stalled and interrupt it (`finishTurn`
+   * then terminates its commands, as for any interrupt). If it hasn't ended
+   * within `stallGrace`, app-server is unresponsive: kill it, which ends the
+   * turn (still `Stalled`) and the session.
+   */
+  const onStall = (expiry: Watchdog.Expiry) =>
+    Effect.gen(function* () {
+      const run = state.running
+      if (run === null || run.turnId !== expiry.turnId || run.stalled !== null) return
+      run.stalled = { idleMs: expiry.idleMs, inTool: expiry.inTool }
+      yield* conn.request("turn/interrupt", { threadId, turnId: expiry.turnId }).pipe(Effect.ignore, Effect.forkScoped)
+      const ended = yield* Deferred.await(run.ended).pipe(Effect.timeoutOption(stallGrace))
+      if (Option.isNone(ended)) yield* conn.kill
+    })
+  if (dog !== null) yield* dog.expirations.pipe(Stream.runForEach(onStall), Effect.forkScoped)
 
   // ---- public API ----
 
@@ -598,7 +653,7 @@ const openSession = Effect.fnUntraced(function* (
       const landed = yield* lock.withPermit(
         Effect.gen(function* () {
           const run = state.running
-          if (run !== null && run.turnId !== null && !run.interruptRequested && run.spendCap === null) {
+          if (run !== null && run.turnId !== null && !run.interruptRequested && run.spendCap === null && run.stalled === null) {
             const turnId = run.turnId
             run.messages.push(q)
             run.unlanded.push(q.messageId)
@@ -661,6 +716,7 @@ const openSession = Effect.fnUntraced(function* (
     sessionId: SessionId.make(threadId),
     provider,
     location: Option.fromNullishOr(started.thread.path),
+    pid: Effect.map(conn.exited, (exited) => (Option.isSome(exited) ? Option.none() : Option.fromNullishOr(conn.pid))),
     subscribe,
     events,
     send,
@@ -670,6 +726,76 @@ const openSession = Effect.fnUntraced(function* (
     end,
   } satisfies AgentSession
 })
+
+// ---------------------------------------------------------------------------
+// status and history: short-lived app-servers
+// ---------------------------------------------------------------------------
+
+const requestTimeout = Duration.seconds(60)
+
+/** Where to run app-server when there's no session cwd: a neutral directory, not the caller's project. */
+const neutralCwd = () => hostEnv()["TMPDIR"] ?? "/tmp"
+
+const timed = <A, E>(what: string, self: Effect.Effect<A, E>) =>
+  self.pipe(
+    Effect.timeoutOrElse({ duration: requestTimeout, orElse: () => Effect.fail(agentError(`${what} timed out`)) }),
+  )
+
+export const readStatus = (server: CodexAppServer["Service"]): Effect.Effect<AccountStatus, AgentError> =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const conn = yield* server.connect({ cwd: neutralCwd(), env: sessionEnv(hostEnv()) })
+      const account = yield* timed("account/read", conn.request("account/read", {})).pipe(
+        Effect.mapError(toAgentError("account/read failed")),
+      )
+      // Not signed in (or an API-key account) fails with -32600; that just means no windows.
+      const limits =
+        account.account === null
+          ? null
+          : yield* timed("account/rateLimits/read", conn.request("account/rateLimits/read", undefined)).pipe(
+              Effect.catchTag("CodexRpcError", () => Effect.succeed(null)),
+            )
+      const now = yield* Clock.currentTimeMillis
+      yield* conn.close
+      return Events.accountStatus(account, limits, now)
+    }),
+  )
+
+/**
+ * Reads the stored turns with `thread/turns/list`, which works on threads
+ * that aren't loaded: no `thread/resume`, so the thread is not touched.
+ */
+export const readHistory = (
+  server: CodexAppServer["Service"],
+  sessionId: SessionId,
+  options: { readonly cwd: string },
+): Effect.Effect<ReadonlyArray<AgentEvent>, SessionNotFound | AgentError> =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const conn = yield* server.connect({ cwd: options.cwd, env: sessionEnv(hostEnv()) })
+      const turns: Array<P.Turn> = []
+      let cursor: string | null = null
+      for (let page = 0; page < 10_000; page++) {
+        const result: P.ThreadTurnsListResponse = yield* timed(
+          "thread/turns/list",
+          conn.request("thread/turns/list", { threadId: sessionId, sortDirection: "asc", itemsView: "full", limit: 100, cursor }),
+        ).pipe(
+          Effect.catchTag("CodexRpcError", (e) =>
+            Effect.fail(
+              isSessionNotFoundError(e)
+                ? new SessionNotFound({ message: e.message, sessionId })
+                : agentError(`thread/turns/list failed: ${e.message}`, e),
+            ),
+          ),
+        )
+        turns.push(...result.data)
+        if (result.nextCursor === null || result.nextCursor === cursor) break
+        cursor = result.nextCursor
+      }
+      yield* conn.close
+      return Events.historyEvents(turns)
+    }),
+  )
 
 export const make = (options: CodexAgentOptions = {}) =>
   Effect.gen(function* () {
@@ -695,6 +821,8 @@ export const make = (options: CodexAgentOptions = {}) =>
       provider,
       capabilities,
       open: (runOptions) => openSession(server, options, runOptions),
+      status: readStatus(server),
+      history: (sessionId, historyOptions) => readHistory(server, sessionId, historyOptions),
     })
   })
 

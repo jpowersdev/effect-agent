@@ -12,8 +12,14 @@
  *
  * Recorded message uuids are mapped, in order, to the uuids the client sends
  * (and recorded session ids to the client's), so `MessageId`s line up.
+ *
+ * `status` and `history` lines are served apart from the session lines:
+ * `status` answers with each recorded status in turn (repeating the last),
+ * `history` with the line recorded for that session id. Replayed sessions
+ * have no process, so `pid` is none and `kill` ends the frames as a SIGKILL
+ * would.
  */
-import { Cause, Effect, Layer, Queue, Stream } from "effect"
+import { Cause, Effect, Layer, Option, Queue, Stream } from "effect"
 import { readFileSync } from "node:fs"
 import * as ClaudeSdk from "./ClaudeSdk.ts"
 
@@ -59,8 +65,12 @@ const recordedVersion = (recording: Recording): string | null => {
   return null
 }
 
-export const layer = (recording: Recording, options: ReplayOptions = {}): Layer.Layer<ClaudeSdk.ClaudeSdk> =>
+export const layer = (all: Recording, options: ReplayOptions = {}): Layer.Layer<ClaudeSdk.ClaudeSdk> =>
   Layer.sync(ClaudeSdk.ClaudeSdk, () => {
+    const statuses = all.flatMap((l) => (l.dir === "status" ? [l.status] : []))
+    const histories = all.flatMap((l) => (l.dir === "history" ? [l] : []))
+    const recording = all.filter((l) => l.dir !== "status" && l.dir !== "history")
+    let statusCursor = 0
     let cursor = 0
     /** Recorded id -> client id (message uuids and session ids). */
     const ids = new Map<string, string>()
@@ -155,6 +165,23 @@ export const layer = (recording: Recording, options: ReplayOptions = {}): Layer.
             ended = true
             Queue.endUnsafe(output)
           }),
+          pid: Option.none(),
+          kill: Effect.sync(() => {
+            if (ended) return
+            ended = true
+            Queue.failCauseUnsafe(
+              output,
+              Cause.fail(
+                new ClaudeSdk.ClaudeSdkError({
+                  operation: "frames",
+                  message: "Claude Code process terminated by signal SIGKILL",
+                  errorClass: "process_killed_by_signal",
+                  signal: "SIGKILL",
+                  exitCode: null,
+                }),
+              ),
+            )
+          }),
         }
         yield* Effect.addFinalizer(() => query.close)
         return query
@@ -171,6 +198,16 @@ export const layer = (recording: Recording, options: ReplayOptions = {}): Layer.
             (options.knownSessions ?? []).includes(sessionId),
         ),
       version: Effect.succeed(options.version !== undefined ? options.version : recordedVersion(recording)),
+      status: () =>
+        Effect.suspend(() => {
+          const status = statuses[Math.min(statusCursor++, statuses.length - 1)]
+          return status === undefined ? Effect.fail(diverged("status", "status", recording[cursor])) : Effect.succeed(status)
+        }),
+      history: ({ sessionId }) =>
+        Effect.sync(() => {
+          const line = histories.find((l) => l.sessionId === sessionId || ids.get(l.sessionId) === sessionId)
+          return line?.history == null ? null : remap(line.history)
+        }),
     })
   })
 

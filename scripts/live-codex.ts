@@ -8,11 +8,11 @@
  * Runs in /tmp/effect-agent-live/codex/ with tiny prompts at effort `low`.
  */
 import { execSync } from "node:child_process"
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { NodeServices } from "@effect/platform-node"
 import { Deferred, Duration, Effect, Fiber, Layer, Option, Scope, Stream } from "effect"
 import type { AgentEvent, AgentSession, RunOptions } from "../src/index.ts"
-import { Agent, SessionId } from "../src/index.ts"
+import { Agent, Launcher, SessionId } from "../src/index.ts"
 import { CodexAgent, CodexAppServer } from "../src/codex/index.ts"
 
 const ROOT = "/tmp/effect-agent-live/codex"
@@ -87,6 +87,8 @@ const sanitize = (text: string) =>
     .replace(/"email":"[^"]*"/g, '"email":"user@example.com"')
     .replace(/"installationId":"[^"]*"/g, '"installationId":"redacted"')
     .replace(/"serverName":"[^"]*"/g, '"serverName":"host"')
+    .replace(/"chatgptAccountId":"[^"]*"/g, '"chatgptAccountId":"acct-redacted"')
+    .replace(/"id":"RateLimitResetCredit_[^"]*"/g, '"id":"RateLimitResetCredit_redacted"')
 
 const saveFixture = (name: string, text = readFileSync(recPath(name), "utf8")) => {
   if (!recording) return
@@ -340,6 +342,200 @@ const killed: Scenario = Effect.gen(function* () {
   return `ProcessKilled signal=${f.signal} exitCode=${f.exitCode}; command gone; later send -> AgentError`
 }).pipe(Effect.provide(agentLayer("killed")))
 
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+const ps = (pid: number | string, field: string) => {
+  try {
+    return execSync(`ps -o ${field}= -p ${pid}`).toString().trim()
+  } catch {
+    return ""
+  }
+}
+
+/**
+ * A wrapping Launcher (`env EA_LAUNCHED=1 codex app-server`): an agent
+ * command sees the variable, `pid` is reported and leads its own process
+ * group, and processes the agent started (a foreground command and a
+ * `nohup ... &` background one) are gone once the session's scope closes
+ * mid-command. (A background process from a command that already finished
+ * is killed by Codex itself when the command ends; that's reported too.)
+ */
+const launcher: Scenario = Effect.gen(function* () {
+  const markers = ["sleep 316", "sleep 317", "sleep 318"]
+  for (const m of markers) check(pgrep(m) === "", `a stray '${m}' is already running`)
+  const info = yield* Effect.scoped(
+    Effect.gen(function* () {
+      const agent = yield* Agent
+      const session = yield* agent.open(base)
+      const events = yield* collect(session)
+      const pid = Option.getOrThrow(yield* session.pid)
+      check(ps(pid, "args").includes("codex app-server"), `pid ${pid} is ${ps(pid, "args")}`)
+      check(ps(pid, "pgid") === String(pid), `app-server pgid ${ps(pid, "pgid")} != pid ${pid}`)
+      yield* session.turn(
+        "Run exactly this shell command: `echo launched=$EA_LAUNCHED group=$(ps -o pgid=,sid= -p $$); nohup sleep 316 >/dev/null 2>&1 &` and then reply with the word done.",
+      )
+      const out = events.filter(is("ToolResult")).map((e) => e.output).join("\n")
+      check(out.includes("launched=1"), `EA_LAUNCHED not seen: ${out}`)
+      yield* Effect.sleep(Duration.millis(500))
+      const finishedBg = pgrep("sleep 316") === "" ? "killed by codex when its command ended" : "survived its command"
+      yield* session.send("Run exactly this shell command: `nohup sleep 317 >/dev/null 2>&1 & sleep 318` and then reply ok.")
+      yield* waitFor(events, (e): e is Extract<AgentEvent, { _tag: "ToolCall" }> => e._tag === "ToolCall" && e.summary.includes("sleep 318"))
+      yield* Effect.sleep(Duration.seconds(1))
+      const bg = pgrep("sleep 317").split("\n")[0]
+      const fg = pgrep("sleep 318").split("\n")[0]
+      check(bg && fg, `both sleeps running before close (bg ${bg}, fg ${fg})`)
+      return {
+        pid,
+        command: /group=\s*(\d+)\s+(\d+)/.exec(out)?.slice(1).join("/") ?? "?",
+        bg: `${ps(bg!, "pgid")}/${ps(bg!, "sid")}`,
+        finishedBg,
+      }
+      // scope closes here, mid-command, without `end`
+    }),
+  )
+  yield* Effect.sleep(Duration.millis(500))
+  check(!alive(info.pid), `app-server ${info.pid} survived the scope`)
+  const left = markers.flatMap((m) => pgrep(m).split("\n").filter(Boolean))
+  if (left.length > 0) execSync(`kill ${left.join(" ")}`) // our own strays; don't leak them
+  check(left.length === 0, `processes escaped (pgid/sid of bg ${info.bg}; app-server group ${info.pid}): ${left}`)
+  return `EA_LAUNCHED=1 seen; pid ${info.pid} leads its group; command pgid/sid ${info.command}, bg ${info.bg}; finished command's bg ${info.finishedBg}; running fg+bg gone after close`
+}).pipe(
+  Effect.provide(agentLayer("launcher")),
+  Effect.provide(
+    Launcher.layer(() => Effect.succeed((cmd) => ({ command: "env", args: ["EA_LAUNCHED=1", cmd.command, ...cmd.args] }))),
+  ),
+)
+
+/**
+ * Informational: SIGKILL app-server's process group mid-command (what the
+ * force-kill and the stall kill do). Codex runs each command in its own PTY
+ * session, outside that group, so this reports whether it survives (and
+ * cleans it up) rather than asserting.
+ */
+const groupKill: Scenario = Effect.gen(function* () {
+  const [bgMarker, fgMarker] = ["sleep 319", "sleep 320"]
+  check(pgrep(bgMarker) === "" && pgrep(fgMarker) === "", "strays already running")
+  const agent = yield* Agent
+  const session = yield* agent.open(base)
+  const events = yield* collect(session)
+  const pid = Option.getOrThrow(yield* session.pid)
+  yield* session.send(`Run exactly this shell command: \`nohup ${bgMarker} >/dev/null 2>&1 & ${fgMarker}\` and then reply ok.`)
+  yield* waitFor(events, (e): e is Extract<AgentEvent, { _tag: "ToolCall" }> => e._tag === "ToolCall" && e.summary.includes(fgMarker))
+  yield* Effect.sleep(Duration.seconds(1))
+  check(pgrep(bgMarker) !== "" && pgrep(fgMarker) !== "", "commands running")
+  process.kill(-pid, "SIGKILL")
+  yield* waitFor(events, is("TurnEnded"))
+  yield* Effect.sleep(Duration.seconds(1))
+  const fate = (marker: string, what: string) => {
+    const left = pgrep(marker)
+    if (left === "") return `${what} died`
+    execSync(`kill ${left.split("\n").join(" ")}`)
+    return `${what} SURVIVED (cleaned up by the script)`
+  }
+  const fg = fate(fgMarker, "foreground command")
+  const bg = fate(bgMarker, "nohup background")
+  // The library sweeps the dead app-server's marked orphans, so neither survives.
+  check(!fg.includes("SURVIVED") && !bg.includes("SURVIVED"), `${fg}, ${bg}`)
+  return `after SIGKILL of app-server's group: ${fg}, ${bg}`
+}).pipe(Effect.provide(agentLayer("group-kill")))
+
+const status: Scenario = Effect.gen(function* () {
+  const agent = yield* Agent
+  const s = yield* agent.status
+  check(s.provider === "codex" && s.plan !== null, `status ${JSON.stringify(s)}`)
+  check(s.windows.length > 0, "status windows")
+  check(s.usable === (s.reason === null), "usable iff no reason")
+  yield* Effect.sleep(Duration.millis(300))
+  saveFixture("status")
+  return `usable=${s.usable} reason=${s.reason} plan=${s.plan} windows=${s.windows.map((w) => `${w.window}/${w.label}:${w.usedPercent}%`).join(",")}`
+}).pipe(Effect.provide(agentLayer("status")))
+
+/** Not signed in: CODEX_HOME pointed at an empty directory. */
+const statusSignedOut: Scenario = Effect.gen(function* () {
+  const home = mkdtempSync(`${ROOT}/empty-home-`)
+  const previous = process.env.CODEX_HOME
+  process.env.CODEX_HOME = home
+  const s = yield* (yield* Agent).status.pipe(
+    Effect.ensuring(
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.CODEX_HOME
+        else process.env.CODEX_HOME = previous
+      }),
+    ),
+  )
+  rmSync(home, { recursive: true, force: true })
+  check(!s.usable && s.reason === "unauthenticated" && s.windows.length === 0, `status ${JSON.stringify(s)}`)
+  yield* Effect.sleep(Duration.millis(300))
+  saveFixture("status-signed-out", readFileSync(recPath("status-signed-out"), "utf8").replaceAll(home, "/tmp/empty-codex-home"))
+  return `usable=${s.usable} reason=${s.reason}`
+}).pipe(Effect.provide(agentLayer("status-signed-out")))
+
+/** A finished thread read back with `history`, without resuming it (its rollout is untouched). */
+const history: Scenario = Effect.gen(function* () {
+  const agent = yield* Agent
+  const { sessionId, location } = yield* Effect.scoped(
+    Effect.gen(function* () {
+      const s = yield* agent.open(base)
+      yield* s.turn("Run the shell command `echo history-probe` and then reply with the word done.")
+      yield* s.turn("Reply with the word pong.")
+      yield* s.end
+      return { sessionId: s.sessionId, location: Option.getOrThrow(s.location) }
+    }),
+  )
+  const before = statSync(location)
+  const events = yield* agent.history(sessionId, { cwd })
+  const after = statSync(location)
+  check(before.mtimeMs === after.mtimeMs && before.size === after.size, "history modified the rollout")
+  const tags = events.map((e) => e._tag)
+  check(tags.filter((t) => t === "TurnStarted").length === 2 && tags.filter((t) => t === "TurnEnded").length === 2, `tags ${tags}`)
+  check(events.filter(is("UserMessage")).some((e) => e.text.includes("echo history-probe")), "user message")
+  check(events.filter(is("ToolResult")).some((e) => e.output.includes("history-probe")), "tool result")
+  check(events.filter(is("TurnEnded")).every((e) => e.outcome._tag === "Succeeded"), "outcomes")
+  yield* Effect.sleep(Duration.millis(300))
+  saveFixture("history")
+  const missing = yield* agent.history(SessionId.make("019a0000-0000-7000-8000-000000000000"), { cwd }).pipe(Effect.flip)
+  check(missing._tag === "SessionNotFound", `missing -> ${missing._tag}`)
+  yield* Effect.sleep(Duration.millis(300))
+  saveFixture("history-missing", readFileSync(recPath("history"), "utf8"))
+  return `${events.length} events: ${tags.join(" ")}; rollout untouched; missing -> ${missing._tag}: ${missing.message}`
+}).pipe(Effect.provide(agentLayer("history")))
+
+/** The watchdog stops a silent command (toolIdle), and the session keeps working after the interrupt. */
+const stall: Scenario = Effect.gen(function* () {
+  const agent = yield* Agent
+  const session = yield* agent.open({ ...base, watchdog: { idle: "30 seconds", toolIdle: "3 seconds" } })
+  const events = yield* collect(session)
+  const t0 = Date.now()
+  const failure = yield* session.turn("Run the shell command `sleep 30 && echo done` and then reply ok.").pipe(Effect.flip)
+  const secs = (Date.now() - t0) / 1000
+  check(failure._tag === "Stalled" && failure.inTool && failure.idleMs >= 3000, `got ${JSON.stringify(failure)}`)
+  check(secs < 25, `took ${secs}s`)
+  check(events.find(is("TurnEnded"))?.outcome === failure, "TurnEnded carries the Stalled outcome")
+  yield* Effect.sleep(Duration.millis(500))
+  check(pgrep("sleep 30 && echo done") === "", "stalled command still running")
+  const next = yield* session.turn("Reply with the word pong.")
+  check(/pong/i.test(next.finalText), "session usable after the stall")
+  check(Option.isSome(yield* session.pid), "app-server still running")
+  yield* session.end
+  saveFixture("stall")
+  const f = failure as { idleMs: number; message: string }
+  return `Stalled inTool after ${secs.toFixed(1)}s (idleMs ${f.idleMs}); command killed; next turn "${next.finalText}"`
+}).pipe(Effect.provide(agentLayer("stall")))
+
+const hooks: Scenario = Effect.gen(function* () {
+  const error = yield* (yield* Agent)
+    .open({ ...base, hooks: { beforeStop: () => Effect.succeedNone } })
+    .pipe(Effect.flip)
+  check(error._tag === "AgentError" && /hooks/.test(error.message), `got ${error._tag}`)
+  return `open refused: ${error.message}`
+}).pipe(Effect.provide(agentLayer("hooks")))
+
 const scenarios: Record<string, Scenario> = {
   simple,
   command,
@@ -353,6 +549,13 @@ const scenarios: Record<string, Scenario> = {
   "spend-cap": spendCap,
   "no-price": noPrice,
   killed,
+  launcher,
+  "group-kill": groupKill,
+  status,
+  "status-signed-out": statusSignedOut,
+  history,
+  stall,
+  hooks,
 }
 
 const appServers = () => {

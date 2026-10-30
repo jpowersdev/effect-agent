@@ -52,6 +52,14 @@ export class ProcessKilled extends Schema.TaggedError<ProcessKilled>()("ProcessK
   exitCode: Schema.NullOr(Schema.Number),
 }) {}
 
+/** No events for longer than `RunOptions.watchdog` allows, so the turn was stopped. */
+export class Stalled extends Schema.TaggedError<Stalled>()("Stalled", {
+  message: Schema.String,
+  idleMs: Schema.Number,
+  /** Whether a tool call was running (so `toolIdle` applied). */
+  inTool: Schema.Boolean,
+}) {}
+
 /** The caller interrupted the turn. */
 export class Interrupted extends Schema.TaggedError<Interrupted>()("Interrupted", {
   message: Schema.String,
@@ -65,6 +73,7 @@ export const TurnFailure = Schema.Union([
   SpendCapReached,
   ContextExhausted,
   ProcessKilled,
+  Stalled,
   Interrupted,
 ])
 export type TurnFailure = typeof TurnFailure.Type

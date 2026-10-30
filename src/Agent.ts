@@ -7,10 +7,10 @@
  *
  * A session is a scoped resource: closing its Scope stops the agent process.
  */
-import { Context, Effect, Option, Schema, Scope, Stream } from "effect"
+import { Context, type Duration, Effect, Option, Schema, Scope, Stream } from "effect"
 import type { AgentError, SessionNotFound, TurnFailure } from "./AgentError.ts"
 import type { AgentEvent, TurnSucceeded } from "./AgentEvent.ts"
-import { MessageId, type SessionId, TurnId } from "./Domain.ts"
+import { LimitWindowStatus, MessageId, type SessionId, TurnId } from "./Domain.ts"
 
 export const Effort = Schema.Literals(["minimal", "low", "medium", "high", "xhigh", "max"])
 export type Effort = typeof Effort.Type
@@ -39,6 +39,40 @@ export interface RunOptions {
   readonly spendCapUsd?: number
   /** Resume an existing session; fails with `SessionNotFound` if the provider has no record of it. */
   readonly resume?: SessionId
+  /**
+   * End a running turn `Stalled` after this long with no events. `Heartbeat`
+   * events count, so a model that is thinking is not idle. While a tool call
+   * is running (a `ToolCall` without its `ToolResult`) the limit is `toolIdle`,
+   * which defaults to `idle`. A stalled turn is interrupted; if it hasn't
+   * ended after `grace` (default 10 seconds) the agent process is killed,
+   * which ends the session.
+   */
+  readonly watchdog?: {
+    readonly idle: Duration.Input
+    readonly toolIdle?: Duration.Input
+    readonly grace?: Duration.Input
+  }
+  /** Callbacks that can add context to the turn. Only where `capabilities.hooks` is true. */
+  readonly hooks?: Hooks
+}
+
+export interface ToolHookInput {
+  readonly callId: string
+  readonly name: string
+  readonly input: unknown
+}
+
+/**
+ * Each hook may return text that is added to the model's context. Hooks run
+ * inside the agent's tool loop, so keep them fast; a failing hook adds nothing.
+ */
+export interface Hooks {
+  readonly beforeTool?: (call: ToolHookInput) => Effect.Effect<Option.Option<string>>
+  readonly afterTool?: (
+    call: ToolHookInput & { readonly output: string; readonly isError: boolean },
+  ) => Effect.Effect<Option.Option<string>>
+  /** The agent is about to end its turn. Returning text keeps the turn going with that text as context. */
+  readonly beforeStop?: () => Effect.Effect<Option.Option<string>>
 }
 
 /** Message content. Text only for now. */
@@ -66,6 +100,18 @@ export const Capabilities = Schema.Struct({
 })
 export type Capabilities = typeof Capabilities.Type
 
+export const AccountStatus = Schema.Struct({
+  provider: Schema.String,
+  /** Signed in, and no limit window or spend control is exhausted. */
+  usable: Schema.Boolean,
+  reason: Schema.NullOr(Schema.Literals(["unauthenticated", "usage_limited", "spend_limited"])),
+  windows: Schema.Array(LimitWindowStatus),
+  /** Subscription or plan name, e.g. `pro` or `max`. */
+  plan: Schema.NullOr(Schema.String),
+  checkedAt: Schema.DateTimeUtcFromMillis,
+})
+export type AccountStatus = typeof AccountStatus.Type
+
 export const SteerOutcome = Schema.Union([
   /** Landed in the turn that was running when `steer` was called. */
   Schema.TaggedStruct("Landed", { messageId: MessageId, turnId: TurnId }),
@@ -79,6 +125,8 @@ export interface AgentSession {
   readonly provider: string
   /** Where the provider stores this session (a transcript file), when known. */
   readonly location: Option.Option<string>
+  /** The agent process's pid (the wrapped command's, if a `Launcher` wraps it). */
+  readonly pid: Effect.Effect<Option.Option<number>>
   /**
    * Subscribe now; the returned stream holds every event from this point on,
    * starting with the session's `SessionStarted` once it is known. Use this
@@ -105,5 +153,16 @@ export class Agent extends Context.Service<
     readonly provider: string
     readonly capabilities: Effect.Effect<Capabilities, AgentError>
     readonly open: (options: RunOptions) => Effect.Effect<AgentSession, SessionNotFound | AgentError, Scope.Scope>
+    /** Sign-in and usage-limit status, without running a turn. */
+    readonly status: Effect.Effect<AccountStatus, AgentError>
+    /**
+     * A stored session's history as events: `UserMessage`, `Text`, `ToolCall`,
+     * `ToolResult`, `Compacted`, grouped by `TurnStarted`, with `TurnEnded`
+     * where the provider recorded how the turn ended.
+     */
+    readonly history: (
+      sessionId: SessionId,
+      options: { readonly cwd: string },
+    ) => Effect.Effect<ReadonlyArray<AgentEvent>, SessionNotFound | AgentError>
   }
 >()("effect-agent/Agent") {}

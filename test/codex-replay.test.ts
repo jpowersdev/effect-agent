@@ -5,8 +5,8 @@
  */
 import { readFileSync } from "node:fs"
 import { describe, expect, it } from "@effect/vitest"
-import { DateTime, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, Stream } from "effect"
-import { Agent, type AgentEvent, type AgentSession, type RunOptions, SessionId } from "../src/index.ts"
+import { DateTime, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect"
+import { AccountStatus, Agent, AgentEvent, type AgentSession, type RunOptions, SessionId } from "../src/index.ts"
 import { CodexAgent, CodexReplay } from "../src/codex/index.ts"
 
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/codex/${name}.jsonl`, import.meta.url), "utf8")
@@ -211,5 +211,114 @@ describe("CodexAgent over replays", () => {
       expect(yield* session.send("again").pipe(Effect.flip)).toMatchObject({ _tag: "AgentError" })
       expect(yield* session.interrupt.pipe(Effect.flip)).toMatchObject({ _tag: "AgentError" })
     }).pipe(Effect.provide(agent("process-killed"))),
+  )
+
+  it.live("session pid is none under replay", () =>
+    Effect.gen(function* () {
+      const session = yield* (yield* Agent).open(base)
+      expect(yield* session.pid).toEqual(Option.none())
+    }).pipe(Effect.provide(agent("simple"))),
+  )
+
+  it.live("hooks are refused before anything starts", () =>
+    Effect.gen(function* () {
+      const error = yield* (yield* Agent).open({ ...base, hooks: { beforeTool: () => Effect.succeedNone } }).pipe(Effect.flip)
+      expect(error).toMatchObject({ _tag: "AgentError", message: expect.stringMatching(/hooks.*config-only/) })
+    }).pipe(Effect.provide(agent("simple"))),
+  )
+
+  it.live("status: signed in, with limit windows and plan", () =>
+    Effect.gen(function* () {
+      const status = yield* (yield* Agent).status
+      Schema.encodeUnknownSync(AccountStatus)(status)
+      expect(status).toMatchObject({ provider: "codex", usable: true, reason: null, plan: "pro" })
+      expect(status.windows).toEqual([
+        { window: "weekly", label: "primary", usedPercent: 20, resetsAt: DateTime.makeUnsafe(1793803680_000) },
+      ])
+    }).pipe(Effect.provide(agent("status"))),
+  )
+
+  it.live("status: not signed in", () =>
+    Effect.gen(function* () {
+      const status = yield* (yield* Agent).status
+      expect(status).toMatchObject({ usable: false, reason: "unauthenticated", windows: [], plan: null })
+    }).pipe(Effect.provide(agent("status-signed-out"))),
+  )
+
+  it.live("history of a stored thread", () =>
+    Effect.gen(function* () {
+      const id = SessionId.make("01a1896b-e054-7371-b868-b778fad6ea05")
+      const events = yield* (yield* Agent).history(id, { cwd: base.cwd })
+      for (const e of events) Schema.encodeUnknownSync(AgentEvent)(e)
+      expect(events.map((e) => e._tag)).toEqual([
+        "TurnStarted", "UserMessage", "Text", "ToolCall", "ToolResult", "Text", "TurnEnded",
+        "TurnStarted", "UserMessage", "Text", "TurnEnded",
+      ])
+      const user = events.filter(is("UserMessage"))
+      expect(user[0]!.text).toMatch(/echo history-probe/)
+      expect(user[0]!.messageId).toMatch(/^ea-/)
+      expect(events.find(is("ToolCall"))).toMatchObject({ name: "shell", summary: "echo history-probe" })
+      expect(events.find(is("ToolResult"))).toMatchObject({ isError: false, output: expect.stringContaining("history-probe") })
+      const ends = events.filter(is("TurnEnded"))
+      expect(ends.map((e) => [e.outcome._tag, e.usage, e.cost])).toEqual([
+        ["Succeeded", null, null],
+        ["Succeeded", null, null],
+      ])
+      expect(ends[1]!.outcome).toMatchObject({ finalText: expect.stringMatching(/pong/i) })
+      // every event belongs to its turn
+      const starts = events.filter(is("TurnStarted"))
+      expect(ends.map((e) => e.turnId)).toEqual(starts.map((e) => e.turnId))
+    }).pipe(Effect.provide(agent("history"))),
+  )
+
+  it.live("history of an unknown thread fails with SessionNotFound", () =>
+    Effect.gen(function* () {
+      const id = SessionId.make("019a0000-0000-7000-8000-000000000000")
+      const error = yield* (yield* Agent).history(id, { cwd: base.cwd }).pipe(Effect.flip)
+      expect(error).toMatchObject({ _tag: "SessionNotFound", sessionId: id, message: expect.stringMatching(/thread not loaded/) })
+    }).pipe(Effect.provide(agent("history-missing"))),
+  )
+
+  it.live("watchdog: a silent tool call ends the turn Stalled, and the session keeps working", () =>
+    Effect.gen(function* () {
+      const session = yield* (yield* Agent).open({ ...base, watchdog: { idle: "30 seconds", toolIdle: "200 millis" } })
+      const { events } = yield* collect(session)
+      const failure = yield* session.turn("Run the shell command `sleep 30 && echo done` and then reply ok.").pipe(Effect.flip)
+      expect(failure).toMatchObject({ _tag: "Stalled", inTool: true })
+      if (failure._tag !== "Stalled") return
+      expect(failure.idleMs).toBeGreaterThanOrEqual(200)
+      expect(events.find(is("TurnEnded"))?.outcome).toBe(failure)
+      const next = yield* session.turn("Reply with the word pong.")
+      expect(next.finalText).toMatch(/pong/i)
+      expect(events.filter(is("TurnEnded")).map((e) => e.outcome._tag)).toEqual(["Stalled", "Succeeded"])
+    }).pipe(Effect.provide(agent("stall"))),
+  )
+
+  it.live("watchdog: a turn that doesn't end after the interrupt kills app-server, still Stalled", () =>
+    Effect.gen(function* () {
+      const session = yield* (yield* Agent).open({ ...base, watchdog: { idle: "30 seconds", toolIdle: "200 millis" } })
+      const { events, fiber } = yield* collect(session)
+      const failure = yield* session.turn("Run the shell command `sleep 30 && echo done` and then reply ok.").pipe(Effect.flip)
+      expect(failure).toMatchObject({ _tag: "Stalled", inTool: true })
+      expect(events.filter(is("TurnEnded")).map((e) => e.outcome)).toEqual([failure])
+      // like a process death afterwards
+      expect(Exit.isFailure(yield* Fiber.await(fiber))).toBe(true)
+      expect(yield* session.send("again").pipe(Effect.flip)).toMatchObject({ _tag: "AgentError", message: expect.stringMatching(/gone/) })
+      expect(yield* session.interrupt.pipe(Effect.flip)).toMatchObject({ _tag: "AgentError" })
+    }).pipe(Effect.provide(agent("stall-killed", { stallGrace: "100 millis" }))),
+  )
+
+  it.live("no watchdog without the option", () =>
+    Effect.gen(function* () {
+      // the stall recording, replayed without a watchdog, just waits for an interrupt
+      const session = yield* (yield* Agent).open(base)
+      const { events } = yield* collect(session)
+      yield* session.send("Run the shell command `sleep 30 && echo done` and then reply ok.")
+      yield* waitFor(events, is("ToolCall"))
+      yield* Effect.sleep(Duration.millis(300))
+      expect(events.some(is("TurnEnded"))).toBe(false)
+      yield* session.interrupt
+      expect(events.find(is("TurnEnded"))?.outcome._tag).toBe("Interrupted")
+    }).pipe(Effect.provide(agent("stall"))),
   )
 })

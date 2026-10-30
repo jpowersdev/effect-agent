@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
-import { DateTime } from "effect"
-import type { AgentEvent } from "../src/index.ts"
+import { DateTime, Schema } from "effect"
+import { AccountStatus, AgentEvent } from "../src/index.ts"
 import { CodexAgent, CodexAppServer, CodexEvents } from "../src/codex/index.ts"
 import type * as P from "../src/codex/protocol.ts"
 
@@ -243,9 +243,184 @@ describe("helpers", () => {
     const rpc = (message: string) => new CodexAppServer.CodexRpcError({ method: "m", code: -32600, message })
     expect(CodexAgent.isSessionNotFoundError(rpc("no rollout found for thread id 019a"))).toBe(true)
     expect(CodexAgent.isSessionNotFoundError(rpc("invalid session id: invalid character"))).toBe(true)
+    expect(CodexAgent.isSessionNotFoundError(rpc("thread not loaded: 019a0000-0000-7000-8000-000000000000"))).toBe(true)
+    expect(CodexAgent.isSessionNotFoundError(rpc("invalid thread id: invalid character: expected"))).toBe(true)
     expect(CodexAgent.isSessionNotFoundError(rpc("something else"))).toBe(false)
     expect(CodexAgent.isStaleSteerError(rpc("no active turn to steer"))).toBe(true)
     expect(CodexAgent.isStaleSteerError(rpc("expected active turn id `a` but found `b`"))).toBe(true)
     expect(CodexAgent.isStaleSteerError(rpc("input too long"))).toBe(false)
+  })
+})
+
+describe("stall classification", () => {
+  const stalled = { idleMs: 3_500, inTool: true }
+  it("a stalled turn ends Stalled however it stopped", () => {
+    for (const t of [turn("interrupted"), turn("failed", err("other"))]) {
+      expect(CodexEvents.classifyOutcome(t, ctx({ stalled }))).toMatchObject({ _tag: "Stalled", idleMs: 3_500, inTool: true })
+    }
+    // killed after the grace period: still Stalled, not ProcessKilled
+    const killed = CodexEvents.classifyOutcome(turn("interrupted"), ctx({ stalled, processExit: { exitCode: null, signal: "SIGKILL" } }))
+    expect(killed).toMatchObject({ _tag: "Stalled", inTool: true })
+    // and not Interrupted even if the caller also interrupted
+    expect(CodexEvents.classifyOutcome(turn("interrupted"), ctx({ stalled, interruptRequested: true }))._tag).toBe("Stalled")
+  })
+
+  it("a stalled turn that completed anyway succeeded", () => {
+    expect(CodexEvents.classifyOutcome(turn("completed"), ctx({ stalled }))._tag).toBe("Succeeded")
+  })
+
+  it("describes the stall", () => {
+    expect(CodexEvents.stalledFailure(stalled).message).toMatch(/3\.5s while a tool call was running/)
+    expect(CodexEvents.stalledFailure({ idleMs: 30_000, inTool: false }).message).not.toMatch(/tool/)
+  })
+})
+
+describe("accountStatus", () => {
+  const signedIn: P.GetAccountResponse = { account: { type: "chatgpt", email: "user@example.com", planType: "pro" }, requiresOpenaiAuth: true }
+  const snapshot = (over: Partial<P.RateLimitSnapshot> = {}): P.RateLimitSnapshot => ({
+    limitId: "codex",
+    limitName: null,
+    primary: { usedPercent: 17, windowDurationMins: 10080, resetsAt: 1793803680 },
+    secondary: null,
+    credits: { hasCredits: true, unlimited: false, balance: "100" },
+    spendControlReached: false,
+    planType: "pro",
+    rateLimitReachedType: null,
+    ...over,
+  })
+  const limits = (over: Partial<P.RateLimitSnapshot> = {}, ordinaryUsageAllowed: boolean | null = true): P.GetAccountRateLimitsResponse => ({
+    ordinaryUsageAllowed,
+    rateLimits: snapshot(over),
+    rateLimitsByLimitId: { codex: snapshot(over) },
+  })
+  const status = (account: P.GetAccountResponse, l: P.GetAccountRateLimitsResponse | null) => {
+    const s = CodexEvents.accountStatus(account, l, 1_793_300_000_000)
+    Schema.encodeUnknownSync(AccountStatus)(s)
+    return s
+  }
+
+  it("maps the audit's sample", () => {
+    const s = status(signedIn, limits())
+    expect(s).toMatchObject({ provider: "codex", usable: true, reason: null, plan: "pro" })
+    expect(s.windows).toHaveLength(1)
+    expect(s.windows[0]).toMatchObject({ window: "weekly", label: "primary", usedPercent: 17 })
+    expect(DateTime.toEpochMillis(s.windows[0]!.resetsAt!)).toBe(1793803680_000)
+    expect(DateTime.toEpochMillis(s.checkedAt)).toBe(1_793_300_000_000)
+  })
+
+  it("maps window durations", () => {
+    const s = status(signedIn, limits({
+      primary: { usedPercent: 5, windowDurationMins: 300, resetsAt: null },
+      secondary: { usedPercent: 1, windowDurationMins: 1440, resetsAt: 1 },
+    }))
+    expect(s.windows.map((w) => [w.window, w.label, w.resetsAt === null])).toEqual([
+      ["five_hour", "primary", true],
+      ["other", "secondary", false],
+    ])
+  })
+
+  it("reports other limit buckets with their id in the label", () => {
+    const l = limits()
+    const other = snapshot({ limitId: "codex_other", primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: 1 } })
+    const s = status(signedIn, { ...l, rateLimitsByLimitId: { ...l.rateLimitsByLimitId, codex_other: other } })
+    expect(s.windows.map((w) => w.label)).toEqual(["primary", "codex_other.primary"])
+    expect(s.usable).toBe(true) // only the codex bucket decides
+  })
+
+  it("no account is unauthenticated", () => {
+    expect(status({ account: null, requiresOpenaiAuth: true }, null)).toMatchObject({ usable: false, reason: "unauthenticated", plan: null, windows: [] })
+    // a provider that needs no OpenAI sign-in
+    expect(status({ account: null, requiresOpenaiAuth: false }, null)).toMatchObject({ usable: true, reason: null })
+  })
+
+  it("usage_limited: reached type, an exhausted window, or ordinary usage refused; credits don't help", () => {
+    expect(status(signedIn, limits({ rateLimitReachedType: "rate_limit_reached" }))).toMatchObject({ usable: false, reason: "usage_limited" })
+    const full = { usedPercent: 100, windowDurationMins: 300, resetsAt: 1 }
+    expect(status(signedIn, limits({ secondary: full, credits: { hasCredits: true, unlimited: true, balance: null } }))).toMatchObject({
+      usable: false,
+      reason: "usage_limited",
+    })
+    expect(status(signedIn, limits({}, false))).toMatchObject({ usable: false, reason: "usage_limited" })
+    expect(status(signedIn, limits({}, null)).usable).toBe(true) // unknown is not limited
+  })
+
+  it("spend_limited when spend control is reached", () => {
+    expect(status(signedIn, limits({ spendControlReached: true }))).toMatchObject({ usable: false, reason: "spend_limited" })
+    expect(status(signedIn, limits({ spendControlReached: null })).usable).toBe(true)
+  })
+
+  it("an API-key account without subscription limits is usable", () => {
+    expect(status({ account: { type: "apiKey" }, requiresOpenaiAuth: true }, null)).toMatchObject({ usable: true, plan: null, windows: [] })
+  })
+})
+
+describe("historyEvents", () => {
+  const user = (id: string, text: string, clientId: string | null = null): P.ThreadItem => ({
+    type: "userMessage",
+    id,
+    clientId,
+    content: [{ type: "text", text, text_elements: [] }],
+  })
+  const agentText = (id: string, text: string, phase: P.MessagePhase | null = "final_answer"): P.ThreadItem => ({ type: "agentMessage", id, text, phase })
+  const command = (id: string, status: "completed" | "failed" | "inProgress", exitCode: number | null, output: string | null): P.ThreadItem => ({
+    type: "commandExecution",
+    id,
+    command: "/bin/zsh -lc 'echo hi'",
+    cwd: "/w",
+    processId: "1",
+    status,
+    commandActions: [{ type: "unknown", command: "echo hi" }],
+    aggregatedOutput: output,
+    exitCode,
+  })
+  const stored = (id: string, status: P.TurnStatus, items: ReadonlyArray<P.ThreadItem>, error: P.TurnError | null = null): P.Turn => ({
+    id,
+    items,
+    itemsView: "full",
+    status,
+    error,
+  })
+
+  it("maps turns, items and outcomes", () => {
+    const events = CodexEvents.historyEvents([
+      stored("t1", "completed", [
+        user("u1", "run it", "ea-1"),
+        { type: "reasoning", id: "r1" },
+        agentText("a1", "running", "commentary"),
+        command("c1", "completed", 0, "hi\n"),
+        { type: "contextCompaction", id: "x1" },
+        agentText("a2", "done"),
+      ]),
+      stored("t2", "interrupted", [user("u2", "sleep"), command("c2", "failed", -1, null)]),
+      stored("t3", "failed", [user("u3", "hello")], err("usageLimitExceeded", "You've hit your usage limit")),
+      stored("t4", "inProgress", [user("u4", "still going"), command("c4", "inProgress", null, null)]),
+    ])
+    for (const e of events) Schema.encodeUnknownSync(AgentEvent)(e)
+    expect(events.map((e) => e._tag)).toEqual([
+      "TurnStarted", "UserMessage", "Text", "ToolCall", "ToolResult", "Compacted", "Text", "TurnEnded",
+      "TurnStarted", "UserMessage", "ToolCall", "ToolResult", "TurnEnded",
+      "TurnStarted", "UserMessage", "TurnEnded",
+      "TurnStarted", "UserMessage", "ToolCall",
+    ])
+    expect(events[1]).toMatchObject({ _tag: "UserMessage", turnId: "t1", messageId: "ea-1", text: "run it" })
+    expect(events[3]).toMatchObject({ _tag: "ToolCall", callId: "c1", name: "shell", summary: "echo hi" })
+    expect(events[4]).toMatchObject({ _tag: "ToolResult", callId: "c1", isError: false, output: "hi\n" })
+    const ends = events.filter((e): e is Extract<AgentEvent, { _tag: "TurnEnded" }> => e._tag === "TurnEnded")
+    expect(ends.map((e) => e.outcome._tag)).toEqual(["Succeeded", "Interrupted", "UsageLimited"])
+    expect(ends[0]).toMatchObject({ usage: null, cost: null, outcome: { finalText: "done" } })
+    expect(ends[1]!.outcome).toMatchObject({ message: "interrupted" })
+    expect(events[11]).toMatchObject({ _tag: "ToolResult", isError: true })
+    expect(events[9]).toMatchObject({ messageId: null })
+    // raw keeps the stored turn, without duplicating its items
+    expect(events[0]!.raw).toMatchObject({ id: "t1", status: "completed" })
+    expect((events[0]!.raw as any).items).toBeUndefined()
+  })
+})
+
+describe("hooks", () => {
+  it("refuses any hook, accepts none", () => {
+    expect(CodexAgent.hooksError({ cwd: "/w" })).toBeNull()
+    expect(CodexAgent.hooksError({ cwd: "/w", hooks: {} })).toBeNull()
+    expect(CodexAgent.hooksError({ cwd: "/w", hooks: { afterTool: () => null as any } })).toMatch(/afterTool.*config-only/)
   })
 })

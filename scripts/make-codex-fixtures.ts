@@ -7,6 +7,9 @@
  *   the agent makes to find the reset time.
  * - process-killed.jsonl: command.jsonl cut off after the command starts,
  *   then app-server dies by SIGKILL.
+ * - stall-killed.jsonl: stall.jsonl cut off after the watchdog's
+ *   `turn/interrupt` is acknowledged: the turn never ends, so the agent
+ *   has to kill app-server after its grace period.
  *
  *   node scripts/make-codex-fixtures.ts
  */
@@ -86,4 +89,12 @@ const write = (name: string, frames: Array<unknown>) =>
   write("process-killed", [...frames.slice(0, i + 1), { dir: "exit", exitCode: null, signal: "SIGKILL" }])
 }
 
-console.log("wrote usage-limit.jsonl, process-killed.jsonl")
+// ---- stall-killed ----
+{
+  const frames = read("stall")
+  const out = frames.findIndex((f) => f.dir === "out" && f.msg.method === "turn/interrupt")
+  const ack = frames.findIndex((f, i) => i > out && f.dir === "in" && f.msg.id === frames[out].msg.id)
+  write("stall-killed", frames.slice(0, ack + 1))
+}
+
+console.log("wrote usage-limit.jsonl, process-killed.jsonl, stall-killed.jsonl")

@@ -4,16 +4,24 @@
  *
  *   CodexAppServer.layer().pipe(Layer.provide(NodeServices.layer))
  *
- * The process is spawned through `ChildProcessSpawner`, so a consumer can
- * supply its own spawner (for example one that wraps commands in
- * `systemd-run --scope`). Closing the connection's Scope sends SIGTERM to
- * app-server (which stops the commands it started) and SIGKILLs it after
- * `forceKillAfter`. Avoid relying on the SIGKILL: it orphans the agent's
- * running commands.
+ * The process is spawned through `ChildProcessSpawner`, wrapped by the
+ * `Launcher` if one is provided (in the caller's context or the layer's),
+ * and started in its own process group. Closing the connection's Scope
+ * sends SIGTERM to that group and SIGKILLs it after `forceKillAfter`.
+ *
+ * Codex (0.162.1) runs each command in its own PTY session, so commands are
+ * not in that group: they stop because app-server stops them on SIGTERM
+ * (verified, including `nohup ... &` children of a running command). If
+ * app-server has to be SIGKILLed, a running command's foreground process
+ * dies with its PTY but a `nohup`ed background one survives. Use a
+ * `Launcher` that puts the process in a cgroup (`systemd-run --scope`) to
+ * catch those too.
  */
 import { Cause, Context, Deferred, Duration, Effect, Exit, Fiber, FileSystem, Layer, Option, Queue, Schema, Scope, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { AgentError } from "../AgentError.ts"
+import * as Launcher from "../Launcher.ts"
+import * as ProcessTree from "../ProcessTree.ts"
 import * as P from "./protocol.ts"
 
 const provider = "codex"
@@ -66,6 +74,13 @@ export interface Connection {
   readonly exited: Effect.Effect<Option.Option<ProcessExit>>
   /** SIGTERM app-server (SIGKILL after the timeout) and wait for it. Idempotent. */
   readonly close: Effect.Effect<void>
+  /**
+   * Stop a server that stopped responding: SIGTERM its process group, SIGKILL
+   * after 2 seconds. (The SIGTERM matters: Codex runs each command in its own
+   * PTY session, outside the group, and only app-server's own shutdown
+   * reliably stops them; a `nohup`ed background command survives a SIGKILL.)
+   */
+  readonly kill: Effect.Effect<void>
 }
 
 export interface Options {
@@ -226,6 +241,15 @@ export const make = (options: Options = {}) =>
     const fs = yield* Effect.serviceOption(FileSystem.FileSystem)
     const codexPath = options.codexPath ?? "codex"
     const forceKillAfter = options.forceKillAfter ?? Duration.seconds(10)
+    // A Launcher provided to the layer applies when the caller doesn't provide its own.
+    const layerLauncher = yield* Effect.serviceOption(Launcher.Launcher)
+    const prepareWrap = (cwd: string) =>
+      Effect.flatMap(Effect.serviceOption(Launcher.Launcher), (callerLauncher) => {
+        const prepare = Launcher.prepare({ provider, cwd })
+        return Option.isNone(callerLauncher) && Option.isSome(layerLauncher)
+          ? Effect.provideService(prepare, Launcher.Launcher, layerLauncher.value)
+          : prepare
+      })
 
     const version = yield* Effect.cached(
       spawner.string(ChildProcess.make(codexPath, ["--version"], { stderr: "ignore" })).pipe(
@@ -262,12 +286,19 @@ export const make = (options: Options = {}) =>
           if (recordPath !== undefined) recordBuffer.push(JSON.stringify({ dir, msg }) + "\n")
         }
 
+        const wrap = yield* prepareWrap(connectOptions.cwd)
+        // Inherited by app-server and every command it runs (each in its own PTY session,
+        // outside our process group), so they can all be found and stopped.
+        const marker = ProcessTree.newMarker()
+        const command = wrap({ command: codexPath, args: ["app-server", ...(options.args ?? [])] })
         const stdinQueue = yield* Queue.unbounded<string, Cause.Done>()
         const handle = yield* spawner
           .spawn(
-            ChildProcess.make(codexPath, ["app-server", ...(options.args ?? [])], {
+            ChildProcess.make(command.command, [...command.args], {
               cwd: connectOptions.cwd,
-              env: childEnv(connectOptions.env),
+              // Own process group: kills (scope close, `close`, `kill`) signal the whole group.
+              detached: true,
+              env: { ...childEnv(connectOptions.env), [ProcessTree.markerVariable]: marker },
               extendEnv: true,
               stdin: "pipe",
               stdout: "pipe",
@@ -276,7 +307,11 @@ export const make = (options: Options = {}) =>
               forceKillAfter,
             }),
           )
-          .pipe(Effect.mapError((cause) => agentError(`could not start ${codexPath} app-server`, cause)))
+          .pipe(Effect.mapError((cause) => agentError(`could not start ${command.command} (codex app-server)`, cause)))
+        // Runs before the spawner's own kill (finalizers run in reverse): SIGTERM app-server
+        // and everything carrying the marker, SIGKILL leftovers after the grace period.
+        const sweep = ProcessTree.kill(marker, { pid: handle.pid, grace: forceKillAfter })
+        yield* Effect.addFinalizer(() => sweep)
 
         const write = (msg: P.Message) =>
           Effect.suspend(() => {
@@ -343,6 +378,8 @@ export const make = (options: Options = {}) =>
               ? { exitCode: exit.value, signal: null }
               : { exitCode: null, signal: signalOf(Cause.squash(exit.cause)) }
             return Effect.gen(function* () {
+              // Whatever still carries the marker is an orphan of a dead app-server.
+              yield* ProcessTree.kill(marker, { grace: Duration.seconds(2) }).pipe(Effect.forkScoped)
               yield* Fiber.join(reader).pipe(Effect.timeoutOption(Duration.seconds(2)))
               yield* core.failPending(
                 `codex app-server exited (${info.signal ?? `code ${info.exitCode}`})${
@@ -359,6 +396,13 @@ export const make = (options: Options = {}) =>
         const close = Effect.gen(function* () {
           yield* core.failPending("connection closed")
           yield* Effect.ignore(handle.kill({ killSignal: "SIGTERM", forceKillAfter }))
+          yield* sweep
+          yield* flush
+        })
+        const kill = Effect.gen(function* () {
+          yield* core.failPending("connection killed")
+          yield* Effect.ignore(handle.kill({ killSignal: "SIGTERM", forceKillAfter: Duration.seconds(2) }))
+          yield* ProcessTree.kill(marker, { pid: handle.pid, grace: Duration.seconds(2) })
           yield* flush
         })
 
@@ -383,6 +427,7 @@ export const make = (options: Options = {}) =>
             Effect.flatMap((done) => (done ? Effect.map(Deferred.await(core.exitSignal), Option.some) : Effect.succeedNone)),
           ),
           close,
+          kill,
         } satisfies Connection
       })
 

@@ -1,0 +1,5 @@
+{"dir":"out","msg":{"id":1,"method":"initialize","params":{"clientInfo":{"name":"effect_agent","title":null,"version":"0.0.0"},"capabilities":{"experimentalApi":true,"requestAttestation":false,"optOutNotificationMethods":["turn/moderationMetadata","remoteControl/status/changed","rawResponse/completed","rawResponseItem/completed"]}}}}
+{"dir":"in","msg":{"id":1,"result":{"userAgent":"effect_agent/0.162.1 (NixOS 26.11.0; x86_64) unknown (effect_agent; 0.0.0)","codexHome":"/tmp/empty-codex-home","platformFamily":"unix","platformOs":"linux"}}}
+{"dir":"out","msg":{"method":"initialized"}}
+{"dir":"out","msg":{"id":2,"method":"account/read","params":{}}}
+{"dir":"in","msg":{"id":2,"result":{"account":null,"requiresOpenaiAuth":true,"workspaceRouting":null}}}

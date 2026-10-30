@@ -8,23 +8,46 @@
  * `open` spawns the CLI, waits for its initialize handshake and returns a
  * `ClaudeQuery`: push user messages, read raw frames, interrupt, end. Closing
  * the Scope closes the query (the SDK ends stdin, then kills the process after
- * a short grace) and waits for the frame pump to finish.
+ * a short grace), waits for the frame pump to finish, then kills the process
+ * group, so commands the agent left running stop too.
  *
- * With `record`, every frame is appended to a JSONL file that
- * `ClaudeReplay.layer` can play back without a process.
+ * The CLI is spawned here (the SDK's `spawnClaudeCodeProcess`), detached into
+ * its own process group, with the command wrapped by a `Launcher.Wrap`. Claude
+ * Code's Bash tool starts each command in a new session (its own process
+ * group), so killing the CLI's group alone would leave `(cmd &)` running; the
+ * CLI is also given a unique `EFFECT_AGENT_PROCESS` variable, which every
+ * process it starts inherits, and on Linux processes carrying it are killed too.
+ *
+ * `status` and `history` are the account and transcript reads `ClaudeAgent`
+ * needs outside a session.
+ *
+ * With `record`, every frame (and every status/history answer) is appended
+ * to a JSONL file that `ClaudeReplay.layer` can play back without a process.
  */
 import {
+  type AccountInfo,
   getSessionInfo,
+  getSessionMessages,
   query as sdkQuery,
   type Options,
+  type SDKControlGetUsageResponse,
   type SDKMessage,
+  type SDKSessionInfo,
   type SDKUserMessage,
+  type SessionMessage,
+  type SessionStore,
+  type SessionStoreEntry,
+  type SpawnedProcess,
+  type SpawnOptions,
 } from "@anthropic-ai/claude-agent-sdk"
 import { Cause, Context, Duration, Effect, Exit, Fiber, Layer, Option, Queue, Schema, Scope, Stream } from "effect"
+import { type ChildProcess, spawn as nodeSpawn } from "node:child_process"
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import type * as Launcher from "../Launcher.ts"
+import * as ProcessTree from "../ProcessTree.ts"
 
 // ---------------------------------------------------------------------------
 // Frames
@@ -106,6 +129,13 @@ export type RecordLine =
   | { readonly dir: "in"; readonly frame: Frame }
   | { readonly dir: "ctl"; readonly call: "interrupt" | "end" }
   | { readonly dir: "ctl"; readonly call: "open"; readonly options: RecordedOpen }
+  | { readonly dir: "status"; readonly status: StatusSnapshot }
+  | {
+      readonly dir: "history"
+      readonly sessionId: string
+      readonly cwd: string
+      readonly history: HistorySnapshot | null
+    }
   | {
       readonly dir: "error"
       readonly error: {
@@ -170,6 +200,133 @@ export const bundledVersion: Effect.Effect<string | null> = Effect.sync(() => {
 })
 
 // ---------------------------------------------------------------------------
+// Process
+// ---------------------------------------------------------------------------
+
+/** How to start the CLI process. */
+export interface Launch {
+  /** From `Launcher.prepare`; applied to the SDK's command and args at spawn time. */
+  readonly wrap: Launcher.Wrap
+}
+
+const noLaunch: Launch = { wrap: (command) => command }
+
+/** The last few KB of the CLI's stderr (the SDK only keeps this for processes it spawns itself). */
+const stderrTailBytes = 4096
+
+/** An SDK `spawnClaudeCodeProcess` that wraps the command and starts it in its own process group. */
+export const makeSpawner = (launch: Launch) => {
+  let child: ChildProcess | undefined
+  let stderr = ""
+  const marker = ProcessTree.newMarker()
+  const spawn = (options: SpawnOptions): SpawnedProcess => {
+    const command = launch.wrap({ command: options.command, args: options.args })
+    // `signal` is the SDK's forwarded abort: it fires only after stdin EOF plus a
+    // grace period, so it is safe to hand to spawn (which then SIGTERMs the child).
+    child = nodeSpawn(command.command, [...command.args], {
+      ...(options.cwd !== undefined && { cwd: options.cwd }),
+      env: { ...options.env, [ProcessTree.markerVariable]: marker },
+      signal: options.signal,
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: true,
+      windowsHide: true,
+    })
+    child.stderr?.setEncoding("utf8")
+    child.stderr?.on("data", (chunk: string) => {
+      stderr = (stderr + chunk).slice(-stderrTailBytes)
+    })
+    // The SDK listens for `error` too; this keeps an unhandled one from crashing us.
+    child.on("error", () => {})
+    return child as unknown as SpawnedProcess
+  }
+  return {
+    spawn,
+    marker,
+    pid: (): number | undefined => child?.pid,
+    stderr: (): string => stderr.trim(),
+    /** Resolves when the process has exited (immediately if it never started). */
+    exited: (): Promise<void> =>
+      new Promise((resolve) => {
+        if (child === undefined || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
+          return resolve()
+        }
+        child.once("exit", () => resolve())
+      }),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Status and history
+// ---------------------------------------------------------------------------
+
+/** What `status` read from an idle CLI. */
+export interface StatusSnapshot {
+  readonly account: AccountInfo
+  /** The experimental usage API's answer, or null if it failed (see `usageError`). */
+  readonly usage: SDKControlGetUsageResponse | null
+  readonly usageError: string | null
+}
+
+/** A stored session: its metadata (when the SDK found it) and transcript messages (system messages included). */
+export interface HistorySnapshot {
+  readonly info: SDKSessionInfo | null
+  readonly messages: ReadonlyArray<SessionMessage>
+}
+
+const compactBoundary = (entry: Record<string, unknown>) => entry.type === "system" && entry.subtype === "compact_boundary"
+
+/**
+ * Transcript entries for `getSessionMessages` to read in full. The SDK starts
+ * a transcript at its last compact boundary (as a resume would); here each
+ * boundary is disguised as a plain system entry and linked to the message
+ * before it (`logicalParentUuid`), so the whole conversation comes back.
+ */
+export const bridgeCompactions = (entries: ReadonlyArray<SessionStoreEntry>): Array<SessionStoreEntry> =>
+  entries.map((entry) =>
+    compactBoundary(entry)
+      ? {
+          ...entry,
+          subtype: "effect_agent_compact_boundary",
+          parentUuid: entry.parentUuid ?? entry.logicalParentUuid ?? null,
+        }
+      : entry,
+  )
+
+/**
+ * `getSessionMessages` drops system entries' fields; put back what mapping
+ * needs from the transcript: `subtype`, and a compact boundary's metadata
+ * as `compact_metadata` (the stream frame's name for it).
+ */
+export const restoreSystemFields = (
+  messages: ReadonlyArray<SessionMessage>,
+  entries: ReadonlyArray<SessionStoreEntry>,
+): Array<SessionMessage> => {
+  const byUuid = new Map(entries.flatMap((e) => (typeof e.uuid === "string" && e.type === "system" ? [[e.uuid, e]] : [])))
+  return messages.map((m) => {
+    const entry = m.type === "system" ? byUuid.get(m.uuid) : undefined
+    if (entry === undefined) return m
+    return {
+      ...m,
+      ...(typeof entry.subtype === "string" && { subtype: entry.subtype }),
+      ...(entry.compactMetadata !== undefined && { compact_metadata: entry.compactMetadata }),
+    } as SessionMessage
+  })
+}
+
+export const parseTranscript = (text: string): Array<SessionStoreEntry> =>
+  text.split("\n").flatMap((line) => {
+    if (line.trim() === "") return []
+    try {
+      const entry = JSON.parse(line) as unknown
+      return typeof entry === "object" && entry !== null && typeof (entry as { type?: unknown }).type === "string"
+        ? [entry as SessionStoreEntry]
+        : []
+    } catch {
+      return [] // a line cut off by a crash mid-write
+    }
+  })
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
@@ -186,6 +343,10 @@ export interface ClaudeQuery {
   readonly endInput: Effect.Effect<void>
   /** Close the query now; the process is stopped. */
   readonly close: Effect.Effect<void>
+  /** The CLI process's pid (the wrapped command's); none without a process (replay). */
+  readonly pid: Option.Option<number>
+  /** SIGKILL the process group (and marked processes) now. The frame stream then fails as for any process death. */
+  readonly kill: Effect.Effect<void>
 }
 
 export interface SessionLookup {
@@ -199,11 +360,18 @@ export class ClaudeSdk extends Context.Service<
   ClaudeSdk,
   {
     /** Spawn a query and wait for the CLI's initialize handshake. */
-    readonly open: (options: Options) => Effect.Effect<ClaudeQuery, ClaudeSdkError, Scope.Scope>
+    readonly open: (options: Options, launch?: Launch) => Effect.Effect<ClaudeQuery, ClaudeSdkError, Scope.Scope>
     /** Whether the CLI has a record of a session (for resume). */
     readonly sessionExists: (lookup: SessionLookup) => Effect.Effect<boolean>
     /** The CLI version, if known without a turn. */
     readonly version: Effect.Effect<string | null>
+    /**
+     * Account and plan-limit status from an idle CLI (no prompt is sent). The
+     * process is gone when this completes.
+     */
+    readonly status: (options: Options, launch?: Launch) => Effect.Effect<StatusSnapshot, ClaudeSdkError>
+    /** A stored session's transcript; null if the CLI has no record of it in `cwd`. */
+    readonly history: (lookup: SessionLookup) => Effect.Effect<HistorySnapshot | null, ClaudeSdkError>
   }
 >()("effect-agent/claude/ClaudeSdk") {}
 
@@ -212,7 +380,26 @@ export interface LayerOptions {
   readonly record?: string
 }
 
-const openQuery = Effect.fnUntraced(function* (options: Options, record: (line: RecordLine) => void) {
+/** Add the process's stderr to a process-death error, as the SDK does for processes it spawns. */
+const withStderr = (error: ClaudeSdkError, stderr: string): ClaudeSdkError =>
+  stderr === "" || error.message.includes("stderr:") || (error.signal === null && error.exitCode === null)
+    ? error
+    : new ClaudeSdkError({ ...error, message: `${error.message}. stderr: ${stderr.slice(-1000)}` })
+
+/** After the SDK's own close: wait for the process, then clear out its process group. */
+const reap = (spawner: ReturnType<typeof makeSpawner>, wait: Duration.Input, grace: Duration.Input) =>
+  Effect.promise(() => spawner.exited()).pipe(
+    Effect.timeoutOption(wait),
+    Effect.andThen(
+      Effect.suspend(() => {
+        const pid = spawner.pid()
+        return pid === undefined ? Effect.void : ProcessTree.kill(spawner.marker, { pid, grace })
+      }),
+    ),
+  )
+
+const openQuery = Effect.fnUntraced(function* (options: Options, launch: Launch, record: (line: RecordLine) => void) {
+  const spawner = makeSpawner(launch)
   const input = yield* Queue.unbounded<SDKUserMessage, Cause.Done>()
   const output = yield* Queue.unbounded<Frame, ClaudeSdkError | Cause.Done>()
 
@@ -227,7 +414,11 @@ const openQuery = Effect.fnUntraced(function* (options: Options, record: (line: 
   })
 
   const query = yield* Effect.try({
-    try: () => sdkQuery({ prompt: Stream.toAsyncIterable(Stream.fromQueue(input)), options }),
+    try: () =>
+      sdkQuery({
+        prompt: Stream.toAsyncIterable(Stream.fromQueue(input)),
+        options: { ...options, spawnClaudeCodeProcess: spawner.spawn },
+      }),
     catch: toSdkError("open"),
   })
 
@@ -241,21 +432,25 @@ const openQuery = Effect.fnUntraced(function* (options: Options, record: (line: 
       }),
     ),
     Effect.onExit((exit) =>
-      Effect.sync(() => {
-        const error = Exit.isFailure(exit) ? Cause.findErrorOption(exit.cause) : Option.none()
-        if (Option.isSome(error)) {
-          record(errorLine(error.value))
-          Queue.failCauseUnsafe(output, Cause.fail(error.value))
-        } else {
+      Effect.suspend(() => {
+        const found = Exit.isFailure(exit) ? Cause.findErrorOption(exit.cause) : Option.none()
+        if (Option.isNone(found)) {
           Queue.endUnsafe(output)
+          return Effect.void
         }
+        const error = withStderr(found.value, spawner.stderr())
+        record(errorLine(error))
+        Queue.failCauseUnsafe(output, Cause.fail(error))
+        // The CLI died: whatever still carries its marker is an orphan.
+        return ProcessTree.kill(spawner.marker, { pid: spawner.pid(), grace: Duration.seconds(2) })
       }),
     ),
     Effect.forkDetach,
   )
 
   // Close the query (the SDK ends stdin, then force-kills after a grace
-  // period), then give the pump time to observe the exit.
+  // period), give the pump time to observe the exit, then kill whatever is
+  // left in the process group (commands the agent started in the background).
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {
       Queue.endUnsafe(input)
@@ -263,6 +458,7 @@ const openQuery = Effect.fnUntraced(function* (options: Options, record: (line: 
     }).pipe(
       Effect.andThen(Fiber.await(pump).pipe(Effect.timeoutOption(Duration.seconds(10)))),
       Effect.andThen(Fiber.interrupt(pump)),
+      Effect.andThen(reap(spawner, Duration.seconds(5), Duration.seconds(3))),
     ),
   )
 
@@ -301,19 +497,85 @@ const openQuery = Effect.fnUntraced(function* (options: Options, record: (line: 
       Queue.endUnsafe(input)
       query.close()
     }),
+    pid: Option.fromNullishOr(spawner.pid()),
+    kill: Effect.sync(() => {
+      const pid = spawner.pid()
+      if (pid === undefined) return
+      ProcessTree.killNow(spawner.marker, pid)
+    }),
   }
   return result
 })
+
+/** An input stream that never yields: the CLI starts and initializes, but no turn runs. */
+const idleInput = (): AsyncIterable<SDKUserMessage> => ({
+  [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<SDKUserMessage>>(() => {}) }),
+})
+
+const statusQuery = (options: Options, launch: Launch) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const spawner = makeSpawner(launch)
+      const query = yield* Effect.try({
+        try: () => sdkQuery({ prompt: idleInput(), options: { ...options, spawnClaudeCodeProcess: spawner.spawn } }),
+        catch: toSdkError("status"),
+      })
+      // Nothing to save, so don't wait out the SDK's grace: close, then clear the group.
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => query.close()).pipe(Effect.andThen(reap(spawner, Duration.seconds(1), Duration.seconds(1)))),
+      )
+      yield* Effect.tryPromise({ try: () => query.initializationResult(), catch: toSdkError("initialize") })
+      const account = yield* Effect.tryPromise({ try: () => query.accountInfo(), catch: toSdkError("accountInfo") })
+      const usage = yield* Effect.tryPromise({
+        try: () => query.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }),
+        catch: toSdkError("usage"),
+      }).pipe(Effect.result)
+      const snapshot: StatusSnapshot =
+        usage._tag === "Success"
+          ? { account, usage: usage.success, usageError: null }
+          : { account, usage: null, usageError: usage.failure.message }
+      return snapshot
+    }),
+  )
+
+const readHistory = ({ sessionId, cwd, transcript }: SessionLookup) =>
+  Effect.tryPromise({
+    try: async (): Promise<HistorySnapshot | null> => {
+      const info = (await getSessionInfo(sessionId, { dir: cwd }).catch(() => undefined)) ?? null
+      const text = existsSync(transcript) ? readFileSync(transcript, "utf8") : null
+      if (info === null && text === null) return null
+      const plain = () => getSessionMessages(sessionId, { dir: cwd, includeSystemMessages: true })
+      if (text === null) return { info, messages: await plain() }
+      const entries = parseTranscript(text)
+      const bridged = bridgeCompactions(entries)
+      // `sessionStore` is an alpha SDK option; without it, history starts at the last compaction.
+      const store: SessionStore = {
+        append: async () => {},
+        load: async (key) => (key.subpath === undefined ? bridged : null),
+      }
+      const messages = await getSessionMessages(sessionId, { dir: cwd, includeSystemMessages: true, sessionStore: store }).catch(plain)
+      return { info, messages: restoreSystemFields(messages, entries) }
+    },
+    catch: toSdkError("history"),
+  })
 
 export const layer = (options: LayerOptions = {}): Layer.Layer<ClaudeSdk> =>
   Layer.sync(ClaudeSdk, () => {
     const record = recorder(options.record)
     return ClaudeSdk.of({
-      open: (sdkOptions) => openQuery(sdkOptions, record),
+      open: (sdkOptions, launch = noLaunch) => openQuery(sdkOptions, launch, record),
       sessionExists: ({ sessionId, cwd, transcript }) =>
         Effect.promise(() => getSessionInfo(sessionId, { dir: cwd }).catch(() => undefined)).pipe(
           Effect.map((info) => info !== undefined || existsSync(transcript)),
         ),
       version: bundledVersion,
+      status: (sdkOptions, launch = noLaunch) =>
+        statusQuery(sdkOptions, launch).pipe(Effect.tap((status) => Effect.sync(() => record({ dir: "status", status })))),
+      history: (lookup) =>
+        readHistory(lookup).pipe(
+          Effect.tap((history) =>
+            Effect.sync(() => record({ dir: "history", sessionId: lookup.sessionId, cwd: lookup.cwd, history })),
+          ),
+        ),
     })
   })

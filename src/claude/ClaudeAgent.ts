@@ -9,21 +9,46 @@
  * `TurnId` is that message's id) and ends at the next `result`. A message that
  * goes `started` while a turn is running has landed in it (`MessageLanded`).
  *
- * The pure parts (`buildOptions`, `frameEvents`, `step`, `classifyOutcome`)
- * are exported for testing.
+ * Each session's CLI is started through `Launcher` (if provided) in its own
+ * process group; `pid` is that process. `RunOptions.watchdog` interrupts a
+ * turn that goes quiet, kills the process if the interrupt doesn't end it
+ * within `stallGrace`, and ends the turn `Stalled` either way.
+ * `RunOptions.hooks` become SDK hooks (`sdkHooks`).
+ *
+ * `status` starts an idle CLI (no prompt) and reads `accountInfo()` and the
+ * experimental usage API. `history` reads a stored transcript.
+ *
+ * The pure parts (`buildOptions`, `sdkHooks`, `frameEvents`, `step`,
+ * `classifyOutcome`, `accountStatus`, `historyEvents`) are exported for testing.
  */
 import type {
+  AccountInfo,
   EffortLevel,
+  HookCallback,
+  HookCallbackMatcher,
+  HookEvent,
   Options,
   SDKAssistantMessage,
   SDKRateLimitInfo,
   SDKResultMessage,
   SDKUserMessage,
+  SessionMessage,
   SettingSource,
+  SyncHookJSONOutput,
 } from "@anthropic-ai/claude-agent-sdk"
-import { Cause, Clock, DateTime, Deferred, Effect, Fiber, Layer, Option, PubSub, Stream } from "effect"
+import { Cause, Clock, DateTime, Deferred, Duration, Effect, Fiber, Layer, Option, PubSub, Stream } from "effect"
 import { randomUUID } from "node:crypto"
-import { Agent, type AgentSession, type Capabilities, type Effort, type Input, type RunOptions } from "../Agent.ts"
+import { tmpdir } from "node:os"
+import {
+  type AccountStatus,
+  Agent,
+  type AgentSession,
+  type Capabilities,
+  type Effort,
+  type Hooks,
+  type Input,
+  type RunOptions,
+} from "../Agent.ts"
 import {
   AgentError,
   AgentFailed,
@@ -33,11 +58,14 @@ import {
   ProcessKilled,
   SessionNotFound,
   SpendCapReached,
+  Stalled,
   Throttled,
   UsageLimited,
 } from "../AgentError.ts"
 import type { AgentEvent, TurnOutcome, TurnSucceeded } from "../AgentEvent.ts"
 import { type LimitWindow, type LimitWindowStatus, MessageId, SessionId, type TokenUsage, TurnId } from "../Domain.ts"
+import * as Launcher from "../Launcher.ts"
+import * as Watchdog from "../Watchdog.ts"
 import * as ClaudeSdk from "./ClaudeSdk.ts"
 
 export const provider = "claude"
@@ -54,6 +82,14 @@ export interface ClaudeAgentOptions {
    * Default true; the CLI's own "No conversation found" is still mapped to `SessionNotFound` either way.
    */
   readonly checkResume?: boolean
+  /**
+   * Applied over the host environment for every process this layer starts
+   * (sessions and `status`); `RunOptions.env` applies on top. `undefined`
+   * removes a variable, e.g. `{ CLAUDE_CONFIG_DIR: "/path" }` for another account.
+   */
+  readonly env?: Readonly<Record<string, string | undefined>>
+  /** Default for `RunOptions.watchdog.grace` (10 seconds when neither is set). */
+  readonly stallGrace?: Duration.Input
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +141,104 @@ export const disallowedTools = (disable: RunOptions["disable"]): Array<string> =
   return [...tools]
 }
 
+// ---------------------------------------------------------------------------
+// Hooks
+// ---------------------------------------------------------------------------
+
+/** Run a hook to completion; a failure, defect, throw or abort adds nothing. */
+const runHook = (hook: () => Effect.Effect<Option.Option<string>>, signal: AbortSignal): Promise<string | undefined> =>
+  Effect.runPromise(
+    Effect.suspend(hook).pipe(
+      Effect.map((text) => (Option.isSome(text) && text.value !== "" ? text.value : undefined)),
+      Effect.catchCause(() => Effect.succeed(undefined)),
+    ),
+    { signal },
+  ).catch(() => undefined)
+
+/** Tool output as text for `afterTool`: Bash's stdout/stderr, content blocks, or JSON. */
+export const toolResponseText = (response: unknown): string => {
+  if (typeof response === "string") return response
+  if (typeof response === "object" && response !== null) {
+    const r = response as Record<string, unknown>
+    if (typeof r.stdout === "string" || typeof r.stderr === "string") {
+      return [r.stdout, r.stderr].filter((x): x is string => typeof x === "string" && x !== "").join("\n")
+    }
+    if ("content" in r) return flattenToolContent(r.content)
+  }
+  return flattenToolContent(response)
+}
+
+type ContextEvent = "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "Stop"
+
+const addContext = (hookEventName: ContextEvent, text: string | undefined): SyncHookJSONOutput =>
+  text === undefined ? {} : ({ hookSpecificOutput: { hookEventName, additionalContext: text } } as SyncHookJSONOutput)
+
+const matcher = <E extends HookEvent>(
+  event: E,
+  handle: (input: Extract<Parameters<HookCallback>[0], { readonly hook_event_name: E }>, signal: AbortSignal) => Promise<SyncHookJSONOutput>,
+): Array<HookCallbackMatcher> => [
+  {
+    hooks: [
+      (input, _toolUseId, { signal }) =>
+        input.hook_event_name === event ? handle(input as never, signal) : Promise.resolve({}),
+    ],
+  },
+]
+
+/**
+ * `RunOptions.hooks` as SDK hooks: `beforeTool` is PreToolUse, `afterTool`
+ * PostToolUse (and PostToolUseFailure, with `isError`), `beforeStop` Stop.
+ * Text a hook returns goes back as `additionalContext`; for Stop the CLI then
+ * keeps the turn going so the model can act on it.
+ */
+export const sdkHooks = (hooks: Hooks): NonNullable<Options["hooks"]> => {
+  const out: NonNullable<Options["hooks"]> = {}
+  const { beforeTool, afterTool, beforeStop } = hooks
+  if (beforeTool !== undefined) {
+    out.PreToolUse = matcher("PreToolUse", async (input, signal) =>
+      addContext(
+        "PreToolUse",
+        await runHook(() => beforeTool({ callId: input.tool_use_id, name: input.tool_name, input: input.tool_input }), signal),
+      ),
+    )
+  }
+  if (afterTool !== undefined) {
+    out.PostToolUse = matcher("PostToolUse", async (input, signal) =>
+      addContext(
+        "PostToolUse",
+        await runHook(
+          () =>
+            afterTool({
+              callId: input.tool_use_id,
+              name: input.tool_name,
+              input: input.tool_input,
+              output: toolResponseText(input.tool_response),
+              isError: false,
+            }),
+          signal,
+        ),
+      ),
+    )
+    out.PostToolUseFailure = matcher("PostToolUseFailure", async (input, signal) =>
+      addContext(
+        "PostToolUseFailure",
+        await runHook(
+          () => afterTool({ callId: input.tool_use_id, name: input.tool_name, input: input.tool_input, output: input.error, isError: true }),
+          signal,
+        ),
+      ),
+    )
+  }
+  if (beforeStop !== undefined) {
+    out.Stop = matcher("Stop", async (_input, signal) => addContext("Stop", await runHook(beforeStop, signal)))
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
+// RunOptions -> SDK Options (continued)
+// ---------------------------------------------------------------------------
+
 export const buildOptions = (
   run: RunOptions,
   config: ClaudeAgentOptions,
@@ -115,7 +249,8 @@ export const buildOptions = (
   const disallowed = disallowedTools(run.disable)
   return {
     cwd: run.cwd,
-    env: buildEnv(hostEnv, run.env),
+    env: buildEnv(hostEnv, { ...config.env, ...run.env }),
+    ...(run.hooks !== undefined && { hooks: sdkHooks(run.hooks) }),
     ...(run.resume !== undefined ? { resume: run.resume } : { sessionId }),
     ...(model !== undefined && { model }),
     ...(run.effort !== undefined && { effort: toEffortLevel(run.effort) }),
@@ -138,10 +273,28 @@ export const buildOptions = (
   }
 }
 
+/** Options for `status`'s idle query: the same isolation as a session, nothing persisted. */
+export const buildStatusOptions = (
+  config: ClaudeAgentOptions,
+  cwd: string,
+  hostEnv: Readonly<Record<string, string | undefined>> = process.env,
+): Options => ({
+  cwd,
+  env: buildEnv(hostEnv, config.env),
+  strictMcpConfig: true,
+  mcpServers: {},
+  settings: { disableClaudeAiConnectors: true },
+  persistSession: false,
+  ...(config.settingSources !== undefined && { settingSources: [...config.settingSources] }),
+  ...(config.pathToClaudeCodeExecutable !== undefined && {
+    pathToClaudeCodeExecutable: config.pathToClaudeCodeExecutable,
+  }),
+})
+
 /** The transcript location for `RunOptions`, honouring a `CLAUDE_CONFIG_DIR` override in `env`. */
-export const location = (run: RunOptions, sessionId: SessionId): string => {
-  const configDir =
-    run.env !== undefined && "CLAUDE_CONFIG_DIR" in run.env ? run.env.CLAUDE_CONFIG_DIR : process.env.CLAUDE_CONFIG_DIR
+export const location = (run: RunOptions, sessionId: SessionId, config: ClaudeAgentOptions = {}): string => {
+  const env = { ...config.env, ...run.env }
+  const configDir = "CLAUDE_CONFIG_DIR" in env ? env.CLAUDE_CONFIG_DIR : process.env.CLAUDE_CONFIG_DIR
   return ClaudeSdk.transcriptPath(run.cwd, sessionId, configDir)
 }
 
@@ -325,6 +478,12 @@ export interface ProcessFailure {
   readonly exitCode: number | null
 }
 
+/** The watchdog stopped the turn: how long it had been quiet, and whether a tool was running. */
+export interface Stall {
+  readonly idleMs: number
+  readonly inTool: boolean
+}
+
 export interface OutcomeInput {
   readonly turnId: TurnId
   /** The turn's `result`, or null when the process died first. */
@@ -337,7 +496,18 @@ export interface OutcomeInput {
   readonly processError: ProcessFailure | null
   /** `RunOptions.spendCapUsd`. */
   readonly capUsd: number | null
+  /** Set when the watchdog stopped this turn. */
+  readonly stalled?: Stall | null
 }
+
+const stalledError = (stall: Stall, killed: boolean) =>
+  new Stalled({
+    message: `no events for ${(stall.idleMs / 1000).toFixed(1)}s${stall.inTool ? " while a tool was running" : ""}; ${
+      killed ? "Claude Code did not stop after an interrupt and was killed" : "the turn was interrupted"
+    }`,
+    idleMs: stall.idleMs,
+    inTool: stall.inTool,
+  })
 
 export const overageAvailable = (info: SDKRateLimitInfo): boolean | null => {
   if (info.isUsingOverage === true || info.overageInUse === true) return true
@@ -353,11 +523,15 @@ const resultMessage = (result: SDKResultMessage): string => {
 
 export const classifyOutcome = (input: OutcomeInput): TurnOutcome => {
   const { result, turnId } = input
+  const stall = input.stalled ?? null
   if (input.processError !== null || result === null) {
+    // We killed it ourselves after a stall: that is the turn's story, not the kill.
+    if (stall !== null) return stalledError(stall, true)
     const p = input.processError ?? { message: "Claude Code exited mid-turn", signal: null, exitCode: null }
     return new ProcessKilled({ message: p.message, signal: p.signal, exitCode: p.exitCode })
   }
   const ok = result.subtype === "success" && !result.is_error
+  if (stall !== null && !ok) return stalledError(stall, false)
   // An interrupted turn ends `error_during_execution` / `aborted_streaming` with diagnostics in
   // `errors`: classify by the fact that we asked for it, not by the text.
   if (input.interruptRequested && !ok) return new Interrupted({ message: "interrupted" })
@@ -416,6 +590,8 @@ export interface TurnState {
   readonly interruptRequested: boolean
   readonly assistantError: string | null
   readonly rateLimit: SDKRateLimitInfo | null
+  /** Set by `markStalled` when the watchdog stops the turn. */
+  readonly stalled?: Stall | null
 }
 
 export interface State {
@@ -487,6 +663,7 @@ const endTurn = (ctx: StepContext, state: State, turn: TurnState, result: SDKRes
         interruptRequested: turn.interruptRequested,
         processError,
         capUsd: ctx.capUsd,
+        stalled: turn.stalled ?? null,
       }),
       usage: result !== null ? turnUsage(result) : null,
       cost: result !== null && typeof result.total_cost_usd === "number" ? { usd: result.total_cost_usd, source: "reported" } : null,
@@ -630,6 +807,12 @@ export const stepExit = (ctx: StepContext, state: State, error: ProcessFailure |
 export const markInterrupt = (state: State): State =>
   state.turn === null ? state : { ...state, turn: { ...state.turn, interruptRequested: true } }
 
+/** Mark the running turn as stopped by the watchdog (if it is still `turnId`). */
+export const markStalled = (state: State, turnId: TurnId, stall: Stall): State =>
+  state.turn === null || state.turn.turnId !== turnId
+    ? state
+    : { ...state, turn: { ...state.turn, interruptRequested: true, stalled: stall } }
+
 // ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
@@ -647,7 +830,7 @@ const fromSdkError = (e: ClaudeSdk.ClaudeSdkError) => agentError(`${e.operation}
 
 const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Service"], config: ClaudeAgentOptions, run: RunOptions) {
   const sessionId = run.resume ?? SessionId.make(randomUUID())
-  const transcript = location(run, sessionId)
+  const transcript = location(run, sessionId, config)
 
   if (run.resume !== undefined && config.checkResume !== false) {
     const exists = yield* sdk.sessionExists({ sessionId: run.resume, cwd: run.cwd, transcript })
@@ -656,9 +839,11 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
     }
   }
 
+  const wrap = yield* Launcher.prepare({ provider, cwd: run.cwd })
   const query = yield* sdk
-    .open(buildOptions(run, config, sessionId))
+    .open(buildOptions(run, config, sessionId), { wrap })
     .pipe(Effect.mapError((e) => sessionNotFound(e.message, sessionId) ?? fromSdkError(e)))
+  const watchdog = run.watchdog !== undefined ? yield* Watchdog.make(run.watchdog) : null
 
   const ctx = { sessionId, resumed: run.resume !== undefined, capUsd: run.spendCapUsd ?? null }
   let state = initialState
@@ -688,6 +873,7 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
     Effect.gen(function* () {
       state = result.state
       for (const event of result.events) {
+        if (watchdog !== null) yield* watchdog.observe(event)
         if (event._tag === "TurnStarted") turnEnd(event.turnId)
         if (event._tag === "SessionStarted") sessionStarted = event
         yield* PubSub.publish(pubsub, event)
@@ -756,6 +942,27 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
     Effect.onInterrupt(() => finish({ _tag: "Closed" })),
     Effect.forkScoped,
   )
+
+  // Watchdog: a stalled turn is interrupted; if it hasn't ended after the
+  // grace period, the process is killed (and the session ends with it).
+  if (watchdog !== null) {
+    const grace = run.watchdog?.grace ?? config.stallGrace ?? Duration.seconds(10)
+    yield* watchdog.expirations.pipe(
+      Stream.runForEach((expiry) =>
+        Effect.gen(function* () {
+          if (closed !== null || state.turn?.turnId !== expiry.turnId) return
+          state = markStalled(state, expiry.turnId, { idleMs: expiry.idleMs, inTool: expiry.inTool })
+          yield* query.interrupt.pipe(Effect.ignore)
+          const ended = yield* Deferred.await(turnEnd(expiry.turnId)).pipe(
+            Effect.exit,
+            Effect.timeoutOption(grace),
+          )
+          if (Option.isNone(ended)) yield* query.kill
+        }),
+      ),
+      Effect.forkScoped,
+    )
+  }
 
   const ensureOpen = Effect.suspend(() =>
     closed === null ? Effect.void : Effect.fail(closed.error ?? agentError("session has ended")),
@@ -839,6 +1046,7 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
     sessionId,
     provider,
     location: Option.some(transcript),
+    pid: Effect.succeed(query.pid),
     subscribe,
     events,
     send,
@@ -850,6 +1058,186 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
   return session
 })
 
+// ---------------------------------------------------------------------------
+// Status
+// ---------------------------------------------------------------------------
+
+const isSet = (value: string | undefined) => value !== undefined && value !== "" && value !== "none"
+
+/**
+ * Whether the CLI has credentials. Signed out, `accountInfo()` is just
+ * `{ tokenSource: "none", apiProvider: "firstParty" }`; an OAuth login adds
+ * `email`, an API key `apiKeySource`. Third-party providers (Bedrock, Vertex,
+ * a gateway) authenticate outside the CLI, so they count as signed in.
+ */
+export const signedIn = (account: AccountInfo): boolean =>
+  (account.apiProvider !== undefined && account.apiProvider !== "firstParty") ||
+  isSet(account.email) ||
+  isSet(account.apiKeySource) ||
+  isSet(account.tokenSource)
+
+const isoToDateTime = (iso: unknown): DateTime.Utc | null =>
+  typeof iso === "string" ? Option.getOrNull(Option.map(DateTime.make(iso), DateTime.toUtc)) : null
+
+const percent = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null)
+
+/** Per-model windows: reported, but one running out doesn't stop other models. */
+const modelScoped = (label: string) => label.startsWith("model_scoped:") || /^seven_day_(opus|sonnet|haiku|fable)$/.test(label)
+
+/**
+ * Windows from the usage API's `rate_limits`: every named window
+ * (`five_hour`, `seven_day`, `seven_day_opus`, ...; `utilization` is already
+ * 0-100, `resets_at` ISO), plus `model_scoped` entries labelled
+ * `model_scoped:<name>`. Falls back to the `limits[]` list when no named
+ * window is present.
+ */
+export const usageWindows = (rateLimits: unknown): Array<LimitWindowStatus> => {
+  if (typeof rateLimits !== "object" || rateLimits === null) return []
+  const r = rateLimits as Record<string, unknown>
+  const windows: Array<LimitWindowStatus> = []
+  for (const [label, value] of Object.entries(r)) {
+    if (label === "extra_usage" || typeof value !== "object" || value === null || Array.isArray(value)) continue
+    const w = value as Record<string, unknown>
+    if (!("utilization" in w) || !("resets_at" in w)) continue
+    windows.push({ window: normalizeWindow(label), label, usedPercent: percent(w.utilization), resetsAt: isoToDateTime(w.resets_at) })
+  }
+  if (Array.isArray(r.model_scoped)) {
+    for (const value of r.model_scoped as ReadonlyArray<Record<string, unknown>>) {
+      if (typeof value?.display_name !== "string") continue
+      windows.push({
+        window: "other",
+        label: `model_scoped:${value.display_name}`,
+        usedPercent: percent(value.utilization),
+        resetsAt: isoToDateTime(value.resets_at),
+      })
+    }
+  }
+  if (windows.length === 0 && Array.isArray(r.limits)) {
+    for (const value of r.limits as ReadonlyArray<Record<string, unknown>>) {
+      if (typeof value?.kind !== "string") continue
+      const model = (value.scope as { model?: { display_name?: unknown } } | null | undefined)?.model?.display_name
+      const window: LimitWindow = value.kind === "session" ? "five_hour" : value.kind === "weekly_all" ? "weekly" : "other"
+      windows.push({
+        window,
+        label: typeof model === "string" ? `model_scoped:${model}` : value.kind,
+        usedPercent: percent(value.percent),
+        resetsAt: isoToDateTime(value.resets_at),
+      })
+    }
+  }
+  return windows
+}
+
+/**
+ * `AccountStatus` from what an idle CLI reported. `usage_limited` when an
+ * account-wide window is at 100% and paid extra usage can't take over;
+ * `spend_limited` when extra usage says its spend limit is reached and it is
+ * what meters this account (no plan window reports usage). A plan account
+ * whose extra usage is exhausted is still usable while its windows have room.
+ */
+export const accountStatus = (snapshot: ClaudeSdk.StatusSnapshot, checkedAt: DateTime.Utc): AccountStatus => {
+  const usage = snapshot.usage as (ClaudeSdk.StatusSnapshot["usage"] & { readonly rate_limits?: unknown }) | null
+  const windows = usageWindows(usage?.rate_limits)
+  const extra = (usage?.rate_limits as { readonly extra_usage?: Record<string, unknown> | null } | null | undefined)
+    ?.extra_usage
+  const spendReached = extra?.spend_limit_reached === true
+  const overage = extra?.is_enabled === true && !spendReached
+  const accountWide = windows.filter((w) => !modelScoped(w.label))
+  const reason: AccountStatus["reason"] = !signedIn(snapshot.account)
+    ? "unauthenticated"
+    : accountWide.some((w) => (w.usedPercent ?? 0) >= 100) && !overage
+      ? "usage_limited"
+      : spendReached && !accountWide.some((w) => w.usedPercent !== null)
+        ? "spend_limited"
+        : null
+  const plan = usage?.subscription_type ?? snapshot.account.subscriptionType ?? null
+  return { provider, usable: reason === null, reason, windows, plan, checkedAt }
+}
+
+// ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
+
+/** The CLI's marker for an interrupted turn, e.g. `[Request interrupted by user for tool use]`. */
+const interruptMarker = /^\[Request interrupted by user/
+
+/** A real prompt's text: string content, or blocks with no `tool_result` (images count, as no text). */
+const promptText = (content: unknown): string | null => {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content) || content.length === 0) return null
+  const blocks = content as ReadonlyArray<{ readonly type?: unknown; readonly text?: unknown }>
+  if (blocks.some((b) => b?.type === "tool_result")) return null
+  return blocks.flatMap((b) => (b?.type === "text" && typeof b.text === "string" ? [b.text] : [])).join("\n")
+}
+
+/** Output the CLI records for a local command (`/compact`, ...); not a prompt. */
+const localCommandOutput = /^<local-command-(stdout|stderr|caveat)>/
+
+/** A local command as typed: `<command-name>/compact</command-name>...<command-args>x</command-args>` is `/compact x`. */
+const localCommand = (text: string): string => {
+  const name = /<command-name>([^<]*)<\/command-name>/.exec(text)?.[1]
+  if (name === undefined) return text
+  const args = /<command-args>([^<]*)<\/command-args>/.exec(text)?.[1] ?? ""
+  return `${name} ${args}`.trim()
+}
+
+const historyTags: ReadonlySet<AgentEvent["_tag"]> = new Set(["Text", "ToolCall", "ToolResult", "Compacted"])
+
+/**
+ * A transcript (`getSessionMessages`) as events. Each prompt starts a turn
+ * (its uuid, which for messages sent through this library is the `MessageId`,
+ * is the `TurnId`) unless the CLI recorded it as delivered into the running
+ * turn (`isQueuedCommand`, a steer); a local command such as `/compact` is
+ * shown as typed, and its output skipped. The CLI's interrupt marker ends the turn
+ * `Interrupted`; nothing else in a transcript records how a turn ended, so
+ * other turns have no `TurnEnded`.
+ */
+export const historyEvents = (messages: ReadonlyArray<SessionMessage>): Array<AgentEvent> => {
+  const events: Array<AgentEvent> = []
+  let turnId: TurnId | null = null
+  let lastStop: unknown = null
+  for (const m of messages) {
+    const raw = m
+    const flags = m as SessionMessage & {
+      readonly isMeta?: boolean
+      readonly is_meta?: boolean
+      readonly isCompactSummary?: boolean
+      readonly isQueuedCommand?: boolean
+    }
+    const meta = flags.isMeta === true || flags.is_meta === true || flags.isCompactSummary === true
+    const message = (typeof m.message === "object" && m.message !== null ? m.message : {}) as {
+      readonly content?: unknown
+      readonly stop_reason?: unknown
+    }
+    if (m.type === "user" && m.parent_tool_use_id === null && !meta) {
+      const content = promptText(message.content)
+      if (content !== null && localCommandOutput.test(content.trim())) continue
+      const text = content === null ? null : localCommand(content)
+      if (text !== null) {
+        if (interruptMarker.test(text.trim())) {
+          if (turnId !== null) {
+            events.push({ _tag: "TurnEnded", turnId, outcome: new Interrupted({ message: text.trim() }), usage: null, cost: null, raw })
+            turnId = null
+          }
+          continue
+        }
+        const steered = turnId !== null && flags.isQueuedCommand === true && lastStop !== "end_turn"
+        if (!steered) {
+          turnId = TurnId.make(m.uuid)
+          events.push({ _tag: "TurnStarted", turnId, raw })
+        }
+        events.push({ _tag: "UserMessage", turnId, messageId: MessageId.make(m.uuid), text, raw })
+        continue
+      }
+    }
+    if (m.type === "assistant" && m.parent_tool_use_id === null) lastStop = message.stop_reason ?? null
+    for (const event of frameEvents(m as unknown as ClaudeSdk.Frame, turnId)) {
+      if (historyTags.has(event._tag)) events.push({ ...event, raw } as AgentEvent)
+    }
+  }
+  return events
+}
+
 export const capabilities = (version: string | null): Capabilities => ({
   provider,
   version,
@@ -859,7 +1247,7 @@ export const capabilities = (version: string | null): Capabilities => ({
   cost: "reported",
   spendCap: "native",
   resetTimes: true,
-  hooks: false,
+  hooks: true,
   reattach: false,
   disable: { askUser: true, subagents: true, tools: "any" },
 })
@@ -875,6 +1263,27 @@ export const layer = (options: ClaudeAgentOptions = {}): Layer.Layer<Agent, neve
           Effect.map(capabilities),
         ),
         open: (run) => openSession(sdk, options, run),
+        status: Effect.gen(function* () {
+          const cwd = tmpdir()
+          const wrap = yield* Launcher.prepare({ provider, cwd })
+          const snapshot = yield* sdk.status(buildStatusOptions(options, cwd), { wrap }).pipe(
+            Effect.mapError(fromSdkError),
+            Effect.timeoutOrElse({
+              duration: Duration.seconds(30),
+              orElse: () => Effect.fail(agentError("status: Claude Code did not answer within 30 seconds")),
+            }),
+          )
+          return accountStatus(snapshot, yield* DateTime.now)
+        }).pipe(Effect.scoped),
+        history: (sessionId, { cwd }) =>
+          sdk.history({ sessionId, cwd, transcript: location({ cwd }, sessionId, options) }).pipe(
+            Effect.mapError(fromSdkError),
+            Effect.flatMap((history) =>
+              history === null
+                ? Effect.fail(new SessionNotFound({ message: `No Claude Code session ${sessionId} for ${cwd}`, sessionId }))
+                : Effect.succeed(historyEvents(history.messages)),
+            ),
+          ),
       })
     }),
   )

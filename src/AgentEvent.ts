@@ -35,6 +35,14 @@ export const MessageDropped = Schema.TaggedStruct("MessageDropped", {
   raw,
 })
 
+/** A user message. Emitted by `history`; live sessions report their own messages as `MessageLanded`. */
+export const UserMessage = Schema.TaggedStruct("UserMessage", {
+  turnId: Schema.NullOr(TurnId),
+  messageId: Schema.NullOr(MessageId),
+  text: Schema.String,
+  raw,
+})
+
 /** A complete block of assistant text. */
 export const Text = Schema.TaggedStruct("Text", { turnId: Schema.NullOr(TurnId), text: Schema.String, raw })
 
@@ -106,6 +114,7 @@ export const AgentEvent = Schema.Union([
   TurnStarted,
   MessageLanded,
   MessageDropped,
+  UserMessage,
   Text,
   ToolCall,
   ToolResult,

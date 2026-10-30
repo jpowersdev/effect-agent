@@ -110,10 +110,12 @@ const connect = (frames: ReadonlyArray<Frame>) =>
       .request("initialize", { clientInfo: { name: "effect_agent", title: null, version: "0.0.0" }, capabilities: { experimentalApi: true, requestAttestation: false } })
       .pipe(Effect.mapError((e) => agentError(`replay initialize failed: ${e.message}`)))
 
-    const close = Effect.suspend(() => {
-      exited = true
-      return finish({ exitCode: null, signal: "SIGTERM" })
-    })
+    const stop = (signal: string) =>
+      Effect.suspend(() => {
+        exited = true
+        return finish({ exitCode: null, signal })
+      })
+    const close = stop("SIGTERM")
     yield* Effect.addFinalizer(() => close)
 
     return {
@@ -126,6 +128,7 @@ const connect = (frames: ReadonlyArray<Frame>) =>
         Effect.flatMap((done) => (done ? Effect.map(Deferred.await(core.exitSignal), Option.some) : Effect.succeedNone)),
       ),
       close,
+      kill: stop("SIGKILL"),
     } satisfies Connection
   })
 

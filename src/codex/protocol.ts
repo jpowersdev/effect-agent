@@ -88,9 +88,13 @@ export interface TurnError {
   readonly additionalDetails: string | null
 }
 
+export type TurnItemsView = "notLoaded" | "summary" | "full"
+
 export interface Turn {
   readonly id: string
   readonly items: ReadonlyArray<ThreadItem>
+  /** How much of `items` is loaded (stored turns from `thread/turns/list`). */
+  readonly itemsView?: TurnItemsView
   readonly status: TurnStatus
   readonly error: TurnError | null
   readonly startedAt?: number | null
@@ -208,7 +212,10 @@ export interface RateLimitSnapshot {
   readonly primary: RateLimitWindow | null
   readonly secondary: RateLimitWindow | null
   readonly credits: CreditsSnapshot | null
+  /** Backend spend control (workspace budget) exhausted. Null/absent: unknown. */
+  readonly spendControlReached?: boolean | null
   readonly planType?: string | null
+  /** e.g. `rate_limit_reached`, `workspace_member_usage_limit_reached`. */
   readonly rateLimitReachedType: string | null
 }
 
@@ -295,6 +302,35 @@ export interface GetAccountRateLimitsResponse {
   readonly rateLimitsByLimitId?: Readonly<Record<string, RateLimitSnapshot>> | null
 }
 
+export type Account =
+  | { readonly type: "apiKey" }
+  | { readonly type: "chatgpt"; readonly email: string | null; readonly planType: string }
+  | { readonly type: "amazonBedrock"; readonly usesCodexManagedCredentials: boolean }
+  | { readonly type: string & {}; readonly planType?: string | null }
+
+export interface GetAccountResponse {
+  /** Null when not signed in. */
+  readonly account: Account | null
+  /** Whether the configured model provider needs an OpenAI sign-in at all. */
+  readonly requiresOpenaiAuth: boolean
+}
+
+export type SortDirection = "asc" | "desc"
+
+export interface ThreadTurnsListParams {
+  readonly threadId: string
+  readonly cursor?: string | null
+  readonly limit?: number | null
+  /** Default `desc`. */
+  readonly sortDirection?: SortDirection | null
+  /** Default `summary`. */
+  readonly itemsView?: TurnItemsView | null
+}
+export interface ThreadTurnsListResponse {
+  readonly data: ReadonlyArray<Turn>
+  readonly nextCursor: string | null
+}
+
 export interface BackgroundTerminal {
   readonly itemId: string
   readonly processId: string
@@ -315,6 +351,12 @@ export interface ClientRequests {
   readonly "turn/steer": { readonly params: TurnSteerParams; readonly result: TurnSteerResponse }
   readonly "turn/interrupt": { readonly params: TurnInterruptParams; readonly result: unknown }
   readonly "account/rateLimits/read": { readonly params: undefined; readonly result: GetAccountRateLimitsResponse }
+  readonly "account/read": { readonly params: { readonly refreshToken?: boolean }; readonly result: GetAccountResponse }
+  /**
+   * Stored turns of a thread, loaded or not (reads the rollout; no
+   * `thread/resume` needed). Unknown ids fail `thread not loaded: <id>`.
+   */
+  readonly "thread/turns/list": { readonly params: ThreadTurnsListParams; readonly result: ThreadTurnsListResponse }
   /** EXPERIMENTAL. */
   readonly "thread/backgroundTerminals/list": {
     readonly params: { readonly threadId: string; readonly cursor?: string | null }

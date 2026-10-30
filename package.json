@@ -20,7 +20,8 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "live": "node scripts/live.ts"
+    "live:claude": "node scripts/live-claude.ts",
+    "live:codex": "node scripts/live-codex.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.312",
