@@ -364,7 +364,7 @@ for (const p of providers) {
           const result = yield* session.awaitMessage(messageId)
           expect(result.finalText.toLowerCase()).toContain("pong")
           yield* session.end
-          yield* Fiber.join(all.fiber)
+          expect(Exit.isSuccess(yield* Fiber.join(all.fiber))).toBe(true)
           const landed = all.items.filter((e) => e.event._tag === "MessageLanded")
           expect(landed.map((e) => e.event._tag === "MessageLanded" && e.event.messageId)).toEqual([messageId])
           expect(all.items.filter((e) => e.event._tag === "TurnStarted")).toHaveLength(1)
@@ -383,7 +383,7 @@ for (const p of providers) {
           expect(drops(dir, session.sessionId)).toBe(1)
           expect(result.finalText.toLowerCase()).toContain("pong")
           yield* session.end
-          yield* Fiber.join(all.fiber)
+          expect(Exit.isSuccess(yield* Fiber.join(all.fiber))).toBe(true)
           expect(all.items.filter((e) => e.event._tag === "TurnStarted")).toHaveLength(1)
           expect(all.items.filter((e) => e.event._tag === "MessageLanded")).toHaveLength(1)
         }).pipe(Effect.scoped, Effect.provide(layer(p.simple, { testDropBeforeReply: ["Turn"] }))),
@@ -404,7 +404,7 @@ for (const p of providers) {
           const next = yield* session.turn("Reply with just the word: pong")
           expect(next.finalText.length).toBeGreaterThan(0)
           yield* session.end
-          yield* Fiber.join(all.fiber)
+          expect(Exit.isSuccess(yield* Fiber.join(all.fiber))).toBe(true)
           const outcomes = all.items.flatMap((e) => (e.event._tag === "TurnEnded" ? [e.event.outcome._tag] : []))
           expect(outcomes).toEqual(["Interrupted", "Succeeded"])
         }).pipe(Effect.scoped, Effect.provide(layer(p.interrupt, { testDropBeforeReply: ["Interrupt"] }))),
@@ -484,6 +484,8 @@ for (const p of providers) {
           // The host lives on, but can't be reached.
           rmSync(session.socket)
           process.kill(session.hostPid, "SIGUSR2")
+          // Before the host has handled the signal, the old connection still answers.
+          yield* waitUntil(() => drops(dir, session.sessionId) === 1, "the host to drop the connection")
           const t0 = Date.now()
           const failure = failureOf(yield* session.info.pipe(Effect.exit))
           expect(failure).toBeInstanceOf(AgentError)

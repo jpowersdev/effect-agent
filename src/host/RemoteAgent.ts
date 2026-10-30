@@ -41,7 +41,7 @@
  */
 // The unix-socket client Effect's Node and Bun platforms both use.
 import * as NodeSocket from "@effect/platform-node-shared/NodeSocket"
-import { Cause, Context, Deferred, Duration, Effect, Exit, Layer, Option, Schedule, Schema, Scope, Stream } from "effect"
+import { Cause, Context, Deferred, Duration, Effect, Exit, Layer, Option, Result, Schedule, Schema, Scope, Stream } from "effect"
 import { RpcClient, RpcClientError, RpcSerialization } from "effect/rpc"
 import type { ChildProcessSpawner } from "effect/process"
 import { Socket } from "effect/socket"
@@ -526,10 +526,16 @@ export const layer = (
             }
           })
 
-          /** The connection failed under this call: an RPC client error, or interrupted because `conn` was retired. */
+          /**
+           * The connection failed under this call: an RPC client error, a socket write that died (the client
+           * writes a request or ack with `orDie`, so a write to a connection that just closed is a defect), or
+           * interrupted because `conn` was retired.
+           */
           const droppedUnder = (conn: Conn, cause: Cause.Cause<unknown>): string | null => {
             const error = Cause.findErrorOption(cause)
             if (Option.isSome(error) && error.value instanceof RpcClientError.RpcClientError) return error.value.message
+            const defect = Cause.findDefect(cause)
+            if (Result.isSuccess(defect) && Socket.isSocketError(defect.success)) return defect.success.message
             if (Cause.hasInterruptsOnly(cause) && (retired.has(conn) || state._tag !== "Connected" || state.conn !== conn)) {
               return "connection closed"
             }
