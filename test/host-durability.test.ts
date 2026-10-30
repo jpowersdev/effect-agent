@@ -138,7 +138,8 @@ for (const p of providers) {
         Effect.gen(function* () {
           const session = yield* (yield* AgentHosts).open({ cwd: p.cwd })
           started.add(session.hostPid)
-          const live = yield* collect(Stream.unwrap(session.subscribe))
+          // Subscribed before `send`, so no event after it can be missed.
+          const live = yield* collect(yield* session.subscribe)
           const messageId = yield* session.send("sleep for a long time")
           yield* waitUntil(() => toolCallTurn(live.items) !== undefined, "the tool call")
           const firstTurn = toolCallTurn(live.items)!
@@ -330,7 +331,8 @@ for (const p of providers) {
           const session = yield* (yield* AgentHosts).open({ cwd: p.cwd })
           started.add(session.hostPid)
           const all = yield* collect(session.subscribeFrom(0))
-          const live = yield* collect(Stream.unwrap(session.subscribe))
+          // Subscribed before `send`, so no event after it can be missed.
+          const live = yield* collect(yield* session.subscribe)
           yield* session.send("sleep for a long time")
           yield* waitUntil(() => all.items.some((e) => e.event._tag === "ToolCall"), "the tool call")
 
