@@ -1107,7 +1107,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
     }
   }
 
-  // Closing the session's scope: the actor has been interrupted (between inputs) by now, so
+  // Closing the session's scope: the actor has been interrupted (waiting for an input) by now, so
   // this is the only one touching the state. A failure already recorded stays the ending.
   yield* Effect.addFinalizer(() =>
     Effect.suspend(() => {
@@ -1143,8 +1143,9 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
     }),
   )
 
-  yield* Queue.take(inbox).pipe(
-    Effect.flatMap((input) => Effect.uninterruptible(process(input))),
+  // Interruptible only while waiting for an input: once one is taken it is handled, so its
+  // caller's reply can't be dropped between the take and the handling.
+  yield* Effect.uninterruptibleMask((restore) => restore(Queue.take(inbox)).pipe(Effect.flatMap(process))).pipe(
     Effect.forever,
     Effect.forkScoped,
   )
