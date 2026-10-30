@@ -40,10 +40,10 @@ describe("schemas", () => {
     expect(back.env).toStrictEqual({ KEEP: "1", DROP: undefined })
     expect(Duration.toMillis(Duration.fromInputUnsafe(back.watchdog!.idle))).toBe(30_000)
     // Infinite durations survive JSON too (JSON has no Infinity: they encode as text).
-    for (const idle of [Duration.infinity, "Infinity"] as const) {
+    for (const [idle, millis] of [[Duration.infinity, Infinity], ["Infinity", Infinity], ["-Infinity", -Infinity]] as const) {
       const text = Schema.encodeSync(Schema.fromJsonString(RunSettings))({ cwd: "/w", watchdog: { idle } })
       const decoded = Schema.decodeUnknownSync(Schema.fromJsonString(RunSettings))(text)
-      expect(Duration.isFinite(Duration.fromInputUnsafe(decoded.watchdog!.idle))).toBe(false)
+      expect(Duration.toMillis(Duration.fromInputUnsafe(decoded.watchdog!.idle))).toBe(millis)
     }
     // Text durations decode too; nonsense doesn't.
     expect(Schema.decodeUnknownSync(RunSettings)({ cwd: "/w", watchdog: { idle: "5 minutes" } }).watchdog).toBeDefined()

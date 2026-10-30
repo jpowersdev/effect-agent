@@ -117,16 +117,16 @@ export type LimitWindowStatus = typeof LimitWindowStatus.Type
 
 const isDurationInput = (u: unknown): u is Duration.Input => Option.isSome(Duration.fromInput(u as Duration.Input))
 
-/** Millis; an infinite duration as `"Infinity"`, which JSON (having no Infinity) would otherwise turn into `null`. */
+/** Millis; an infinite duration as `"Infinity"` or `"-Infinity"`, which JSON (having no infinities) would otherwise turn into `null`. */
 const encodeMillis = (input: Duration.Input): string | number => {
   const millis = Duration.toMillis(Duration.fromInputUnsafe(input))
-  return Number.isFinite(millis) ? millis : "Infinity"
+  return Number.isFinite(millis) ? millis : String(millis)
 }
 
 /**
  * A `Duration.Input` (`"30 seconds"`, millis, a `Duration`, ...), encoded as
  * millis so it can cross a process boundary (an infinite one as
- * `"Infinity"`). Decodes millis or `Duration` text.
+ * `"Infinity"` or `"-Infinity"`). Decodes millis or `Duration` text.
  *
  * @since 0.2.0
  * @category models
