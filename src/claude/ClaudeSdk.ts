@@ -2,8 +2,10 @@
  * Transport for Claude Code: one `query()` from `@anthropic-ai/claude-agent-sdk`
  * in streaming-input mode, as an Effect service.
  *
- *   import { ClaudeSdk } from "@jpowersdev/effect-agent/claude"
- *   ClaudeSdk.layer({ record: "/tmp/run.jsonl" })
+ * ```ts skip-type-checking
+ * import { ClaudeSdk } from "@jpowersdev/effect-agent/claude"
+ * ClaudeSdk.layer({ record: "/tmp/run.jsonl" })
+ * ```
  *
  * `open` spawns the CLI, waits for its initialize handshake and returns a
  * `ClaudeQuery`: push user messages, read raw frames, interrupt, end. Closing
@@ -24,6 +26,8 @@
  * With `record`, every frame (and every status/history answer, and every
  * SDK hook call with what it returned) is appended to a JSONL file that
  * `ClaudeReplay.layer` can play back without a process.
+ *
+ * @since 0.1.0
  */
 import {
   type AccountInfo,
@@ -56,12 +60,25 @@ import * as ProcessTree from "../ProcessTree.ts"
 // Frames
 // ---------------------------------------------------------------------------
 
+/**
+ * A `command_lifecycle` frame's state.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const LifecycleState = Schema.Literals(["queued", "started", "completed", "cancelled", "discarded", "refused"])
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type LifecycleState = typeof LifecycleState.Type
 
 /**
  * `command_lifecycle` frames (capability `msg_lifecycle_v1`). Not part of the
  * SDK's `SDKMessage` union, so they are decoded defensively with `decodeLifecycle`.
+ *
+ * @since 0.1.0
+ * @category models
  */
 export interface CommandLifecycle {
   readonly type: "command_lifecycle"
@@ -71,11 +88,21 @@ export interface CommandLifecycle {
   readonly session_id?: string
 }
 
-/** Anything the CLI writes to us. */
+/**
+ * Anything the CLI writes to us.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export type Frame = SDKMessage | CommandLifecycle
 
 const isLifecycleState = Schema.is(LifecycleState)
 
+/**
+ * A frame as a `CommandLifecycle`, or undefined if it isn't one.
+ *
+ * @internal
+ */
 export const decodeLifecycle = (frame: unknown): CommandLifecycle | undefined => {
   if (typeof frame !== "object" || frame === null) return undefined
   const f = frame as Record<string, unknown>
@@ -89,6 +116,12 @@ export const decodeLifecycle = (frame: unknown): CommandLifecycle | undefined =>
 // Errors
 // ---------------------------------------------------------------------------
 
+/**
+ * A failure of an SDK call, the CLI process or a replay.
+ *
+ * @since 0.1.0
+ * @category errors
+ */
 export class ClaudeSdkError extends Schema.TaggedError<ClaudeSdkError>()("ClaudeSdkError", {
   operation: Schema.String,
   message: Schema.String,
@@ -98,6 +131,11 @@ export class ClaudeSdkError extends Schema.TaggedError<ClaudeSdkError>()("Claude
   exitCode: Schema.NullOr(Schema.Number),
 }) {}
 
+/**
+ * Map whatever `operation` threw to a `ClaudeSdkError`; a `ClaudeSdkError` passes through.
+ *
+ * @internal
+ */
 export const toSdkError =
   (operation: string) =>
   (cause: unknown): ClaudeSdkError => {
@@ -116,7 +154,12 @@ export const toSdkError =
 // Recording
 // ---------------------------------------------------------------------------
 
-/** The subset of `Options` written to a recording's `open` line (for id remapping on replay). */
+/**
+ * The subset of `Options` written to a recording's `open` line (for id remapping on replay).
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface RecordedOpen {
   readonly sessionId?: string
   readonly resume?: string
@@ -131,6 +174,9 @@ export interface RecordedOpen {
  * of `in` frames the session had received when the CLI called it. It is
  * written when the callback returns, so it may come after later lines; replay
  * goes by `position`.
+ *
+ * @since 0.1.0
+ * @category models
  */
 export type RecordLine =
   | { readonly dir: "out"; readonly frame: SDKUserMessage }
@@ -168,6 +214,11 @@ const recorder = (path: string | undefined) => {
   return (line: RecordLine) => appendFileSync(path, JSON.stringify(line) + "\n")
 }
 
+/**
+ * The recording line for a transport error.
+ *
+ * @internal
+ */
 export const errorLine = (e: ClaudeSdkError): RecordLine => ({
   dir: "error",
   error: { operation: e.operation, message: e.message, errorClass: e.errorClass, signal: e.signal, exitCode: e.exitCode },
@@ -177,7 +228,11 @@ export const errorLine = (e: ClaudeSdkError): RecordLine => ({
 // Paths
 // ---------------------------------------------------------------------------
 
-/** Claude Code's `~/.claude/projects/<dir>` name for a cwd: every non-alphanumeric becomes `-`; long paths get a hash suffix. */
+/**
+ * Claude Code's `~/.claude/projects/<dir>` name for a cwd: every non-alphanumeric becomes `-`; long paths get a hash suffix.
+ *
+ * @internal
+ */
 export const encodeProjectDir = (cwd: string): string => {
   const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-")
   if (encoded.length <= 200) return encoded
@@ -194,7 +249,11 @@ const canonicalCwd = (cwd: string): string => {
   }
 }
 
-/** The transcript file the CLI writes for a session. `configDir` defaults to `$CLAUDE_CONFIG_DIR` or `~/.claude`. */
+/**
+ * The transcript file the CLI writes for a session. `configDir` defaults to `$CLAUDE_CONFIG_DIR` or `~/.claude`.
+ *
+ * @internal
+ */
 export const transcriptPath = (cwd: string, sessionId: string, configDir?: string): string =>
   join(
     (configDir ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")).normalize("NFC"),
@@ -203,7 +262,11 @@ export const transcriptPath = (cwd: string, sessionId: string, configDir?: strin
     `${sessionId}.jsonl`,
   )
 
-/** The CLI version bundled with the installed SDK (its `manifest.json`), or null. */
+/**
+ * The CLI version bundled with the installed SDK (its `manifest.json`), or null.
+ *
+ * @internal
+ */
 export const bundledVersion: Effect.Effect<string | null> = Effect.sync(() => {
   try {
     const entry = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"))
@@ -218,7 +281,12 @@ export const bundledVersion: Effect.Effect<string | null> = Effect.sync(() => {
 // Process
 // ---------------------------------------------------------------------------
 
-/** How to start the CLI process. */
+/**
+ * How to start the CLI process.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface Launch {
   /** From `Launcher.prepare`; applied to the SDK's command and args at spawn time. */
   readonly wrap: Launcher.Wrap
@@ -229,7 +297,11 @@ const noLaunch: Launch = { wrap: (command) => command }
 /** The last few KB of the CLI's stderr (the SDK only keeps this for processes it spawns itself). */
 const stderrTailBytes = 4096
 
-/** An SDK `spawnClaudeCodeProcess` that wraps the command and starts it in its own process group. */
+/**
+ * An SDK `spawnClaudeCodeProcess` that wraps the command and starts it in its own process group.
+ *
+ * @internal
+ */
 export const makeSpawner = (launch: Launch) => {
   let child: ChildProcess | undefined
   let stderr = ""
@@ -274,7 +346,12 @@ export const makeSpawner = (launch: Launch) => {
 // Status and history
 // ---------------------------------------------------------------------------
 
-/** What `status` read from an idle CLI. */
+/**
+ * What `status` read from an idle CLI.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface StatusSnapshot {
   readonly account: AccountInfo
   /** The experimental usage API's answer, or null if it failed (see `usageError`). */
@@ -282,7 +359,12 @@ export interface StatusSnapshot {
   readonly usageError: string | null
 }
 
-/** A stored session: its metadata (when the SDK found it) and transcript messages (system messages included). */
+/**
+ * A stored session: its metadata (when the SDK found it) and transcript messages (system messages included).
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface HistorySnapshot {
   readonly info: SDKSessionInfo | null
   readonly messages: ReadonlyArray<SessionMessage>
@@ -295,6 +377,8 @@ const compactBoundary = (entry: Record<string, unknown>) => entry.type === "syst
  * a transcript at its last compact boundary (as a resume would); here each
  * boundary is disguised as a plain system entry and linked to the message
  * before it (`logicalParentUuid`), so the whole conversation comes back.
+ *
+ * @internal
  */
 export const bridgeCompactions = (entries: ReadonlyArray<SessionStoreEntry>): Array<SessionStoreEntry> =>
   entries.map((entry) =>
@@ -311,6 +395,8 @@ export const bridgeCompactions = (entries: ReadonlyArray<SessionStoreEntry>): Ar
  * `getSessionMessages` drops system entries' fields; put back what mapping
  * needs from the transcript: `subtype`, and a compact boundary's metadata
  * as `compact_metadata` (the stream frame's name for it).
+ *
+ * @internal
  */
 export const restoreSystemFields = (
   messages: ReadonlyArray<SessionMessage>,
@@ -328,6 +414,11 @@ export const restoreSystemFields = (
   })
 }
 
+/**
+ * Entries of a transcript JSONL file; lines that are not JSON objects with a `type` are skipped.
+ *
+ * @internal
+ */
 export const parseTranscript = (text: string): Array<SessionStoreEntry> =>
   text.split("\n").flatMap((line) => {
     if (line.trim() === "") return []
@@ -345,6 +436,12 @@ export const parseTranscript = (text: string): Array<SessionStoreEntry> =>
 // Service
 // ---------------------------------------------------------------------------
 
+/**
+ * An open query, as returned by `ClaudeSdk.open`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface ClaudeQuery {
   /**
    * Raw frames, buffered for the life of the query. Single consumer, but safe
@@ -364,6 +461,12 @@ export interface ClaudeQuery {
   readonly kill: Effect.Effect<void>
 }
 
+/**
+ * A stored session to look for, as taken by `sessionExists` and `history`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface SessionLookup {
   readonly sessionId: string
   readonly cwd: string
@@ -371,6 +474,12 @@ export interface SessionLookup {
   readonly transcript: string
 }
 
+/**
+ * The transport: `layer` spawns the real CLI, `ClaudeReplay.layer` plays back a recording.
+ *
+ * @since 0.1.0
+ * @category services
+ */
 export class ClaudeSdk extends Context.Service<
   ClaudeSdk,
   {
@@ -390,6 +499,10 @@ export class ClaudeSdk extends Context.Service<
   }
 >()("effect-agent/claude/ClaudeSdk") {}
 
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export interface LayerOptions {
   /** Append every frame to this JSONL file (see `RecordLine`). */
   readonly record?: string
@@ -609,6 +722,12 @@ const readHistory = ({ sessionId, cwd, transcript }: SessionLookup) =>
     catch: toSdkError("history"),
   })
 
+/**
+ * `ClaudeSdk` backed by the SDK and a real CLI process.
+ *
+ * @since 0.1.0
+ * @category layers
+ */
 export const layer = (options: LayerOptions = {}): Layer.Layer<ClaudeSdk> =>
   Layer.sync(ClaudeSdk, () => {
     const record = recorder(options.record)

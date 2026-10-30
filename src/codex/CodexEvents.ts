@@ -3,6 +3,8 @@
  * of a completed turn into a `TurnOutcome`. No effects: the session in
  * `CodexAgent` owns the state and the turn lifecycle (TurnStarted,
  * MessageLanded, TurnEnded); this module maps everything else.
+ *
+ * @since 0.1.0
  */
 import { DateTime, Option } from "effect"
 import type { AccountStatus } from "../Agent.ts"
@@ -25,7 +27,12 @@ import type * as P from "./protocol.ts"
 // Small helpers
 // ---------------------------------------------------------------------------
 
-/** `codexErrorInfo` as a string: the tag, or the key of a single-key object variant. */
+/**
+ * `codexErrorInfo` as a string: the tag, or the key of a single-key object variant.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
 export const errorKind = (info: P.CodexErrorInfo | null | undefined): string | null => {
   if (info === null || info === undefined) return null
   if (typeof info === "string") return info
@@ -37,6 +44,9 @@ export const errorKind = (info: P.CodexErrorInfo | null | undefined): string | n
  * Codex counts reasoning tokens inside `outputTokens`. `TokenUsage` keeps them
  * apart (`Pricing.costOf` bills `reasoningTokens` on top of `outputTokens`), so
  * `outputTokens` here excludes reasoning and the sum is unchanged.
+ *
+ * @since 0.1.0
+ * @category usage
  */
 export const toTokenUsage = (b: P.TokenUsageBreakdown): TokenUsage => ({
   inputTokens: b.inputTokens,
@@ -45,8 +55,18 @@ export const toTokenUsage = (b: P.TokenUsageBreakdown): TokenUsage => ({
   reasoningTokens: b.reasoningOutputTokens,
 })
 
+/**
+ * @since 0.1.0
+ * @category usage
+ */
 export const zeroUsage: TokenUsage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, reasoningTokens: 0 }
 
+/**
+ * `a - b` per field, floored at zero.
+ *
+ * @since 0.1.0
+ * @category usage
+ */
 export const subtractUsage = (a: TokenUsage, b: TokenUsage): TokenUsage => ({
   inputTokens: Math.max(0, a.inputTokens - b.inputTokens),
   cachedInputTokens: Math.max(0, a.cachedInputTokens - b.cachedInputTokens),
@@ -54,14 +74,24 @@ export const subtractUsage = (a: TokenUsage, b: TokenUsage): TokenUsage => ({
   reasoningTokens: Math.max(0, (a.reasoningTokens ?? 0) - (b.reasoningTokens ?? 0)),
 })
 
-/** `windowDurationMins`: 300 -> five_hour, 10080 -> weekly, anything else -> other. */
+/**
+ * `windowDurationMins`: 300 -> five_hour, 10080 -> weekly, anything else -> other.
+ *
+ * @since 0.1.0
+ * @category rate limits
+ */
 export const limitWindowOf = (mins: number | null | undefined): LimitWindow =>
   mins === 300 ? "five_hour" : mins === 10080 ? "weekly" : "other"
 
 const resetsAtOf = (seconds: number | null | undefined) =>
   seconds === null || seconds === undefined ? null : DateTime.makeUnsafe(seconds * 1000)
 
-/** "Reconnecting... 2/5 (...)" -> { attempt: 2, maxAttempts: 5 } */
+/**
+ * "Reconnecting... 2/5 (...)" -> { attempt: 2, maxAttempts: 5 }
+ *
+ * @since 0.1.0
+ * @category parsing
+ */
 export const parseRetry = (message: string): { attempt: number | null; maxAttempts: number | null } => {
   const m = /(\d+)\s*\/\s*(\d+)/.exec(message)
   return m ? { attempt: Number(m[1]), maxAttempts: Number(m[2]) } : { attempt: null, maxAttempts: null }
@@ -74,6 +104,9 @@ export const parseRetry = (message: string): { attempt: number | null; maxAttemp
 /**
  * Merge a sparse `account/rateLimits/updated` snapshot into the previous one:
  * null fields don't clear known values.
+ *
+ * @since 0.1.0
+ * @category rate limits
  */
 export const mergeRateLimits = (prev: P.RateLimitSnapshot | null, next: P.RateLimitSnapshot): P.RateLimitSnapshot =>
   prev === null || (prev.limitId !== null && next.limitId !== null && prev.limitId !== next.limitId)
@@ -88,6 +121,12 @@ export const mergeRateLimits = (prev: P.RateLimitSnapshot | null, next: P.RateLi
         rateLimitReachedType: next.rateLimitReachedType ?? prev.rateLimitReachedType,
       }
 
+/**
+ * A snapshot's primary and secondary windows. Labels are prefixed with the limit id unless it is `codex`.
+ *
+ * @since 0.1.0
+ * @category rate limits
+ */
 export const limitWindows = (snapshot: P.RateLimitSnapshot): Array<LimitWindowStatus> => {
   const prefix = snapshot.limitId === null || snapshot.limitId === "codex" ? "" : `${snapshot.limitId}.`
   const out: Array<LimitWindowStatus> = []
@@ -117,6 +156,9 @@ export const limitWindows = (snapshot: P.RateLimitSnapshot): Array<LimitWindowSt
  * none, and null when the snapshot doesn't say. `ordinaryUsageAllowed` is
  * about included usage, which is by definition exhausted here, so it isn't
  * used.
+ *
+ * @since 0.1.0
+ * @category rate limits
  */
 export const usageLimitDetails = (
   limits: P.GetAccountRateLimitsResponse | null,
@@ -138,6 +180,12 @@ export const usageLimitDetails = (
 // Outcome classification
 // ---------------------------------------------------------------------------
 
+/**
+ * What the session knows about a turn beyond the turn itself, for `classifyOutcome`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface OutcomeContext {
   /** We sent `turn/interrupt` for this turn (via `interrupt`). */
   readonly interruptRequested: boolean
@@ -155,6 +203,12 @@ export interface OutcomeContext {
   readonly stalled?: { readonly idleMs: number; readonly inTool: boolean } | null
 }
 
+/**
+ * The `Stalled` failure for a turn the watchdog stopped.
+ *
+ * @since 0.1.0
+ * @category outcomes
+ */
 export const stalledFailure = (stall: { readonly idleMs: number; readonly inTool: boolean }): Stalled =>
   new Stalled({
     message: `no events for ${(stall.idleMs / 1000).toFixed(1)}s${stall.inTool ? " while a tool call was running" : ""}; the watchdog stopped the turn`,
@@ -169,6 +223,12 @@ const throttleKinds: ReadonlySet<string> = new Set<P.CodexErrorKind>([
   "responseTooManyFailedAttempts",
 ])
 
+/**
+ * Classifies a completed turn: watchdog stall, process exit, success, interruption or spend cap, then by `codexErrorInfo`.
+ *
+ * @since 0.1.0
+ * @category outcomes
+ */
 export const classifyOutcome = (turn: P.Turn, ctx: OutcomeContext): TurnOutcome => {
   const turnId = TurnId.make(turn.id)
   // A stalled turn that still completed on its own is a success; anything else
@@ -216,12 +276,24 @@ export const classifyOutcome = (turn: P.Turn, ctx: OutcomeContext): TurnOutcome 
 // Items -> tool events
 // ---------------------------------------------------------------------------
 
+/**
+ * The `name`, `summary` and `input` of a `ToolCall` event.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface ToolCallInfo {
   readonly name: string
   readonly summary: string
   readonly input: unknown
 }
 
+/**
+ * The tool call an item represents, or null if it isn't a tool call.
+ *
+ * @since 0.1.0
+ * @category mapping
+ */
 export const toolCallOf = (item: P.ThreadItem): ToolCallInfo | null => {
   const i = item as any
   switch (item.type) {
@@ -255,6 +327,12 @@ const textOfContent = (content: ReadonlyArray<unknown> | null | undefined): stri
     .map((c: any) => (typeof c?.text === "string" ? c.text : JSON.stringify(c)))
     .join("\n")
 
+/**
+ * The result of a tool-call item, or null if it isn't a tool call.
+ *
+ * @since 0.1.0
+ * @category mapping
+ */
 export const toolResultOf = (item: P.ThreadItem): { readonly isError: boolean; readonly output: string } | null => {
   const i = item as any
   switch (item.type) {
@@ -291,6 +369,12 @@ export const toolResultOf = (item: P.ThreadItem): { readonly isError: boolean; r
 // Notification -> events
 // ---------------------------------------------------------------------------
 
+/**
+ * Mutable state `mapNotification` carries across a session's frames.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface MapState {
   /** Tool calls already announced (by item id). */
   readonly announced: Set<string>
@@ -298,8 +382,18 @@ export interface MapState {
   rateLimits: P.RateLimitSnapshot | null
 }
 
+/**
+ * @since 0.1.0
+ * @category constructors
+ */
 export const makeMapState = (): MapState => ({ announced: new Set(), lastHeartbeatMs: -Infinity, rateLimits: null })
 
+/**
+ * Minimum time between `Heartbeat` events.
+ *
+ * @since 0.1.0
+ * @category constants
+ */
 export const HEARTBEAT_INTERVAL_MS = 1000
 
 const heartbeatMethods: ReadonlySet<string> = new Set<P.NotificationMethod>([
@@ -320,6 +414,9 @@ const heartbeatMethods: ReadonlySet<string> = new Set<P.NotificationMethod>([
  * Maps one frame that isn't part of the turn lifecycle. Returns the events
  * to emit (possibly none: throttled heartbeats are dropped). `turn/started`,
  * `turn/completed` and `userMessage` items are the session's job.
+ *
+ * @since 0.1.0
+ * @category mapping
  */
 export const mapNotification = (msg: P.Incoming, state: MapState, nowMs: number): Array<AgentEvent> => {
   const raw = msg
@@ -372,7 +469,12 @@ export const mapNotification = (msg: P.Incoming, state: MapState, nowMs: number)
   return [{ _tag: "Other", raw }]
 }
 
-/** The final text of a turn: the last `final_answer` message, else the last message. */
+/**
+ * The final text of a turn: the last `final_answer` message, else the last message.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
 export const finalTextOf = (messages: ReadonlyArray<{ readonly text: string; readonly phase: string | null }>): string => {
   for (let i = messages.length - 1; i >= 0; i--) if (messages[i]!.phase === "final_answer") return messages[i]!.text
   return messages.at(-1)?.text ?? ""
@@ -393,6 +495,9 @@ const mainSnapshot = (limits: P.GetAccountRateLimitsResponse): P.RateLimitSnapsh
  * Usability is decided by included usage only: credits that could pay past
  * an exhausted window don't make the account usable, because effect-agent
  * reports limits and never opts into spending credits.
+ *
+ * @since 0.1.0
+ * @category mapping
  */
 export const accountStatus = (
   account: P.GetAccountResponse,
@@ -448,6 +553,9 @@ const userText = (content: ReadonlyArray<unknown>): string =>
  * (unless the turn is still in progress). Usage and cost aren't stored per
  * turn, so they are null. Every `raw` is the stored item or the turn
  * (without its items).
+ *
+ * @since 0.1.0
+ * @category mapping
  */
 export const historyEvents = (turns: ReadonlyArray<P.Turn>): Array<AgentEvent> => {
   const out: Array<AgentEvent> = []

@@ -1,3 +1,6 @@
+packages:
+  - site
+
 minimumReleaseAgeExclude:
   - effect@4.1.0
   - '@effect/platform-node-shared@4.1.0'

@@ -2,6 +2,8 @@
  * The normalized event stream. Every event keeps the provider's original
  * frame in `raw` so it can be persisted as-is; anything not mapped comes
  * through as `Other`.
+ *
+ * @since 0.1.0
  */
 import { Schema } from "effect"
 import { TurnFailure } from "./AgentError.ts"
@@ -9,6 +11,10 @@ import { Cost, LimitWindowStatus, MessageId, SessionId, TokenUsage, TurnId } fro
 
 const raw = Schema.Unknown
 
+/**
+ * @since 0.1.0
+ * @category events
+ */
 export const SessionStarted = Schema.TaggedStruct("SessionStarted", {
   sessionId: SessionId,
   provider: Schema.String,
@@ -19,23 +25,42 @@ export const SessionStarted = Schema.TaggedStruct("SessionStarted", {
   raw,
 })
 
+/**
+ * @since 0.1.0
+ * @category events
+ */
 export const TurnStarted = Schema.TaggedStruct("TurnStarted", { turnId: TurnId, raw })
 
-/** A message from `send`, `steer` or `turn` was taken into a turn. */
+/**
+ * A message from `send`, `steer` or `turn` was taken into a turn.
+ *
+ * @since 0.1.0
+ * @category events
+ */
 export const MessageLanded = Schema.TaggedStruct("MessageLanded", {
   messageId: MessageId,
   turnId: TurnId,
   raw,
 })
 
-/** The provider refused, cancelled or discarded a message before it reached a turn. */
+/**
+ * The provider refused, cancelled or discarded a message before it reached a turn.
+ *
+ * @since 0.1.0
+ * @category events
+ */
 export const MessageDropped = Schema.TaggedStruct("MessageDropped", {
   messageId: MessageId,
   reason: Schema.String,
   raw,
 })
 
-/** A user message. Emitted by `history`; live sessions report their own messages as `MessageLanded`. */
+/**
+ * A user message. Emitted by `history`; live sessions report their own messages as `MessageLanded`.
+ *
+ * @since 0.1.0
+ * @category events
+ */
 export const UserMessage = Schema.TaggedStruct("UserMessage", {
   turnId: Schema.NullOr(TurnId),
   messageId: Schema.NullOr(MessageId),
@@ -43,9 +68,18 @@ export const UserMessage = Schema.TaggedStruct("UserMessage", {
   raw,
 })
 
-/** A complete block of assistant text. */
+/**
+ * A complete block of assistant text.
+ *
+ * @since 0.1.0
+ * @category events
+ */
 export const Text = Schema.TaggedStruct("Text", { turnId: Schema.NullOr(TurnId), text: Schema.String, raw })
 
+/**
+ * @since 0.1.0
+ * @category events
+ */
 export const ToolCall = Schema.TaggedStruct("ToolCall", {
   turnId: Schema.NullOr(TurnId),
   callId: Schema.String,
@@ -56,6 +90,12 @@ export const ToolCall = Schema.TaggedStruct("ToolCall", {
   raw,
 })
 
+/**
+ * The result of a `ToolCall` with the same `callId`.
+ *
+ * @since 0.1.0
+ * @category events
+ */
 export const ToolResult = Schema.TaggedStruct("ToolResult", {
   turnId: Schema.NullOr(TurnId),
   callId: Schema.String,
@@ -65,7 +105,12 @@ export const ToolResult = Schema.TaggedStruct("ToolResult", {
   raw,
 })
 
-/** The provider is retrying a failed request; not an error unless the turn later ends `Throttled`. */
+/**
+ * The provider is retrying a failed request; not an error unless the turn later ends `Throttled`.
+ *
+ * @since 0.1.0
+ * @category events
+ */
 export const Retrying = Schema.TaggedStruct("Retrying", {
   turnId: Schema.NullOr(TurnId),
   attempt: Schema.NullOr(Schema.Number),
@@ -75,32 +120,80 @@ export const Retrying = Schema.TaggedStruct("Retrying", {
   raw,
 })
 
+/**
+ * The provider reported new usage-limit window status.
+ *
+ * @since 0.1.0
+ * @category events
+ */
 export const LimitsUpdated = Schema.TaggedStruct("LimitsUpdated", {
   windows: Schema.Array(LimitWindowStatus),
   raw,
 })
 
+/**
+ * The provider compacted the session's context.
+ *
+ * @since 0.1.0
+ * @category events
+ */
 export const Compacted = Schema.TaggedStruct("Compacted", {
   turnId: Schema.NullOr(TurnId),
   trigger: Schema.NullOr(Schema.Literals(["auto", "manual"])),
   raw,
 })
 
-/** The agent is alive and working (thinking, streaming, tool progress) without a user-visible event. */
+/**
+ * The agent is alive and working (thinking, streaming, tool progress) without a user-visible event.
+ *
+ * @since 0.1.0
+ * @category events
+ */
 export const Heartbeat = Schema.TaggedStruct("Heartbeat", { turnId: Schema.NullOr(TurnId), raw })
 
+/**
+ * The successful `TurnOutcome`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const TurnSucceeded = Schema.TaggedStruct("Succeeded", {
   turnId: TurnId,
   finalText: Schema.String,
 })
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type TurnSucceeded = typeof TurnSucceeded.Type
 
+/**
+ * A provider frame with no normalized mapping.
+ *
+ * @since 0.1.0
+ * @category events
+ */
 export const Other = Schema.TaggedStruct("Other", { raw })
 
+/**
+ * How a turn ended: `TurnSucceeded` or a `TurnFailure`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const TurnOutcome = Schema.Union([TurnSucceeded, TurnFailure])
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type TurnOutcome = typeof TurnOutcome.Type
 
-/** Terminal event for a turn. `usage` is this turn's; `cost` is cumulative for the session when known. */
+/**
+ * Terminal event for a turn. `usage` is this turn's; `cost` is cumulative for the session when known.
+ *
+ * @since 0.1.0
+ * @category events
+ */
 export const TurnEnded = Schema.TaggedStruct("TurnEnded", {
   turnId: TurnId,
   outcome: TurnOutcome,
@@ -109,6 +202,12 @@ export const TurnEnded = Schema.TaggedStruct("TurnEnded", {
   raw,
 })
 
+/**
+ * Every event a session or `Agent.history` emits.
+ *
+ * @since 0.1.0
+ * @category events
+ */
 export const AgentEvent = Schema.Union([
   SessionStarted,
   TurnStarted,
@@ -125,4 +224,8 @@ export const AgentEvent = Schema.Union([
   TurnEnded,
   Other,
 ])
+/**
+ * @since 0.1.0
+ * @category events
+ */
 export type AgentEvent = typeof AgentEvent.Type

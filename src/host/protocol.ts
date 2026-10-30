@@ -3,6 +3,8 @@
  * Every payload, result and error is a Schema, so typed failures
  * (`TurnFailure` members, `AgentError`, `EventsTrimmed`) arrive as the same
  * classes on the client.
+ *
+ * @since 0.1.0
  */
 import { Schema } from "effect"
 import { Rpc, RpcGroup } from "effect/rpc"
@@ -15,6 +17,9 @@ import { MessageId, SessionId, TurnId } from "../Domain.ts"
  * `subscribeFrom` asked for events the host no longer has: older than its
  * in-memory cache (`HostSpec.maxEvents`) when events aren't persisted
  * (`persistEvents: false`), or when the events file is missing or unreadable.
+ *
+ * @since 0.1.0
+ * @category errors
  */
 export class EventsTrimmed extends Schema.TaggedError<EventsTrimmed>()("EventsTrimmed", {
   message: Schema.String,
@@ -24,10 +29,25 @@ export class EventsTrimmed extends Schema.TaggedError<EventsTrimmed>()("EventsTr
   oldest: Schema.Number,
 }) {}
 
-/** An event and its position in the session's log (0, 1, 2, ...). */
+/**
+ * An event and its position in the session's log (0, 1, 2, ...).
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const SeqEvent = Schema.Struct({ seq: Schema.Number, event: AgentEvent })
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type SeqEvent = typeof SeqEvent.Type
 
+/**
+ * What `Info` returns: the session, the host, and the range of events it can serve.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const HostInfo = Schema.Struct({
   sessionId: SessionId,
   provider: Schema.String,
@@ -44,6 +64,10 @@ export const HostInfo = Schema.Struct({
   /** The session has ended (the host is about to exit). */
   ended: Schema.Boolean,
 })
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type HostInfo = typeof HostInfo.Type
 
 /**
@@ -55,10 +79,25 @@ export type HostInfo = typeof HostInfo.Type
 const Input = { input: Schema.String, requestId: Schema.String }
 const TurnError = Schema.Union([TurnFailure, AgentError])
 
+/**
+ * The hooks a client can answer for a host.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const HookName = Schema.Literals(["beforeTool", "afterTool", "beforeStop"])
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type HookName = typeof HookName.Type
 
-/** A hook's input: `ToolHookInput` (plus `output`/`isError` for `afterTool`); null for `beforeStop`. */
+/**
+ * A hook's input: `ToolHookInput` (plus `output`/`isError` for `afterTool`); null for `beforeStop`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const HookCall = Schema.Struct({
   callId: Schema.String,
   name: Schema.String,
@@ -66,16 +105,42 @@ export const HookCall = Schema.Struct({
   output: Schema.optionalKey(Schema.String),
   isError: Schema.optionalKey(Schema.Boolean),
 })
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type HookCall = typeof HookCall.Type
 
-/** The host asks a client to run one of its hooks. */
+/**
+ * The host asks a client to run one of its hooks.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const HookRequest = Schema.TaggedStruct("HookRequest", { hookId: Schema.String, hook: HookName, call: Schema.NullOr(HookCall) })
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type HookRequest = typeof HookRequest.Type
 
-/** `HookRequests` items: `Registered` first (the client is answering from now on), then requests. */
+/**
+ * `HookRequests` items: `Registered` first (the client is answering from now on), then requests.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const HookStreamItem = Schema.Union([Schema.TaggedStruct("Registered", {}), HookRequest])
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type HookStreamItem = typeof HookStreamItem.Type
 
+/**
+ * @since 0.1.0
+ * @category rpc
+ */
 export class HostRpcs extends RpcGroup.make(
   Rpc.make("Info", { success: HostInfo, error: AgentError }),
   /**

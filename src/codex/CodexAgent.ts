@@ -2,11 +2,13 @@
  * `Agent` backed by `codex app-server` (JSON-RPC over stdio), one app-server
  * process per session.
  *
- *   import { CodexAgent, CodexAppServer } from "@jpowersdev/effect-agent/codex"
- *   CodexAgent.layer({ pricing }).pipe(
- *     Layer.provide(CodexAppServer.layer()),
- *     Layer.provide(NodeServices.layer),
- *   )
+ * ```ts skip-type-checking
+ * import { CodexAgent, CodexAppServer } from "@jpowersdev/effect-agent/codex"
+ * CodexAgent.layer({ pricing }).pipe(
+ *   Layer.provide(CodexAppServer.layer()),
+ *   Layer.provide(NodeServices.layer),
+ * )
+ * ```
  *
  * Every thread runs with approvals and the sandbox off
  * (`approvalPolicy: "never"`, `sandbox: "danger-full-access"`) and with MCP
@@ -15,6 +17,8 @@
  * `status` and `history` each start a short-lived app-server (through the
  * `Launcher`, if any) and stop it before returning. `RunOptions.hooks` is
  * refused: Codex hooks are config-only, with no runtime callbacks.
+ *
+ * @since 0.1.0
  */
 import { Cause, Clock, Deferred, Duration, Effect, Exit, Layer, Option, PubSub, Scope, Semaphore, Stream } from "effect"
 import {
@@ -37,6 +41,12 @@ import * as P from "./protocol.ts"
 
 const provider = "codex"
 
+/**
+ * Options for `make` and `layer`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface CodexAgentOptions {
   /** Token prices for estimated cost and `spendCapUsd`. Without them cost is unknown and spend caps are refused. */
   readonly pricing?: Pricing.PriceTable
@@ -50,13 +60,19 @@ export interface CodexAgentOptions {
 // RunOptions -> app-server params (pure)
 // ---------------------------------------------------------------------------
 
-/** effect-agent effort -> Codex `model_reasoning_effort`. `max` maps to `xhigh` (Codex's `ultra` also turns on multi-agent). */
+/**
+ * effect-agent effort -> Codex `model_reasoning_effort`. `max` maps to `xhigh` (Codex's `ultra` also turns on multi-agent).
+ *
+ * @internal
+ */
 export const codexEffort = (effort: Effort): string => (effort === "max" ? "xhigh" : effort)
 
 /**
  * `disable.tools` names -> per-thread config that removes them. Verified on
  * 0.162.1 by listing the model's tools with each switch off. Names not in
  * this table (e.g. `apply_patch`, `spawn_agent`) can't be removed per thread.
+ *
+ * @internal
  */
 export const toolSwitches: Readonly<Record<string, Readonly<Record<string, P.JsonValue>>>> = {
   shell: { "features.shell_tool": false, "features.unified_exec": false },
@@ -73,7 +89,11 @@ export const toolSwitches: Readonly<Record<string, Readonly<Record<string, P.Jso
 const subagentNote =
   "Do not spawn sub-agents or use the collaboration tools (spawn_agent, send_message, followup_task, wait_agent); do the work yourself."
 
-/** Thread overrides shared by `thread/start` and `thread/resume`. Fails on tool names Codex can't disable. */
+/**
+ * Thread overrides shared by `thread/start` and `thread/resume`. Fails on tool names Codex can't disable.
+ *
+ * @internal
+ */
 export const threadOverrides = (
   options: RunOptions,
   extraConfig: Readonly<Record<string, P.JsonValue>> = {},
@@ -131,12 +151,16 @@ const nestingMarkers = new Set([
  * Host variables that describe a parent agent session (Claude Code sets
  * `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_PID`, ...; Codex sets
  * `CODEX_THREAD_ID`/`CODEX_SESSION_ID` in its commands).
+ *
+ * @internal
  */
 export const isNestingMarker = (name: string): boolean => nestingMarkers.has(name) || name.startsWith("CLAUDE_CODE_")
 
 /**
  * The env overrides for app-server (applied over the host env by the
  * spawner): nesting markers removed, then `RunOptions.env`.
+ *
+ * @internal
  */
 export const sessionEnv = (
   host: Readonly<Record<string, string | undefined>>,
@@ -150,11 +174,19 @@ export const sessionEnv = (
 const hostEnv = (): Readonly<Record<string, string | undefined>> =>
   (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {}
 
-/** app-server's answers for a thread it has no record of. */
+/**
+ * app-server's answers for a thread it has no record of.
+ *
+ * @internal
+ */
 export const isSessionNotFoundError = (e: CodexRpcError): boolean =>
   /no rollout found|invalid session id|thread not found|thread not loaded|invalid thread id/i.test(e.message)
 
-/** Codex has no runtime hook callbacks; refuse rather than silently ignore them. */
+/**
+ * Codex has no runtime hook callbacks; refuse rather than silently ignore them.
+ *
+ * @internal
+ */
 export const hooksError = (options: RunOptions): string | null => {
   const hooks = options.hooks
   if (hooks === undefined) return null
@@ -164,7 +196,11 @@ export const hooksError = (options: RunOptions): string | null => {
     : `Codex does not support RunOptions.hooks (${set.join(", ")}): its hooks are config-only (capabilities.hooks is false)`
 }
 
-/** `turn/steer` failed because the expected turn is no longer running. */
+/**
+ * `turn/steer` failed because the expected turn is no longer running.
+ *
+ * @internal
+ */
 export const isStaleSteerError = (e: CodexRpcError): boolean =>
   e.code === P.INVALID_REQUEST && /no active turn|expected active turn id|not steerable/i.test(e.message)
 
@@ -741,6 +777,11 @@ const timed = <A, E>(what: string, self: Effect.Effect<A, E>) =>
     Effect.timeoutOrElse({ duration: requestTimeout, orElse: () => Effect.fail(agentError(`${what} timed out`)) }),
   )
 
+/**
+ * `Agent.status`: `account/read` and `account/rateLimits/read` on a short-lived app-server.
+ *
+ * @internal
+ */
 export const readStatus = (
   server: CodexAppServer["Service"],
   env?: Readonly<Record<string, string | undefined>>,
@@ -767,6 +808,8 @@ export const readStatus = (
 /**
  * Reads the stored turns with `thread/turns/list`, which works on threads
  * that aren't loaded: no `thread/resume`, so the thread is not touched.
+ *
+ * @internal
  */
 export const readHistory = (
   server: CodexAppServer["Service"],
@@ -800,6 +843,12 @@ export const readHistory = (
     }),
   )
 
+/**
+ * The Codex `Agent`, on top of a `CodexAppServer`.
+ *
+ * @since 0.1.0
+ * @category constructors
+ */
 export const make = (options: CodexAgentOptions = {}) =>
   Effect.gen(function* () {
     const server = yield* CodexAppServer
@@ -829,5 +878,27 @@ export const make = (options: CodexAgentOptions = {}) =>
     })
   })
 
+/**
+ * `Agent` backed by `codex app-server`; requires `CodexAppServer`.
+ *
+ * @example
+ * ```ts
+ * import { NodeServices } from "@effect/platform-node"
+ * import { Layer } from "effect"
+ * import { CodexAgent, CodexAppServer } from "@jpowersdev/effect-agent/codex"
+ *
+ * // Codex reports tokens, not cost: prices (USD per million tokens) make
+ * // cost estimates and `spendCapUsd` possible.
+ * const layer = CodexAgent.layer({
+ *   pricing: { "*": { input: 1.25, cachedInput: 0.125, output: 10 } },
+ * }).pipe(
+ *   Layer.provide(CodexAppServer.layer()),
+ *   Layer.provide(NodeServices.layer),
+ * )
+ * ```
+ *
+ * @since 0.1.0
+ * @category layers
+ */
 export const layer = (options: CodexAgentOptions = {}): Layer.Layer<Agent, never, CodexAppServer> =>
   Layer.effect(Agent, make(options))

@@ -1,0 +1,33 @@
+---
+title: effect-agent
+description: Effect-native control of coding-agent CLIs (Claude Code, Codex).
+template: splash
+hero:
+  tagline: "Effect-native control of coding-agent CLIs (Claude Code, Codex): live sessions with steering, resumable sessions, one normalized event stream, typed endings, and account status."
+  image:
+    file: ../../assets/logo.svg
+  actions:
+    - text: Get started
+      link: getting-started/
+      icon: right-arrow
+    - text: API reference
+      link: api/core/agent/
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components"
+
+<CardGrid>
+  <Card title="One API, two agents" icon="puzzle">
+    Claude Code and Codex behind the same `Agent` service. Swap the provider layer; the program stays the same.
+  </Card>
+  <Card title="Steer a running turn" icon="right-caret">
+    Send into the turn that's running, queue after it, or interrupt it. The session stays usable.
+  </Card>
+  <Card title="Typed endings" icon="warning">
+    A turn fails with `UsageLimited`, `SpendCapReached`, `Stalled`, `ProcessKilled`, and the rest, as Schema tagged errors.
+  </Card>
+  <Card title="Sessions that survive restarts" icon="random">
+    Run each session in its own host process, then reattach from any process and catch up on what you missed.
+  </Card>
+</CardGrid>

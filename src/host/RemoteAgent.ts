@@ -7,19 +7,21 @@
  * The host process runs your own entry point, which runs `SessionHost.run`
  * (see `SessionHost.ts`); `host` says how to start it:
  *
- *   const layer = RemoteAgent.layer({
- *     provider: "claude",
- *     host: { command: process.execPath, args: [fileURLToPath(new URL("./host.ts", import.meta.url))] },
- *     onScopeClose: "detach",
- *   }).pipe(Layer.provide(NodeServices.layer))
+ * ```ts skip-type-checking
+ * const layer = RemoteAgent.layer({
+ *   provider: "claude",
+ *   host: { command: process.execPath, args: [fileURLToPath(new URL("./host.ts", import.meta.url))] },
+ *   onScopeClose: "detach",
+ * }).pipe(Layer.provide(NodeServices.layer))
  *
- *   // process A
- *   const session = yield* (yield* Agent).open({ cwd })
- *   yield* session.send("long task")       // A may now exit; the session keeps running
+ * // process A
+ * const session = yield* (yield* Agent).open({ cwd })
+ * yield* session.send("long task")       // A may now exit; the session keeps running
  *
- *   // process B
- *   const session = yield* (yield* AgentHosts).attach(sessionId)
- *   yield* session.subscribeFrom(0).pipe(Stream.runForEach(persist))
+ * // process B
+ * const session = yield* (yield* AgentHosts).attach(sessionId)
+ * yield* session.subscribeFrom(0).pipe(Stream.runForEach(persist))
+ * ```
  *
  * `RemoteAgent.layer` provides `Agent` (so existing programs work unchanged)
  * and `AgentHosts` (`open` typed as `RemoteSession`, `attach`, `list`,
@@ -38,6 +40,8 @@
  * wraps the host in its own scope (`systemd-run --user --scope ...`, see
  * `Launcher.ts`); it applies to the host command, so the host and the agent
  * CLI it runs live in that scope.
+ *
+ * @since 0.1.0
  */
 // The unix-socket client Effect's Node and Bun platforms both use.
 import * as NodeSocket from "@effect/platform-node-shared/NodeSocket"
@@ -71,6 +75,12 @@ import {
 } from "./HostSpec.ts"
 import { type EventsTrimmed, type HookName, type HookRequest, type HostInfo, HostRpcs, type SeqEvent } from "./protocol.ts"
 
+/**
+ * Options for `layer`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface RemoteAgentOptions extends ProviderSpec {
   /** Where hosts keep their sockets, manifests and logs. Default `HostSpec.defaultDir()`. */
   readonly dir?: string
@@ -129,7 +139,12 @@ export interface RemoteAgentOptions extends ProviderSpec {
   readonly onScopeClose?: "stop" | "detach"
 }
 
-/** Backoff from 100 ms, doubling, capped at 2 s between attempts; gives up after 30 s. */
+/**
+ * Backoff from 100 ms, doubling, capped at 2 s between attempts; gives up after 30 s.
+ *
+ * @since 0.1.0
+ * @category constants
+ */
 export const defaultReconnect: Schedule.Schedule<Duration.Duration> = Schedule.max([
   Schedule.min([Schedule.exponential("100 millis", 2), Schedule.spaced("2 seconds")]),
   Schedule.during("30 seconds"),
@@ -142,7 +157,12 @@ const connectionError = (error: AgentError): AgentError => {
   return error
 }
 
-/** `AgentSession`, plus what reattaching needs. */
+/**
+ * `AgentSession`, plus what reattaching needs.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface RemoteSession extends AgentSession {
   /** The host process's pid. */
   readonly hostPid: number
@@ -173,6 +193,12 @@ export interface RemoteSession extends AgentSession {
   readonly stop: Effect.Effect<void, AgentError>
 }
 
+/**
+ * Options for `AgentHosts.attach`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface AttachOptions {
   /**
    * Answer the session's hook calls with these, whatever it was opened with
@@ -188,6 +214,12 @@ export interface AttachOptions {
 const hookNames = (hooks: Hooks | undefined): Array<HookName> =>
   hooks === undefined ? [] : (["beforeTool", "afterTool", "beforeStop"] as const).filter((k) => hooks[k] !== undefined)
 
+/**
+ * What remote sessions add to `Agent`: `open` typed as `RemoteSession`, `attach` by session id, `list` of live hosts, and `events` for a session's log.
+ *
+ * @since 0.1.0
+ * @category services
+ */
 export class AgentHosts extends Context.Service<
   AgentHosts,
   {
@@ -236,7 +268,11 @@ const removeHostFiles = (dir: string, sessionId: string) => {
   rmSync(socketPath(dir, sessionId), { force: true })
 }
 
-/** Live manifests in `dir`; stale ones (dead pid) are removed with their sockets. */
+/**
+ * Live manifests in `dir`; stale ones (dead pid) are removed with their sockets.
+ *
+ * @internal
+ */
 export const listHosts = (dir: string): Array<Manifest> => {
   let names: Array<string>
   try {
@@ -273,6 +309,12 @@ const signal = (pid: number, sig: NodeJS.Signals) => {
   }
 }
 
+/**
+ * `Agent` and `AgentHosts`, running each session in its own host process.
+ *
+ * @since 0.1.0
+ * @category layers
+ */
 export const layer = (
   options: RemoteAgentOptions,
 ): Layer.Layer<Agent | AgentHosts, never, ChildProcessSpawner.ChildProcessSpawner> =>
@@ -883,5 +925,10 @@ export const layer = (
     }),
   )
 
-/** Session id helper for ids read from elsewhere (e.g. a database). */
+/**
+ * Session id helper for ids read from elsewhere (e.g. a database).
+ *
+ * @since 0.1.0
+ * @category constructors
+ */
 export const sessionId = SessionId.make

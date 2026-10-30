@@ -11,6 +11,8 @@
  * dying, the orphan timeout, SIGTERM), lingering briefly on `End`/`Stop`/agent
  * death so connected clients get the last events. It removes its socket and
  * manifest on the way out; the events file stays for `retainEvents`.
+ *
+ * @since 0.1.0
  */
 // The unix-socket server Effect's Node and Bun platforms both use.
 import * as NodeSocket from "@effect/platform-node-shared/NodeSocket"
@@ -38,6 +40,12 @@ import {
 } from "./HostSpec.ts"
 import { EventsTrimmed, HostRpcs, type SeqEvent } from "./protocol.ts"
 
+/**
+ * Defaults for the optional `HostSpec` settings.
+ *
+ * @since 0.1.0
+ * @category constants
+ */
 export const defaults = {
   maxEvents: 50_000,
   orphanTimeout: Duration.minutes(30),
@@ -47,7 +55,12 @@ export const defaults = {
   requestResults: 1_000,
 } as const
 
-/** Prune expired events files in `dir` (those of live hosts are kept). */
+/**
+ * Prune expired events files in `dir` (those of live hosts are kept).
+ *
+ * @since 0.1.0
+ * @category utils
+ */
 export const pruneEvents = (dir: string, retainEvents: Duration.Duration): void =>
   EventFile.prune(dir, Duration.toMillis(retainEvents), (sessionId) => {
     const manifest = readManifest(manifestPath(dir, sessionId))
@@ -59,6 +72,9 @@ export const pruneEvents = (dir: string, retainEvents: Duration.Duration): void 
  * reconnect) waits for, and gets, the first run's result. The effect runs in
  * `scope`, not in the request, so a client that disconnects doesn't cut it
  * short. The last `limit` ids are remembered.
+ *
+ * @since 0.1.0
+ * @category constructors
  */
 export const makeOnce = (scope: Scope.Scope, limit: number) => {
   const results = new Map<string, Deferred.Deferred<unknown, unknown>>()
@@ -77,6 +93,12 @@ export const makeOnce = (scope: Scope.Scope, limit: number) => {
     })
 }
 
+/**
+ * How the host reports to whatever runs it (`SessionHost.run`).
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface HostIO {
   /** Report readiness (or the open failure) to whoever started the host. Called once. */
   readonly ready: (line: ReadyLine) => Effect.Effect<void>
@@ -95,7 +117,12 @@ const isAlive = (pid: number): boolean => {
   }
 }
 
-/** Read a manifest file; undefined if missing or unreadable. */
+/**
+ * Read a manifest file; undefined if missing or unreadable.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
 export const readManifest = (path: string): Manifest | undefined => {
   try {
     return Schema.decodeUnknownSync(Schema.fromJsonString(Manifest))(readFileSync(path, "utf8"))
@@ -104,6 +131,12 @@ export const readManifest = (path: string): Manifest | undefined => {
   }
 }
 
+/**
+ * Whether the manifest's host process is still running.
+ *
+ * @since 0.1.0
+ * @category predicates
+ */
 export const isLive = (manifest: Manifest): boolean => isAlive(manifest.pid)
 
 // ---------------------------------------------------------------------------
@@ -117,6 +150,9 @@ const End = null
  * and, with `persist`, every one in the events file, written before it is
  * published. A subscription older than the ring reads the missing range from
  * the file, then continues from the ring and live events.
+ *
+ * @since 0.1.0
+ * @category constructors
  */
 export const makeLog = (
   max: number,
@@ -353,6 +389,10 @@ export const makeLog = (
     }
   })
 
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type EventLog = Effect.Success<ReturnType<typeof makeLog>>
 
 const settle = (outcome: TurnOutcome): Effect.Effect<TurnSucceeded, TurnFailure> =>
@@ -365,6 +405,9 @@ const settle = (outcome: TurnOutcome): Effect.Effect<TurnSucceeded, TurnFailure>
 /**
  * Every hook kind, each going through `bridge` to an attached client that
  * has it. With none attached, `bridge` answers "nothing" at once, in-process.
+ *
+ * @since 0.1.0
+ * @category constructors
  */
 export const remoteHooks = (bridge: HookBridge.HookBridge): Hooks => ({
   beforeTool: (call) => bridge.call("beforeTool", call),
@@ -380,6 +423,9 @@ const describe = (cause: Cause.Cause<unknown>): string => {
 /**
  * Open the session, serve it, and return the process exit code once the
  * host is done. `shutdown` is completed by signal handlers.
+ *
+ * @since 0.1.0
+ * @category running
  */
 export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reason>) =>
   Effect.scoped(

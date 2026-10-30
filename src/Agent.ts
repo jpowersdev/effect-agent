@@ -2,19 +2,39 @@
  * Provider-neutral coding agent. Each provider module exports a `layer` that
  * provides `Agent`:
  *
- *   import * as ClaudeAgent from "@jpowersdev/effect-agent/claude"
- *   program.pipe(Effect.provide(ClaudeAgent.layer()))
+ * ```ts skip-type-checking
+ * import * as ClaudeAgent from "@jpowersdev/effect-agent/claude"
+ * program.pipe(Effect.provide(ClaudeAgent.layer()))
+ * ```
  *
  * A session is a scoped resource: closing its Scope stops the agent process.
+ *
+ * @since 0.1.0
  */
 import { Context, type Duration, Effect, Option, Schema, Scope, Stream } from "effect"
 import type { AgentError, SessionNotFound, TurnFailure } from "./AgentError.ts"
 import type { AgentEvent, TurnSucceeded } from "./AgentEvent.ts"
 import { LimitWindowStatus, MessageId, type SessionId, TurnId } from "./Domain.ts"
 
+/**
+ * Reasoning effort for a turn.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const Effort = Schema.Literals(["minimal", "low", "medium", "high", "xhigh", "max"])
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type Effort = typeof Effort.Type
 
+/**
+ * Options for `Agent.open`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface RunOptions {
   readonly cwd: string
   /**
@@ -56,6 +76,12 @@ export interface RunOptions {
   readonly hooks?: Hooks
 }
 
+/**
+ * The tool call passed to `Hooks.beforeTool` and `Hooks.afterTool`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface ToolHookInput {
   readonly callId: string
   readonly name: string
@@ -65,6 +91,9 @@ export interface ToolHookInput {
 /**
  * Each hook may return text that is added to the model's context. Hooks run
  * inside the agent's tool loop, so keep them fast; a failing hook adds nothing.
+ *
+ * @since 0.1.0
+ * @category models
  */
 export interface Hooks {
   readonly beforeTool?: (call: ToolHookInput) => Effect.Effect<Option.Option<string>>
@@ -75,9 +104,20 @@ export interface Hooks {
   readonly beforeStop?: () => Effect.Effect<Option.Option<string>>
 }
 
-/** Message content. Text only for now. */
+/**
+ * Message content. Text only for now.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export type Input = string
 
+/**
+ * What a provider supports, from `Agent.capabilities`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const Capabilities = Schema.Struct({
   provider: Schema.String,
   /** The agent tool's version, when known without a turn. */
@@ -98,8 +138,18 @@ export const Capabilities = Schema.Struct({
     tools: Schema.Literals(["any", "some"]),
   }),
 })
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type Capabilities = typeof Capabilities.Type
 
+/**
+ * Sign-in and usage-limit status, from `Agent.status`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const AccountStatus = Schema.Struct({
   provider: Schema.String,
   /** Signed in, and no limit window or spend control is exhausted. */
@@ -110,12 +160,37 @@ export const AccountStatus = Schema.Struct({
   plan: Schema.NullOr(Schema.String),
   checkedAt: Schema.DateTimeUtcFromMillis,
 })
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type AccountStatus = typeof AccountStatus.Type
 
 /**
  * Whether a limit window applies to `model`: windows without a model apply
  * to all; a per-model window applies when the model id contains its family
  * name (e.g. `claude-fable-5-1` and `fable`).
+ *
+ * @example
+ * ```ts
+ * import { Option } from "effect"
+ * import { appliesTo } from "@jpowersdev/effect-agent"
+ * import assert from "node:assert"
+ *
+ * const weeklyFable = {
+ *   window: "weekly",
+ *   label: "seven_day_fable",
+ *   usedPercent: 100,
+ *   resetsAt: null,
+ *   model: Option.some("fable"),
+ * } as const
+ *
+ * assert.strictEqual(appliesTo(weeklyFable, "claude-fable-5-1"), true)
+ * assert.strictEqual(appliesTo(weeklyFable, "claude-sonnet-5-5"), false)
+ * ```
+ *
+ * @since 0.1.0
+ * @category predicates
  */
 export const appliesTo = (window: LimitWindowStatus, model: string): boolean =>
   Option.match(window.model, {
@@ -127,11 +202,20 @@ export const appliesTo = (window: LimitWindowStatus, model: string): boolean =>
  * `status.usable`, and no exhausted per-model window caps `model`. A full
  * per-model window doesn't make the whole account unusable (other models
  * still run), but it does stop a run on that model.
+ *
+ * @since 0.1.0
+ * @category predicates
  */
 export const usableFor = (status: AccountStatus, model: string): boolean =>
   status.usable &&
   !status.windows.some((w) => Option.isSome(w.model) && appliesTo(w, model) && (w.usedPercent ?? 0) >= 100)
 
+/**
+ * Options for `Agent.status`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface StatusOptions {
   /**
    * Applied over the host environment like `RunOptions.env`, e.g. to check
@@ -140,14 +224,30 @@ export interface StatusOptions {
   readonly env?: Readonly<Record<string, string | undefined>>
 }
 
+/**
+ * Where a `steer` message went.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const SteerOutcome = Schema.Union([
   /** Landed in the turn that was running when `steer` was called. */
   Schema.TaggedStruct("Landed", { messageId: MessageId, turnId: TurnId }),
   /** That turn ended first, so the message started a new one. */
   Schema.TaggedStruct("StartedNewTurn", { messageId: MessageId, turnId: TurnId }),
 ])
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type SteerOutcome = typeof SteerOutcome.Type
 
+/**
+ * An open session, from `Agent.open`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface AgentSession {
   readonly sessionId: SessionId
   readonly provider: string
@@ -175,6 +275,32 @@ export interface AgentSession {
   readonly end: Effect.Effect<void, AgentError>
 }
 
+/**
+ * The provider-neutral agent service; each provider module's `layer` provides it.
+ *
+ * @example
+ * ```ts
+ * import { Effect, Layer, Stream } from "effect"
+ * import { Agent } from "@jpowersdev/effect-agent"
+ * import { ClaudeAgent, ClaudeSdk } from "@jpowersdev/effect-agent/claude"
+ *
+ * const program = Effect.gen(function* () {
+ *   const agent = yield* Agent
+ *   const session = yield* agent.open({ cwd: process.cwd(), spendCapUsd: 5 })
+ *   // Subscribe before sending, so no event is missed
+ *   const events = yield* session.subscribe
+ *   yield* events.pipe(Stream.runForEach(Effect.logInfo), Effect.forkScoped)
+ *   return yield* session.turn("Fix the failing test")
+ * }).pipe(
+ *   // Closing the scope ends the session and stops the agent process
+ *   Effect.scoped,
+ *   Effect.provide(ClaudeAgent.layer().pipe(Layer.provide(ClaudeSdk.layer()))),
+ * )
+ * ```
+ *
+ * @since 0.1.0
+ * @category services
+ */
 export class Agent extends Context.Service<
   Agent,
   {

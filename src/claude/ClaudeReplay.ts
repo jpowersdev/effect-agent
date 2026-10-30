@@ -2,7 +2,9 @@
  * `ClaudeSdk` without a process: plays back a JSONL recording made with
  * `ClaudeSdk.layer({ record })`.
  *
- *   ClaudeAgent.layer().pipe(Layer.provide(ClaudeReplay.layerFile("test/fixtures/claude/simple-turn.jsonl")))
+ * ```ts skip-type-checking
+ * ClaudeAgent.layer().pipe(Layer.provide(ClaudeReplay.layerFile("test/fixtures/claude/simple-turn.jsonl")))
+ * ```
  *
  * Each `open` takes the next recorded session (from its `ctl open` line).
  * When the client sends a message or calls a control method, the recorded
@@ -25,22 +27,46 @@
  * `history` with the line recorded for that session id. Replayed sessions
  * have no process, so `pid` is none and `kill` ends the frames as a SIGKILL
  * would.
+ *
+ * @since 0.1.0
  */
 import type { HookEvent, HookInput } from "@anthropic-ai/claude-agent-sdk"
 import { Cause, Effect, Layer, Option, Queue, Semaphore, Stream } from "effect"
 import { readFileSync } from "node:fs"
 import * as ClaudeSdk from "./ClaudeSdk.ts"
 
+/**
+ * A parsed JSONL recording, one `RecordLine` per line.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export type Recording = ReadonlyArray<ClaudeSdk.RecordLine>
 
+/**
+ * Parse a JSONL recording; blank lines are skipped.
+ *
+ * @since 0.1.0
+ * @category parsing
+ */
 export const parse = (text: string): Recording =>
   text
     .split("\n")
     .filter((line) => line.trim() !== "")
     .map((line) => JSON.parse(line) as ClaudeSdk.RecordLine)
 
+/**
+ * Read and parse a JSONL recording file.
+ *
+ * @since 0.1.0
+ * @category parsing
+ */
 export const load = (path: string): Recording => parse(readFileSync(path, "utf8"))
 
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export interface ReplayOptions {
   /**
    * Sessions `sessionExists` reports as present, besides those opened
@@ -53,6 +79,12 @@ export interface ReplayOptions {
   readonly onHook?: (call: ReplayedHook) => void
 }
 
+/**
+ * One replayed hook call, as passed to `ReplayOptions.onHook`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface ReplayedHook {
   readonly event: HookEvent
   readonly input: unknown
@@ -84,6 +116,12 @@ const recordedVersion = (recording: Recording): string | null => {
   return null
 }
 
+/**
+ * `ClaudeSdk` playing back a recording.
+ *
+ * @since 0.1.0
+ * @category layers
+ */
 export const layer = (all: Recording, options: ReplayOptions = {}): Layer.Layer<ClaudeSdk.ClaudeSdk> =>
   Layer.sync(ClaudeSdk.ClaudeSdk, () => {
     const statuses = all.flatMap((l) => (l.dir === "status" ? [l.status] : []))
@@ -275,5 +313,11 @@ export const layer = (all: Recording, options: ReplayOptions = {}): Layer.Layer<
     })
   })
 
+/**
+ * `layer` for a recording file, read when the layer is built.
+ *
+ * @since 0.1.0
+ * @category layers
+ */
 export const layerFile = (path: string, options: ReplayOptions = {}): Layer.Layer<ClaudeSdk.ClaudeSdk> =>
   Layer.suspend(() => layer(load(path), options))
