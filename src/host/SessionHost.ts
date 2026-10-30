@@ -3,12 +3,14 @@
  * add a one-line entry to your app, give it your platform's services, and
  * point `RemoteAgent.layer({ host })` at it.
  *
- *   // host.ts
- *   import { NodeRuntime, NodeServices } from "@effect/platform-node"
- *   import { Effect } from "effect"
- *   import { SessionHost } from "@jpowersdev/effect-agent/host"
+ * ```ts skip-type-checking
+ * // host.ts
+ * import { NodeRuntime, NodeServices } from "@effect/platform-node"
+ * import { Effect } from "effect"
+ * import { SessionHost } from "@jpowersdev/effect-agent/host"
  *
- *   NodeRuntime.runMain(SessionHost.run.pipe(Effect.provide(NodeServices.layer)))
+ * NodeRuntime.runMain(SessionHost.run.pipe(Effect.provide(NodeServices.layer)))
+ * ```
  *
  * (On Bun: `BunRuntime` and `BunServices` from `@effect/platform-bun`.)
  *
@@ -18,6 +20,8 @@
  * process while it runs (stdio, signals), so run nothing else in that process.
  * Bundling and the runtime are the entry's business, like any other entry
  * point in your app.
+ *
+ * @since 0.1.0
  */
 import { Cause, Deferred, Effect, Exit, Logger, Schema, Stdio, Stream } from "effect"
 import type { ChildProcessSpawner } from "effect/process"
@@ -27,7 +31,12 @@ import { AgentError } from "../AgentError.ts"
 import { run as runHost } from "./Host.ts"
 import { ensureDir, HostSpec, logPath, ReadyLine } from "./HostSpec.ts"
 
-/** The host could not start, or its session failed in a way it couldn't recover from. */
+/**
+ * The host could not start, or its session failed in a way it couldn't recover from.
+ *
+ * @since 0.1.0
+ * @category errors
+ */
 export class HostFailed extends Schema.TaggedError<HostFailed>()("HostFailed", {
   message: Schema.String,
 }) {}
@@ -37,6 +46,10 @@ const describe = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
 type Reason = "ended" | "stop" | "sigterm" | "orphan"
 
+/**
+ * @since 0.1.0
+ * @category running
+ */
 export const run: Effect.Effect<void, HostFailed, Stdio.Stdio | ChildProcessSpawner.ChildProcessSpawner> = Effect.scoped(
   Effect.gen(function* () {
     const stdio = yield* Stdio.Stdio

@@ -2,3 +2,6 @@ node_modules/
 dist/
 *.log
 .recordings-tmp/
+site/.docgen/
+site/.astro/
+site/src/content/docs/api/

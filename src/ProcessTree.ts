@@ -6,13 +6,27 @@
  * sweep signals every live process carrying it (Linux, via /proc). Elsewhere,
  * or for a command that clears its environment, only the agent's own process
  * group is reached; a cgroup `Launcher` (`systemd-run --scope`) closes that gap.
+ *
+ * @since 0.1.0
  */
 import { randomUUID } from "node:crypto"
 import { readdirSync, readFileSync } from "node:fs"
 import { Duration, Effect } from "effect"
 
+/**
+ * The environment variable that marks an agent process and everything it starts.
+ *
+ * @since 0.1.0
+ * @category constants
+ */
 export const markerVariable = "EFFECT_AGENT_PROCESS"
 
+/**
+ * A fresh, unique value for `markerVariable`.
+ *
+ * @since 0.1.0
+ * @category constructors
+ */
 export const newMarker = (): string => randomUUID()
 
 /** Send a signal to a process (or, with a negative id, a process group). False when it is gone. */
@@ -26,7 +40,12 @@ const signal = (pid: number, sig: NodeJS.Signals | 0): boolean => {
   }
 }
 
-/** Live processes whose environment carries `EFFECT_AGENT_PROCESS=<marker>` (Linux; elsewhere none). */
+/**
+ * Live processes whose environment carries `EFFECT_AGENT_PROCESS=<marker>` (Linux; elsewhere none).
+ *
+ * @since 0.1.0
+ * @category utils
+ */
 export const markedProcesses = (marker: string): Array<number> => {
   if (process.platform !== "linux") return []
   const needle = `\0${markerVariable}=${marker}\0`
@@ -52,6 +71,9 @@ export const markedProcesses = (marker: string): Array<number> => {
  * SIGTERM the process group of `pid` (when given) and every process carrying
  * `marker`, then SIGKILL whatever is left after `grace`. A no-op once they are
  * all gone.
+ *
+ * @since 0.1.0
+ * @category utils
  */
 export const kill = (
   marker: string,
@@ -72,7 +94,12 @@ export const kill = (
     send("SIGKILL")
   })
 
-/** SIGKILL the process group of `pid` (when given) and every process carrying `marker`, now. */
+/**
+ * SIGKILL the process group of `pid` (when given) and every process carrying `marker`, now.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
 export const killNow = (marker: string, pid?: number): void => {
   if (pid !== undefined) signal(-pid, "SIGKILL")
   for (const p of markedProcesses(marker)) signal(p, "SIGKILL")

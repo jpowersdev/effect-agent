@@ -1,0 +1,17 @@
+{
+  "name": "@jpowersdev/effect-agent-site",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "api": "node scripts/api.ts",
+    "dev": "pnpm api && astro dev",
+    "build": "pnpm api && astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "^7.3.5",
+    "@astrojs/starlight": "^0.42.7",
+    "astro": "^7.4.4"
+  }
+}

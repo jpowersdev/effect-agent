@@ -1,7 +1,9 @@
 /**
  * A `CodexAppServer` that replays a recorded session with no process.
  *
- *   CodexAgent.layer().pipe(Layer.provide(CodexReplay.layer(jsonlText)))
+ * ```ts skip-type-checking
+ * CodexAgent.layer().pipe(Layer.provide(CodexReplay.layer(jsonlText)))
+ * ```
  *
  * A recording is what `CodexAppServer.layer({ record })` writes: one JSON
  * object per line, `{"dir":"out","msg":...}` for client->server frames and
@@ -13,16 +15,30 @@
  * same method; the recorded `in` frames after it are then delivered, up to
  * the next recorded `out` request. Response ids are rewritten to the client's
  * request ids, and recorded `clientUserMessageId`s to the client's.
+ *
+ * @since 0.1.0
  */
 import { Deferred, Effect, Layer, Option } from "effect"
 import { AgentError } from "../AgentError.ts"
 import { CodexAppServer, type Connection, makeRpcCore, parseUserAgentVersion, type ProcessExit } from "./CodexAppServer.ts"
 import * as P from "./protocol.ts"
 
+/**
+ * One line of a recording.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export type Frame =
   | { readonly dir: "out" | "in"; readonly msg: P.Message }
   | { readonly dir: "exit"; readonly exitCode: number | null; readonly signal: string | null }
 
+/**
+ * Parses JSONL recording text into frames.
+ *
+ * @since 0.1.0
+ * @category testing
+ */
 export const parseRecording = (jsonl: string): ReadonlyArray<Frame> =>
   jsonl
     .split("\n")
@@ -132,7 +148,12 @@ const connect = (frames: ReadonlyArray<Frame>) =>
     } satisfies Connection
   })
 
-/** `recording` is JSONL text (as written by `record`) or parsed frames. */
+/**
+ * `recording` is JSONL text (as written by `record`) or parsed frames.
+ *
+ * @since 0.1.0
+ * @category testing
+ */
 export const layer = (recording: string | ReadonlyArray<Frame>): Layer.Layer<CodexAppServer> => {
   const frames = typeof recording === "string" ? parseRecording(recording) : recording
   const init = frames.find(

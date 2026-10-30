@@ -4,28 +4,52 @@
  * event counts as activity, including `Heartbeat`, so a model that is
  * thinking is not idle. While a tool call is open the `toolIdle` limit
  * applies instead, since a long build or test run can be silent.
+ *
+ * @since 0.1.0
  */
 import { Clock, Duration, Effect, Queue, type Scope, Stream } from "effect"
 import type { AgentEvent } from "./AgentEvent.ts"
 import type { TurnId } from "./Domain.ts"
 
+/**
+ * Idle limits; `toolIdle` defaults to `idle`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface Options {
   readonly idle: Duration.Input
   readonly toolIdle?: Duration.Input
 }
 
+/**
+ * A running turn that went quiet: for how long, and whether a tool call was open.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface Expiry {
   readonly turnId: TurnId
   readonly idleMs: number
   readonly inTool: boolean
 }
 
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export interface Watchdog {
   readonly observe: (event: AgentEvent) => Effect.Effect<void>
   /** At most one per turn. */
   readonly expirations: Stream.Stream<Expiry>
 }
 
+/**
+ * Start a watchdog. It checks for idle turns until the Scope closes.
+ *
+ * @since 0.1.0
+ * @category constructors
+ */
 export const make = (options: Options): Effect.Effect<Watchdog, never, Scope.Scope> =>
   Effect.gen(function* () {
     const idleMs = Duration.toMillis(Duration.fromInputUnsafe(options.idle))

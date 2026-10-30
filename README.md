@@ -12,6 +12,11 @@
   <a href="https://github.com/jpowersdev/effect-agent/actions/workflows/ci.yml"><img src="https://github.com/jpowersdev/effect-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
 
+<p align="center">
+  <a href="https://jpowersdev.github.io/effect-agent/">Documentation</a> ·
+  <a href="https://jpowersdev.github.io/effect-agent/api/core/">API reference</a>
+</p>
+
 > Status: early development (Effect 4.1). The API will change.
 
 ```sh

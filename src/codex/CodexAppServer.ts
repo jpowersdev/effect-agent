@@ -2,7 +2,9 @@
  * Transport for `codex app-server`: one process per connection, speaking
  * newline-delimited JSON-RPC on stdio.
  *
- *   CodexAppServer.layer().pipe(Layer.provide(NodeServices.layer))
+ * ```ts skip-type-checking
+ * CodexAppServer.layer().pipe(Layer.provide(NodeServices.layer))
+ * ```
  *
  * The process is spawned through `ChildProcessSpawner`, wrapped by the
  * `Launcher` if one is provided (in the caller's context or the layer's),
@@ -16,6 +18,8 @@
  * dies with its PTY but a `nohup`ed background one survives. Use a
  * `Launcher` that puts the process in a cgroup (`systemd-run --scope`) to
  * catch those too.
+ *
+ * @since 0.1.0
  */
 import { Cause, Context, Deferred, Duration, Effect, Exit, Fiber, FileSystem, Layer, Option, Queue, Schema, Scope, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
@@ -26,7 +30,12 @@ import * as P from "./protocol.ts"
 
 const provider = "codex"
 
-/** A JSON-RPC error response from app-server. */
+/**
+ * A JSON-RPC error response from app-server.
+ *
+ * @since 0.1.0
+ * @category errors
+ */
 export class CodexRpcError extends Schema.TaggedError<CodexRpcError>()("CodexRpcError", {
   method: Schema.String,
   code: Schema.Number,
@@ -34,14 +43,31 @@ export class CodexRpcError extends Schema.TaggedError<CodexRpcError>()("CodexRpc
   data: Schema.optional(Schema.Unknown),
 }) {}
 
+/**
+ * How app-server exited: an exit code, or the signal that killed it.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface ProcessExit {
   readonly exitCode: number | null
   readonly signal: string | null
 }
 
-/** A notification or a server-to-client request, in arrival order. */
+/**
+ * A notification or a server-to-client request, in arrival order.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export type Incoming = P.Incoming
 
+/**
+ * Options for `CodexAppServer.connect`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface ConnectOptions {
   readonly cwd: string
   /** Applied over the host environment; `undefined` removes a variable. */
@@ -54,6 +80,12 @@ export interface ConnectOptions {
   readonly onServerRequest?: (request: P.ServerRequest) => Effect.Effect<unknown, CodexRpcError>
 }
 
+/**
+ * An initialized app-server connection, live or replayed. Closed with its Scope.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface Connection {
   /** app-server's pid; null when replaying. */
   readonly pid: number | null
@@ -83,6 +115,12 @@ export interface Connection {
   readonly kill: Effect.Effect<void>
 }
 
+/**
+ * Options for `make` and `layer`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export interface Options {
   /** Path to the `codex` binary. Default `codex` (resolved on PATH). */
   readonly codexPath?: string
@@ -100,6 +138,12 @@ export interface Options {
   readonly clientVersion?: string
 }
 
+/**
+ * Starts app-server connections.
+ *
+ * @since 0.1.0
+ * @category services
+ */
 export class CodexAppServer extends Context.Service<
   CodexAppServer,
   {
@@ -109,7 +153,11 @@ export class CodexAppServer extends Context.Service<
   }
 >()("effect-agent/codex/CodexAppServer") {}
 
-/** Notifications we never use; opting out keeps recordings small and free of account metadata. */
+/**
+ * Notifications we never use; opting out keeps recordings small and free of account metadata.
+ *
+ * @internal
+ */
 export const optOutNotificationMethods: ReadonlyArray<P.NotificationMethod> = [
   "turn/moderationMetadata",
   "remoteControl/status/changed",
@@ -117,14 +165,29 @@ export const optOutNotificationMethods: ReadonlyArray<P.NotificationMethod> = [
   "rawResponseItem/completed",
 ]
 
+/**
+ * The `initialize` params: client info and capabilities, opting out of `optOutNotificationMethods`.
+ *
+ * @internal
+ */
 export const initializeParams = (options: Pick<Options, "clientName" | "clientVersion"> = {}): P.InitializeParams => ({
   clientInfo: { name: options.clientName ?? "effect_agent", title: null, version: options.clientVersion ?? "0.0.0" },
   capabilities: { experimentalApi: true, requestAttestation: false, optOutNotificationMethods },
 })
 
-/** `effect_agent/0.162.1 (NixOS ...)` -> `0.162.1` */
+/**
+ * `effect_agent/0.162.1 (NixOS ...)` -> `0.162.1`
+ *
+ * @internal
+ */
 export const parseUserAgentVersion = (userAgent: string): string | null => /^[^/\s]+\/(\d[^\s]*)/.exec(userAgent)?.[1] ?? null
 
+/**
+ * Declines approvals and elicitations, answers ask-user requests with no answers and fails anything else with METHOD_NOT_FOUND.
+ *
+ * @since 0.1.0
+ * @category rpc
+ */
 export const defaultServerRequestHandler = (request: P.ServerRequest): Effect.Effect<unknown, CodexRpcError> => {
   const M = P.ServerRequestMethods
   switch (request.method) {
@@ -156,6 +219,8 @@ const agentError = (message: string, cause?: unknown) =>
  * The plumbing shared by the live and replay transports: request/response
  * correlation, the incoming queue and the exit signal. `write` sends one
  * frame.
+ *
+ * @internal
  */
 export const makeRpcCore = Effect.fnUntraced(function* (write: (msg: P.Message) => Effect.Effect<void>) {
   let nextId = 1
@@ -235,6 +300,12 @@ const signalOf = (error: unknown): string | null => {
   return /signal:? '?(SIG[A-Z0-9]+)/.exec(text)?.[1] ?? null
 }
 
+/**
+ * Spawns `codex app-server` through `ChildProcessSpawner`, one process per connection.
+ *
+ * @since 0.1.0
+ * @category constructors
+ */
 export const make = (options: Options = {}) =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
@@ -434,5 +505,9 @@ export const make = (options: Options = {}) =>
     return CodexAppServer.of({ connect, version })
   })
 
+/**
+ * @since 0.1.0
+ * @category layers
+ */
 export const layer = (options: Options = {}): Layer.Layer<CodexAppServer, never, ChildProcessSpawner.ChildProcessSpawner> =>
   Layer.effect(CodexAppServer, make(options))

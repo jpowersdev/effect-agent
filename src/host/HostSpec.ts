@@ -5,6 +5,8 @@
  * session in another process, so it is plain data: provider-layer options
  * that serialize, `RunOptions` without hooks (durations as strings such as
  * `"30 seconds"` or millis), and the host's own settings.
+ *
+ * @since 0.1.0
  */
 import { Duration, Layer, Option, Schema } from "effect"
 import type { ChildProcessSpawner } from "effect/process"
@@ -22,17 +24,40 @@ import * as CodexAppServer from "../codex/CodexAppServer.ts"
 import * as CodexReplay from "../codex/CodexReplay.ts"
 import type { JsonValue } from "../codex/protocol.ts"
 
-/** A duration as `Duration` input text (`"30 seconds"`) or millis. */
+/**
+ * A duration as `Duration` input text (`"30 seconds"`) or millis.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const DurationSpec = Schema.Union([Schema.String, Schema.Number]).pipe(
   Schema.check(Schema.makeFilter((u: string | number) => Option.isSome(Duration.fromInput(u as Duration.Input)))),
 )
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type DurationSpec = typeof DurationSpec.Type
 
-/** `null` removes the variable (as `undefined` does in `RunOptions.env`). */
+/**
+ * `null` removes the variable (as `undefined` does in `RunOptions.env`).
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const EnvSpec = Schema.Record(Schema.String, Schema.NullOr(Schema.String))
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type EnvSpec = typeof EnvSpec.Type
 
-/** The serializable part of `ClaudeAgentOptions`. */
+/**
+ * The serializable part of `ClaudeAgentOptions`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const ClaudeOptionsSpec = Schema.Struct({
   settingSources: Schema.optionalKey(Schema.Array(Schema.Literals(["user", "project", "local"]))),
   pathToClaudeCodeExecutable: Schema.optionalKey(Schema.String),
@@ -41,6 +66,10 @@ export const ClaudeOptionsSpec = Schema.Struct({
   env: Schema.optionalKey(EnvSpec),
   stallGrace: Schema.optionalKey(DurationSpec),
 })
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type ClaudeOptionsSpec = typeof ClaudeOptionsSpec.Type
 
 const ModelPrice = Schema.Struct({
@@ -50,7 +79,12 @@ const ModelPrice = Schema.Struct({
   reasoning: Schema.optionalKey(Schema.Number),
 })
 
-/** `CodexAgentOptions` plus the serializable `CodexAppServer` options. */
+/**
+ * `CodexAgentOptions` plus the serializable `CodexAppServer` options.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const CodexOptionsSpec = Schema.Struct({
   pricing: Schema.optionalKey(Schema.Record(Schema.String, ModelPrice)),
   config: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
@@ -59,9 +93,18 @@ export const CodexOptionsSpec = Schema.Struct({
   args: Schema.optionalKey(Schema.Array(Schema.String)),
   forceKillAfter: Schema.optionalKey(DurationSpec),
 })
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type CodexOptionsSpec = typeof CodexOptionsSpec.Type
 
-/** `RunOptions` without `hooks`. */
+/**
+ * `RunOptions` without `hooks`.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const RunSpec = Schema.Struct({
   cwd: Schema.String,
   env: Schema.optionalKey(EnvSpec),
@@ -85,12 +128,31 @@ export const RunSpec = Schema.Struct({
     }),
   ),
 })
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type RunSpec = typeof RunSpec.Type
 
+/**
+ * The provider a host runs a session with.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const Provider = Schema.Literals(["claude", "codex"])
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type Provider = typeof Provider.Type
 
-/** Provider-layer settings shared by `RemoteAgent.layer` and the host. */
+/**
+ * Provider-layer settings shared by `RemoteAgent.layer` and the host.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const ProviderSpec = Schema.Struct({
   provider: Provider,
   claude: Schema.optionalKey(ClaudeOptionsSpec),
@@ -105,8 +167,18 @@ export const ProviderSpec = Schema.Struct({
   /** Tests, Claude replays: append each replayed hook call (`ClaudeReplay.ReplayedHook`) to this file as a JSON line. */
   replayHookLog: Schema.optionalKey(Schema.String),
 })
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type ProviderSpec = typeof ProviderSpec.Type
 
+/**
+ * What a host process is started with: `ProviderSpec`, the session's `RunSpec`, and the host's own settings.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const HostSpec = Schema.Struct({
   ...ProviderSpec.fields,
   run: RunSpec,
@@ -134,30 +206,73 @@ export const HostSpec = Schema.Struct({
   /** How long to keep serving after the session ends, for clients to read the last events. Default 5 seconds. */
   linger: Schema.optionalKey(DurationSpec),
 })
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type HostSpec = typeof HostSpec.Type
 
 // ---------------------------------------------------------------------------
 // Files
 // ---------------------------------------------------------------------------
 
-/** `$XDG_RUNTIME_DIR/effect-agent`, or `<tmpdir>/effect-agent-<uid>`. */
+/**
+ * `$XDG_RUNTIME_DIR/effect-agent`, or `<tmpdir>/effect-agent-<uid>`.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
 export const defaultDir = (): string => {
   const runtime = process.env["XDG_RUNTIME_DIR"]
   if (runtime !== undefined && runtime !== "") return join(runtime, "effect-agent")
   return join(tmpdir(), `effect-agent-${process.getuid?.() ?? "user"}`)
 }
 
-/** Create `dir` (mode 0700), or make an existing one 0700: it holds sockets and full transcripts. */
+/**
+ * Create `dir` (mode 0700), or make an existing one 0700: it holds sockets and full transcripts.
+ *
+ * @internal
+ */
 export const ensureDir = (dir: string): void => {
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   if ((statSync(dir).mode & 0o077) !== 0) chmodSync(dir, 0o700)
 }
 
+/**
+ * The session's unix socket in `dir`.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
 export const socketPath = (dir: string, sessionId: string) => join(dir, `${sessionId}.sock`)
+/**
+ * The session's `Manifest` file in `dir`.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
 export const manifestPath = (dir: string, sessionId: string) => join(dir, `${sessionId}.json`)
+/**
+ * The session's host log in `dir`.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
 export const logPath = (dir: string, sessionId: string) => join(dir, `${sessionId}.log`)
+/**
+ * The session's events file in `dir`.
+ *
+ * @since 0.1.0
+ * @category utils
+ */
 export const eventsPath = (dir: string, sessionId: string) => join(dir, `${sessionId}.events.jsonl`)
 
+/**
+ * What a running host records in `<dir>/<sessionId>.json`, for `attach` and `list` to find it.
+ *
+ * @since 0.1.0
+ * @category models
+ */
 export const Manifest = Schema.Struct({
   sessionId: SessionId,
   provider: Provider,
@@ -167,22 +282,37 @@ export const Manifest = Schema.Struct({
   cwd: Schema.String,
   startedAt: Schema.DateTimeUtcFromMillis,
 })
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export type Manifest = typeof Manifest.Type
 
 // ---------------------------------------------------------------------------
 // Readiness: one JSON line on the host's stdout
 // ---------------------------------------------------------------------------
 
+/**
+ * The host opened its session and is serving it on `socket`.
+ *
+ * @internal
+ */
 export const Ready = Schema.TaggedStruct("Ready", {
   sessionId: SessionId,
   socket: Schema.String,
   pid: Schema.Number,
 })
 
+/**
+ * The one line a host writes to stdout: `Ready`, or `Failed` with the error opening the session.
+ *
+ * @internal
+ */
 export const ReadyLine = Schema.Union([
   Ready,
   Schema.TaggedStruct("Failed", { error: Schema.Union([SessionNotFound, AgentError]) }),
 ])
+/** @internal */
 export type ReadyLine = typeof ReadyLine.Type
 
 // ---------------------------------------------------------------------------
@@ -197,10 +327,18 @@ const fromEnv = (env: Readonly<Record<string, string | undefined>>): EnvSpec =>
 
 const millis = (input: Duration.Input): number => Duration.toMillis(Duration.fromInputUnsafe(input))
 
-/** A validated `DurationSpec` as a `Duration`. */
+/**
+ * A validated `DurationSpec` as a `Duration`.
+ *
+ * @internal
+ */
 export const toDuration = (spec: DurationSpec): Duration.Duration => Duration.fromInputUnsafe(spec as Duration.Input)
 
-/** `RunOptions` -> `RunSpec`. `hooks` are dropped (check for them first: functions can't cross processes). */
+/**
+ * `RunOptions` -> `RunSpec`. `hooks` are dropped (check for them first: functions can't cross processes).
+ *
+ * @internal
+ */
 export const fromRunOptions = (run: RunOptions): RunSpec => {
   return {
     cwd: run.cwd,
@@ -227,6 +365,11 @@ export const fromRunOptions = (run: RunOptions): RunSpec => {
   }
 }
 
+/**
+ * `RunSpec` -> `RunOptions` (without `hooks`).
+ *
+ * @internal
+ */
 export const toRunOptions = (run: RunSpec): RunOptions => ({
   cwd: run.cwd,
   ...(run.env !== undefined && { env: toEnv(run.env) }),
@@ -258,6 +401,8 @@ const claudeOptions = (spec: ClaudeOptionsSpec = {}): ClaudeAgent.ClaudeAgentOpt
  * The real (or replayed) provider `Agent` layer for a spec, with no
  * `Launcher`. Codex spawns its app-server through the platform's
  * `ChildProcessSpawner` (`NodeServices.layer`, `BunServices.layer`).
+ *
+ * @internal
  */
 export const providerLayer = (spec: ProviderSpec): Layer.Layer<Agent, never, ChildProcessSpawner.ChildProcessSpawner> => {
   const replay = spec.replay

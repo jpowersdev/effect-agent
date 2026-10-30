@@ -1,8 +1,10 @@
 /**
  * `Agent` backed by Claude Code (`@anthropic-ai/claude-agent-sdk`).
  *
- *   import { ClaudeAgent, ClaudeSdk } from "@jpowersdev/effect-agent/claude"
- *   program.pipe(Effect.provide(ClaudeAgent.layer().pipe(Layer.provide(ClaudeSdk.layer()))))
+ * ```ts skip-type-checking
+ * import { ClaudeAgent, ClaudeSdk } from "@jpowersdev/effect-agent/claude"
+ * program.pipe(Effect.provide(ClaudeAgent.layer().pipe(Layer.provide(ClaudeSdk.layer()))))
+ * ```
  *
  * Turns are defined by the CLI's `command_lifecycle` frames: a turn starts
  * when one of our messages goes `started` while no turn is running (its
@@ -20,6 +22,8 @@
  *
  * The pure parts (`buildOptions`, `sdkHooks`, `frameEvents`, `step`,
  * `classifyOutcome`, `accountStatus`, `historyEvents`) are exported for testing.
+ *
+ * @since 0.1.0
  */
 import type {
   AccountInfo,
@@ -68,8 +72,18 @@ import * as Launcher from "../Launcher.ts"
 import * as Watchdog from "../Watchdog.ts"
 import * as ClaudeSdk from "./ClaudeSdk.ts"
 
+/**
+ * The `Capabilities.provider` name.
+ *
+ * @since 0.1.0
+ * @category constants
+ */
 export const provider = "claude"
 
+/**
+ * @since 0.1.0
+ * @category models
+ */
 export interface ClaudeAgentOptions {
   /** Filesystem settings to load. Defaults to the CLI default (all sources, so project `CLAUDE.md` loads). MCP isolation holds regardless. */
   readonly settingSources?: ReadonlyArray<SettingSource>
@@ -96,7 +110,11 @@ export interface ClaudeAgentOptions {
 // RunOptions -> SDK Options
 // ---------------------------------------------------------------------------
 
-/** Variables a parent Claude Code session sets that would make the child think it is nested. */
+/**
+ * Variables a parent Claude Code session sets that would make the child think it is nested.
+ *
+ * @internal
+ */
 export const nestingMarkers: ReadonlyArray<string> = [
   "CLAUDECODE",
   "CLAUDE_CODE_ENTRYPOINT",
@@ -112,7 +130,11 @@ export const nestingMarkers: ReadonlyArray<string> = [
   "AI_AGENT",
 ]
 
-/** The SDK replaces the child's environment with this, so it starts from the host's. */
+/**
+ * The SDK replaces the child's environment with this, so it starts from the host's.
+ *
+ * @internal
+ */
 export const buildEnv = (
   host: Readonly<Record<string, string | undefined>>,
   overrides: Readonly<Record<string, string | undefined>> = {},
@@ -130,8 +152,18 @@ export const buildEnv = (
   return out
 }
 
+/**
+ * `Effort` as the SDK's `EffortLevel`: `minimal` becomes `low`.
+ *
+ * @internal
+ */
 export const toEffortLevel = (effort: Effort): EffortLevel => (effort === "minimal" ? "low" : effort)
 
+/**
+ * `RunOptions.disable` as the SDK's `disallowedTools`.
+ *
+ * @internal
+ */
 export const disallowedTools = (disable: RunOptions["disable"]): Array<string> => {
   const tools = new Set<string>()
   if (disable?.askUser) tools.add("AskUserQuestion")
@@ -155,7 +187,11 @@ const runHook = (hook: () => Effect.Effect<Option.Option<string>>, signal: Abort
     { signal },
   ).catch(() => undefined)
 
-/** Tool output as text for `afterTool`: Bash's stdout/stderr, content blocks, or JSON. */
+/**
+ * Tool output as text for `afterTool`: Bash's stdout/stderr, content blocks, or JSON.
+ *
+ * @internal
+ */
 export const toolResponseText = (response: unknown): string => {
   if (typeof response === "string") return response
   if (typeof response === "object" && response !== null) {
@@ -190,6 +226,8 @@ const matcher = <E extends HookEvent>(
  * PostToolUse (and PostToolUseFailure, with `isError`), `beforeStop` Stop.
  * Text a hook returns goes back as `additionalContext`; for Stop the CLI then
  * keeps the turn going so the model can act on it.
+ *
+ * @internal
  */
 export const sdkHooks = (hooks: Hooks): NonNullable<Options["hooks"]> => {
   const out: NonNullable<Options["hooks"]> = {}
@@ -239,6 +277,11 @@ export const sdkHooks = (hooks: Hooks): NonNullable<Options["hooks"]> => {
 // RunOptions -> SDK Options (continued)
 // ---------------------------------------------------------------------------
 
+/**
+ * SDK `Options` for a session, from `RunOptions` and the layer's config.
+ *
+ * @internal
+ */
 export const buildOptions = (
   run: RunOptions,
   config: ClaudeAgentOptions,
@@ -273,7 +316,11 @@ export const buildOptions = (
   }
 }
 
-/** Options for `status`'s idle query: the same isolation as a session, nothing persisted. */
+/**
+ * Options for `status`'s idle query: the same isolation as a session, nothing persisted.
+ *
+ * @internal
+ */
 export const buildStatusOptions = (
   config: ClaudeAgentOptions,
   cwd: string,
@@ -291,14 +338,22 @@ export const buildStatusOptions = (
   }),
 })
 
-/** The transcript location for `RunOptions`, honouring a `CLAUDE_CONFIG_DIR` override in `env`. */
+/**
+ * The transcript location for `RunOptions`, honouring a `CLAUDE_CONFIG_DIR` override in `env`.
+ *
+ * @internal
+ */
 export const location = (run: RunOptions, sessionId: SessionId, config: ClaudeAgentOptions = {}): string => {
   const env = { ...config.env, ...run.env }
   const configDir = "CLAUDE_CONFIG_DIR" in env ? env.CLAUDE_CONFIG_DIR : process.env.CLAUDE_CONFIG_DIR
   return ClaudeSdk.transcriptPath(run.cwd, sessionId, configDir)
 }
 
-/** The CLI's text for resuming a session it has no record of. The one place it is recognized. */
+/**
+ * The CLI's text for resuming a session it has no record of. The one place it is recognized.
+ *
+ * @internal
+ */
 export const sessionNotFound = (text: string, sessionId: SessionId): SessionNotFound | undefined =>
   text.includes("No conversation found with session ID")
     ? new SessionNotFound({ message: text, sessionId })
@@ -313,7 +368,11 @@ const firstLine = (text: string, max = 200): string => {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line
 }
 
-/** One line for a tool call: the command, path, pattern or URL it acts on. */
+/**
+ * One line for a tool call: the command, path, pattern or URL it acts on.
+ *
+ * @internal
+ */
 export const toolSummary = (name: string, input: unknown): string => {
   const i = (typeof input === "object" && input !== null ? input : {}) as Record<string, unknown>
   const pick = (...keys: ReadonlyArray<string>) => {
@@ -349,7 +408,11 @@ export const toolSummary = (name: string, input: unknown): string => {
   return summary ?? name
 }
 
-/** Tool output as text: strings as-is, text blocks joined, other blocks named. */
+/**
+ * Tool output as text: strings as-is, text blocks joined, other blocks named.
+ *
+ * @internal
+ */
 export const flattenToolContent = (content: unknown): string => {
   if (typeof content === "string") return content
   if (!Array.isArray(content)) return content === undefined || content === null ? "" : JSON.stringify(content)
@@ -362,6 +425,11 @@ export const flattenToolContent = (content: unknown): string => {
     .join("\n")
 }
 
+/**
+ * A rate-limit window label as a `LimitWindow`.
+ *
+ * @internal
+ */
 export const normalizeWindow = (label: string): LimitWindow =>
   label === "five_hour" ? "five_hour" : label === "seven_day" ? "weekly" : "other"
 
@@ -371,7 +439,11 @@ const secondsToDateTime = (seconds: unknown): DateTime.Utc | null =>
 /** A display name's family, e.g. `Fable` → `fable`, `Opus 5` → `opus`. */
 const modelFamily = (displayName: string): string => displayName.trim().split(/\s+/)[0]!.toLowerCase()
 
-/** The model a window label caps: `seven_day_opus` → `opus`, `model_scoped:Fable` → `fable`; none for account-wide windows. */
+/**
+ * The model a window label caps: `seven_day_opus` → `opus`, `model_scoped:Fable` → `fable`; none for account-wide windows.
+ *
+ * @internal
+ */
 export const modelOfLabel = (label: string): Option.Option<string> => {
   if (label.startsWith("model_scoped:")) return Option.some(modelFamily(label.slice("model_scoped:".length)))
   const perModel = /^seven_day_(opus|sonnet|haiku|fable)$/.exec(label)
@@ -382,6 +454,8 @@ export const modelOfLabel = (label: string): Option.Option<string> => {
  * Windows from a `rate_limit_info`. Prefers the undocumented `unifiedWindows`
  * (`utilization` is a fraction, `resetsAt` unix seconds); falls back to the
  * single documented window.
+ *
+ * @internal
  */
 export const limitWindows = (info: SDKRateLimitInfo): Array<LimitWindowStatus> => {
   const unified = (info as { readonly unifiedWindows?: unknown }).unifiedWindows
@@ -408,6 +482,8 @@ const isHeartbeat = (frame: { readonly type: string; readonly subtype?: unknown 
 /**
  * Events for frames whose mapping does not depend on turn state. Lifecycle,
  * `init` and `result` frames are handled by `step`; heartbeats are throttled there.
+ *
+ * @internal
  */
 export const frameEvents = (frame: ClaudeSdk.Frame, turnId: TurnId | null): Array<AgentEvent> => {
   const raw = frame
@@ -483,18 +559,32 @@ export const frameEvents = (frame: ClaudeSdk.Frame, turnId: TurnId | null): Arra
 // Outcome classification
 // ---------------------------------------------------------------------------
 
+/**
+ * How the CLI process died.
+ *
+ * @internal
+ */
 export interface ProcessFailure {
   readonly message: string
   readonly signal: string | null
   readonly exitCode: number | null
 }
 
-/** The watchdog stopped the turn: how long it had been quiet, and whether a tool was running. */
+/**
+ * The watchdog stopped the turn: how long it had been quiet, and whether a tool was running.
+ *
+ * @internal
+ */
 export interface Stall {
   readonly idleMs: number
   readonly inTool: boolean
 }
 
+/**
+ * What `classifyOutcome` knows about a turn.
+ *
+ * @internal
+ */
 export interface OutcomeInput {
   readonly turnId: TurnId
   /** The turn's `result`, or null when the process died first. */
@@ -520,6 +610,11 @@ const stalledError = (stall: Stall, killed: boolean) =>
     inTool: stall.inTool,
   })
 
+/**
+ * Whether paid extra usage can take over from a rate limit; null when the info does not say.
+ *
+ * @internal
+ */
 export const overageAvailable = (info: SDKRateLimitInfo): boolean | null => {
   if (info.isUsingOverage === true || info.overageInUse === true) return true
   if (info.overageStatus === "allowed" || info.overageStatus === "allowed_warning") return true
@@ -532,6 +627,11 @@ const resultMessage = (result: SDKResultMessage): string => {
   return Array.isArray(result.errors) && result.errors.length > 0 ? result.errors.join("; ") : result.subtype
 }
 
+/**
+ * How a turn ended, from its `result` (or the process failure) and what was seen during it.
+ *
+ * @internal
+ */
 export const classifyOutcome = (input: OutcomeInput): TurnOutcome => {
   const { result, turnId } = input
   const stall = input.stalled ?? null
@@ -577,7 +677,11 @@ export const classifyOutcome = (input: OutcomeInput): TurnOutcome => {
   })
 }
 
-/** This turn's tokens (`result.usage` is per turn in streaming-input mode); null if the CLI omitted it. */
+/**
+ * This turn's tokens (`result.usage` is per turn in streaming-input mode); null if the CLI omitted it.
+ *
+ * @internal
+ */
 export const turnUsage = (result: SDKResultMessage): TokenUsage | null => {
   const u = result.usage as Partial<SDKResultMessage["usage"]> | undefined
   if (u === undefined || u === null) return null
@@ -595,6 +699,11 @@ export const turnUsage = (result: SDKResultMessage): TokenUsage | null => {
 // Turn tracking (pure)
 // ---------------------------------------------------------------------------
 
+/**
+ * The running turn, as tracked by `step`.
+ *
+ * @internal
+ */
 export interface TurnState {
   readonly turnId: TurnId
   readonly messages: ReadonlyArray<string>
@@ -605,6 +714,11 @@ export interface TurnState {
   readonly stalled?: Stall | null
 }
 
+/**
+ * Session state folded by `step`.
+ *
+ * @internal
+ */
 export interface State {
   readonly started: boolean
   /** Events from before the first `init` frame, emitted right after `SessionStarted`. */
@@ -622,6 +736,11 @@ export interface State {
   readonly landed: ReadonlySet<string>
 }
 
+/**
+ * `State` before any frame.
+ *
+ * @internal
+ */
 export const initialState: State = {
   started: false,
   held: [],
@@ -634,6 +753,11 @@ export const initialState: State = {
 
 const withLanded = (state: State, id: string): State => ({ ...state, landed: new Set(state.landed).add(id) })
 
+/**
+ * Per-frame input to `step`.
+ *
+ * @internal
+ */
 export interface StepContext {
   readonly sessionId: SessionId
   readonly resumed: boolean
@@ -643,6 +767,11 @@ export interface StepContext {
   readonly nextPending?: string | null
 }
 
+/**
+ * The result of `step`: the new state, events to emit, and messages dropped.
+ *
+ * @internal
+ */
 export interface Step {
   readonly state: State
   readonly events: ReadonlyArray<AgentEvent>
@@ -687,6 +816,8 @@ const endTurn = (ctx: StepContext, state: State, turn: TurnState, result: SDKRes
 /**
  * Fold one frame into the session state. Events before the first `init`
  * (the first message's lifecycle frames) are held so `SessionStarted` comes first.
+ *
+ * @internal
  */
 export const step = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step => {
   const next = stepFrame(ctx, state, frame)
@@ -806,7 +937,11 @@ const stepFrame = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step
   return { state, events: frameEvents(frame, turnId), dropped: [] }
 }
 
-/** The process ended: a running turn ends `ProcessKilled`. */
+/**
+ * The process ended: a running turn ends `ProcessKilled`.
+ *
+ * @internal
+ */
 export const stepExit = (ctx: StepContext, state: State, error: ProcessFailure | null): Step => {
   const held = { ...state, held: [] }
   if (state.turn === null) return { state: held, events: state.held, dropped: [] }
@@ -818,6 +953,8 @@ export const stepExit = (ctx: StepContext, state: State, error: ProcessFailure |
  * The CLI's exit code reflects its last result, so after a turn that ended in
  * a failure (an interrupt, a spend cap, ...) even a clean shutdown exits 1.
  * That is a normal end, not a crash, when we asked for it and no turn was running.
+ *
+ * @internal
  */
 export const isCleanExitAfterFailedTurn = (
   error: { readonly exitCode: number | null; readonly signal: string | null },
@@ -825,11 +962,19 @@ export const isCleanExitAfterFailedTurn = (
 ): boolean =>
   context.endRequested && !context.turnRunning && context.lastTurnFailed && error.exitCode === 1 && error.signal === null
 
-/** Mark the running turn as interrupted by us. */
+/**
+ * Mark the running turn as interrupted by us.
+ *
+ * @internal
+ */
 export const markInterrupt = (state: State): State =>
   state.turn === null ? state : { ...state, turn: { ...state.turn, interruptRequested: true } }
 
-/** Mark the running turn as stopped by the watchdog (if it is still `turnId`). */
+/**
+ * Mark the running turn as stopped by the watchdog (if it is still `turnId`).
+ *
+ * @internal
+ */
 export const markStalled = (state: State, turnId: TurnId, stall: Stall): State =>
   state.turn === null || state.turn.turnId !== turnId
     ? state
@@ -1103,6 +1248,8 @@ const isSet = (value: string | undefined) => value !== undefined && value !== ""
  * `{ tokenSource: "none", apiProvider: "firstParty" }`; an OAuth login adds
  * `email`, an API key `apiKeySource`. Third-party providers (Bedrock, Vertex,
  * a gateway) authenticate outside the CLI, so they count as signed in.
+ *
+ * @internal
  */
 export const signedIn = (account: AccountInfo): boolean =>
   (account.apiProvider !== undefined && account.apiProvider !== "firstParty") ||
@@ -1122,6 +1269,8 @@ const percent = (value: unknown): number | null => (typeof value === "number" &&
  * 0-100, `resets_at` ISO), plus `model_scoped` entries labelled
  * `model_scoped:<name>`. Falls back to the `limits[]` list when no named
  * window is present.
+ *
+ * @internal
  */
 export const usageWindows = (rateLimits: unknown): Array<LimitWindowStatus> => {
   if (typeof rateLimits !== "object" || rateLimits === null) return []
@@ -1174,6 +1323,8 @@ export const usageWindows = (rateLimits: unknown): Array<LimitWindowStatus> => {
  * `spend_limited` when extra usage says its spend limit is reached and it is
  * what meters this account (no plan window reports usage). A plan account
  * whose extra usage is exhausted is still usable while its windows have room.
+ *
+ * @internal
  */
 export const accountStatus = (snapshot: ClaudeSdk.StatusSnapshot, checkedAt: DateTime.Utc): AccountStatus => {
   const usage = snapshot.usage as (ClaudeSdk.StatusSnapshot["usage"] & { readonly rate_limits?: unknown }) | null
@@ -1232,6 +1383,8 @@ const historyTags: ReadonlySet<AgentEvent["_tag"]> = new Set(["Text", "ToolCall"
  * shown as typed, and its output skipped. The CLI's interrupt marker ends the turn
  * `Interrupted`; nothing else in a transcript records how a turn ended, so
  * other turns have no `TurnEnded`.
+ *
+ * @internal
  */
 export const historyEvents = (messages: ReadonlyArray<SessionMessage>): Array<AgentEvent> => {
   const events: Array<AgentEvent> = []
@@ -1279,6 +1432,12 @@ export const historyEvents = (messages: ReadonlyArray<SessionMessage>): Array<Ag
   return events
 }
 
+/**
+ * `Capabilities` for a Claude Code CLI version (null when unknown).
+ *
+ * @since 0.1.0
+ * @category constructors
+ */
 export const capabilities = (version: string | null): Capabilities => ({
   provider,
   version,
@@ -1293,6 +1452,12 @@ export const capabilities = (version: string | null): Capabilities => ({
   disable: { askUser: true, subagents: true, tools: "any" },
 })
 
+/**
+ * `Agent` backed by Claude Code; requires `ClaudeSdk`.
+ *
+ * @since 0.1.0
+ * @category layers
+ */
 export const layer = (options: ClaudeAgentOptions = {}): Layer.Layer<Agent, never, ClaudeSdk.ClaudeSdk> =>
   Layer.effect(
     Agent,

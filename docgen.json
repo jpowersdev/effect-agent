@@ -1,0 +1,42 @@
+{
+  "$schema": "node_modules/@effect/docgen/schema.json",
+  "projectHomepage": "https://github.com/jpowersdev/effect-agent",
+  "srcLink": "https://github.com/jpowersdev/effect-agent/blob/main/src/",
+  "runExamples": true,
+  "outDir": "site/.docgen",
+  "exclude": [
+    "src/codex/protocol.ts",
+    "src/codex/CodexEvents.ts",
+    "src/host/EventFile.ts",
+    "src/host/HookBridge.ts",
+    "src/host/Host.ts"
+  ],
+  "parseCompilerOptions": "tsconfig.json",
+  "examplesCompilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "exactOptionalPropertyTypes": true,
+    "skipLibCheck": true,
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "target": "ES2024",
+    "allowImportingTsExtensions": true,
+    "types": [
+      "node"
+    ],
+    "paths": {
+      "@jpowersdev/effect-agent": [
+        "../../../src/index.ts"
+      ],
+      "@jpowersdev/effect-agent/claude": [
+        "../../../src/claude/index.ts"
+      ],
+      "@jpowersdev/effect-agent/codex": [
+        "../../../src/codex/index.ts"
+      ],
+      "@jpowersdev/effect-agent/host": [
+        "../../../src/host/index.ts"
+      ]
+    }
+  }
+}
