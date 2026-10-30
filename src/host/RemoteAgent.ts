@@ -161,10 +161,10 @@ export interface RemoteSession extends AgentSession {
 
 export interface AttachOptions {
   /**
-   * Answer the session's hook calls with these. Only hooks the session was
-   * opened with are ever called. Of the attached clients with a hook, the one
-   * that attached most recently answers it; a client attached without hooks
-   * never does.
+   * Answer the session's hook calls with these, whatever it was opened with
+   * (where the provider has hooks, a session registers all of them). Of the
+   * attached clients with a hook, the one that attached most recently answers
+   * it; a client attached without hooks never does.
    */
   readonly hooks?: Hooks
   /** Override `RemoteAgentOptions.hookTimeout` for the calls this client answers. */
@@ -181,7 +181,7 @@ export class AgentHosts extends Context.Service<
     /**
      * `Agent.open`, typed as a `RemoteSession`. `options.hooks` stay in this
      * process: the host forwards each hook call to an attached client that
-     * has hooks (see `attach`). Refused where the provider has no hooks.
+     * has that hook (see `attach`). Refused where the provider has no hooks.
      */
     readonly open: (
       options: RunOptions,
@@ -744,7 +744,6 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
       ): Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope> =>
         Effect.gen(function* () {
           yield* refuseHooks(run.hooks)
-          const names = hookNames(run.hooks)
           if (run.resume !== undefined) {
             const existing = readManifest(manifestPath(dir, run.resume))
             if (existing !== undefined && isLive(existing)) {
@@ -757,6 +756,7 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
             ...(options.codex !== undefined && { codex: options.codex }),
             ...(options.replay !== undefined && { replay: options.replay }),
             ...(options.replayKnownSessions !== undefined && { replayKnownSessions: options.replayKnownSessions }),
+            ...(options.replayHookLog !== undefined && { replayHookLog: options.replayHookLog }),
             run: fromRunOptions(run),
             dir,
             ...(options.maxEvents !== undefined && { maxEvents: options.maxEvents }),
@@ -765,7 +765,6 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
             ...(options.persistEvents !== undefined && { persistEvents: options.persistEvents }),
             retainEvents: Duration.toMillis(retainEvents),
             ...(options.testDropBeforeReply !== undefined && { testDropBeforeReply: [...options.testDropBeforeReply] }),
-            ...(names.length > 0 && { hooks: Object.fromEntries(names.map((name) => [name, true])) }),
             ...(options.testInvokeHook === true && { testInvokeHook: true }),
           }
           const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(HostSpec))(spec).pipe(
@@ -805,7 +804,10 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
         })
 
       const fromFile = (sessionId: SessionId, fromSeq: number): Stream.Stream<SeqEvent, AgentError> =>
-        EventFile.read(eventsPath(dir, sessionId), fromSeq).pipe(Stream.mapError((e) => agentError(e.message, e)))
+        EventFile.read(eventsPath(dir, sessionId), fromSeq).pipe(
+          // The session's own ending error as it was; a bad file as an AgentError.
+          Stream.mapError((e) => (e instanceof AgentError ? e : agentError(e.message, e))),
+        )
 
       const events = (sessionId: SessionId, fromSeq = 0): Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | AgentError> =>
         Stream.suspend((): Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | AgentError> => {

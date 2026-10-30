@@ -230,6 +230,15 @@ export const makeLog = (
       Effect.suspend(() => {
         if (ended !== null) return Effect.void
         ended = { error }
+        // How it ended, for readers of the file once the host is gone.
+        let written: Effect.Effect<void> = Effect.void
+        if (file !== null) {
+          try {
+            file.end(error)
+          } catch (e) {
+            written = fileFailed(e)
+          }
+        }
         running = null
         for (const [turnId, waiter] of waiters) {
           Deferred.doneUnsafe(
@@ -242,7 +251,7 @@ export const makeLog = (
           Deferred.doneUnsafe(waiter, Exit.fail(error ?? neverLanded(messageId)))
         }
         messageWaiters.clear()
-        return PubSub.publish(pubsub, End)
+        return Effect.andThen(written, PubSub.publish(pubsub, End))
       })
 
     const tail = Stream.suspend(() => (ended?.error ? Stream.fail(ended.error) : Stream.empty))
@@ -351,15 +360,15 @@ const settle = (outcome: TurnOutcome): Effect.Effect<TurnSucceeded, TurnFailure>
 // Host
 // ---------------------------------------------------------------------------
 
-/** `RunOptions.hooks` whose calls go through `bridge` to an attached client. */
-export const remoteHooks = (flags: HostSpec["hooks"], bridge: HookBridge.HookBridge): Hooks | undefined => {
-  if (flags === undefined) return undefined
-  const hooks: { -readonly [K in keyof Hooks]: Hooks[K] } = {}
-  if (flags.beforeTool === true) hooks.beforeTool = (call) => bridge.call("beforeTool", call)
-  if (flags.afterTool === true) hooks.afterTool = (call) => bridge.call("afterTool", call)
-  if (flags.beforeStop === true) hooks.beforeStop = () => bridge.call("beforeStop", null)
-  return Object.keys(hooks).length > 0 ? hooks : undefined
-}
+/**
+ * Every hook kind, each going through `bridge` to an attached client that
+ * has it. With none attached, `bridge` answers "nothing" at once, in-process.
+ */
+export const remoteHooks = (bridge: HookBridge.HookBridge): Hooks => ({
+  beforeTool: (call) => bridge.call("beforeTool", call),
+  afterTool: (call) => bridge.call("afterTool", call),
+  beforeStop: () => bridge.call("beforeStop", null),
+})
 
 const describe = (cause: Cause.Cause<unknown>): string => {
   const error = Cause.squash(cause)
@@ -388,8 +397,12 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       /** Bound once connections are tracked (below). */
       let dropHookDelivery = () => false
       const hookBridge = yield* HookBridge.make({ dropDelivery: () => dropHookDelivery() })
-      const hooks = remoteHooks(spec.hooks, hookBridge)
-      const runOptions: RunOptions = { ...toRunOptions(spec.run), ...(hooks !== undefined && { hooks }) }
+      // Registered whether or not `open` passed hooks, so any client can supply any hook later.
+      const hasHooks = yield* agent.capabilities.pipe(
+        Effect.map((c) => c.hooks),
+        Effect.orElseSucceed(() => false),
+      )
+      const runOptions: RunOptions = { ...toRunOptions(spec.run), ...(hasHooks && { hooks: remoteHooks(hookBridge) }) }
 
       // ---- open ----
       const sessionScope = yield* Scope.make()

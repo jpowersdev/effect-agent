@@ -125,14 +125,14 @@ Each host serves one session over effect/rpc on a unix socket in `dir` (default 
 
 **The event log.** The host appends every `{ seq, event }` to `<sessionId>.events.jsonl` (mode 0600; one Schema-encoded JSON line each, seq 0, 1, 2, ...) before any subscriber sees it. The last `maxEvents` (default 50 000) are also kept in memory as a cache: `subscribeFrom(seq)` older than the cache reads the missing range from the file, then carries on from the cache and live events with no gap or duplicate. `awaitTurn`/`awaitMessage` don't depend on either, so they answer for any turn of the session. `subscribeFrom` fails with `EventsTrimmed` only when `seq` is older than the cache and the file can't serve it: `persistEvents: false`, or the file is missing or unreadable. A resumed session (`resume`) numbers on from the file its earlier host left.
 
-When the host exits, the socket and manifest go, but the events file is kept for `retainEvents` (default 24 hours, counted from when the host exited). `AgentHosts.events(sessionId, fromSeq?)` reads it whether or not the host is still running: from a live host it follows live events until the session ends; otherwise it reads the file to the end and completes. It fails with `SessionNotFound` if there's neither. Expired files are pruned by `list`, `attach`, `events` and host startup.
+When the host exits, the socket and manifest go, but the events file is kept for `retainEvents` (default 24 hours, counted from when the host exited). `AgentHosts.events(sessionId, fromSeq?)` reads it whether or not the host is still running: from a live host it follows live events until the session ends; otherwise it reads the file to its end. Either way it ends as a live subscription would. When the session ends, the host writes a last line recording how (`{"ended":null}`, or the encoded `AgentError`), so `events` completes after a clean end and fails with the session's error otherwise. A file without that line belongs to a host that was SIGKILLed mid-session. It is known to be incomplete (it stops where the host did), and reading it completes at its end. `events` fails with `SessionNotFound` if there's neither a host nor a file. Expired files are pruned by `list`, `attach`, `events` and host startup.
 
 ```ts
 // after the runner restarts, even if the session ended meanwhile
 yield* (yield* AgentHosts).events(sessionId, lastPersistedSeq + 1).pipe(Stream.runForEach(persist))
 ```
 
-**Hooks.** `RunOptions.hooks` work on remote sessions where the provider has them (Claude; Codex `open` refuses them, as locally, and `capabilities.hooks` says which). The functions stay in your process. The host only knows which hooks are set, and it forwards each call (Schema-encoded input) to an attached client, then adds that client's answer:
+**Hooks.** `RunOptions.hooks` work on remote sessions where the provider has them (Claude; Codex `open` refuses them, as locally, and `capabilities.hooks` says which). The functions stay in your process. Every remote Claude session registers all three hook kinds, whether or not `open` passed any, and the host forwards each call (Schema-encoded input) to an attached client that has that hook, then adds that client's answer. So any client can supply any hook at any time, through `open` or `attach`:
 
 ```ts
 const session = yield* (yield* AgentHosts).open({ cwd, hooks: { beforeTool } }, { hookTimeout: "2 seconds" })
@@ -141,9 +141,8 @@ const session = yield* (yield* AgentHosts).attach(sessionId, { hooks: { beforeTo
 ```
 
 - **Who answers.** Of the attached clients that have that hook, the one that attached most recently. When it detaches, the one before it answers again. A client attached without hooks never answers.
-- **No answer adds nothing.** With no such client attached, the hook adds nothing at once. A client that doesn't answer within `hookTimeout` (default 5 seconds; set on the layer, or per session in `open`/`attach`) adds nothing either, and the host logs the timeout, so the agent never waits longer. A hook that fails or defects adds nothing, as locally.
+- **No answer adds nothing.** With no such client attached, the host answers "nothing" at once, in-process, with no socket round trip, so an unanswered hook costs next to nothing per tool call. A client that doesn't answer within `hookTimeout` (default 5 seconds; set on the layer, or per session in `open`/`attach`) adds nothing either, and the host logs the timeout, so the agent never waits longer. A hook that fails or defects adds nothing, as locally.
 - **Reconnects.** A call still waiting when its client's connection drops is delivered again once the client reconnects, until its timeout. The client runs each call once.
-- **Limits.** A reattaching client can only answer hooks the session was opened with.
 
 **Reconnecting.** When the connection to a host drops (other than by `detach`/`stop` or the session ending), the client re-dials it on `reconnect`, by default an exponential backoff from 100 ms, capped at 2 s between attempts, giving up after 30 s (`RemoteAgent.defaultReconnect`). It's transparent: subscriptions resume from the last seq they delivered, and calls in flight are retried. `send`, `steer`, `turn` and `interrupt` carry a client-generated request id. The host remembers the last 1 000 results by id and answers a repeat with the original result, so a retried `send` lands once, a retried `turn` waits on the original turn, and a retried `interrupt` can't hit the turn after it. Calls fail with `AgentError` when the schedule gives up, or at once if the host is gone (manifest removed or pid dead). `reconnect: false` fails on the first drop.
 
@@ -153,7 +152,7 @@ const session = yield* (yield* AgentHosts).attach(sessionId, { hooks: { beforeTo
 - **launchd:** a job's process group is killed when it exits unless `AbandonProcessGroup` is set.
 - **Containers:** everything in a container stops with it; hosts need to run somewhere that outlives the runner's container.
 
-A host killed with SIGKILL can't stop its agent either (Node has no parent-death signal); a cgroup launcher such as a systemd scope covers that.
+**A SIGKILLed host** (`kill -9`, the OOM killer) can't run any cleanup. Its agent process, and the commands that agent started, may be left running: Node has no parent-death signal, and the host is the only thing that would have stopped them. Stopping them is up to you, since they are your process tree. Either run hosts under a cgroup `Launcher` (a systemd scope, as above), so that stopping the scope stops the host, the agent and its commands together, or have your own supervisor reap them. The host's socket and manifest stay behind until `list` or `attach` notices the dead pid. Its events file has no ending line (see above).
 
 `node scripts/live-reattach.ts` checks this end to end with the real CLIs: process A starts a slow turn and exits mid-turn; process B attaches, catches up, and drops its connection mid-turn twice: once while A's turn runs, once during a `turn()` call. Both turns' results still arrive, the subscription sees every event exactly once, and it matches the events file read back with `AgentHosts.events` after the host has exited.
 
@@ -166,7 +165,7 @@ ClaudeAgent.layer().pipe(Layer.provide(ClaudeReplay.layerFile("session.jsonl")))
 CodexAgent.layer().pipe(Layer.provide(CodexReplay.layer(recordingText)))
 ```
 
-Record with the transports' `record` option. `test/conformance.test.ts` runs the same programs against both providers.
+Record with the transports' `record` option. Claude recordings also capture SDK hook calls (the event, the CLI's input, what the hooks returned, and where in the frame stream they came). `ClaudeReplay` calls the session's own hooks at those points and reports what they answered to `onHook`. `test/conformance.test.ts` runs the same programs against both providers.
 
 ```sh
 pnpm typecheck && pnpm test

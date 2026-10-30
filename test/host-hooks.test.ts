@@ -257,3 +257,84 @@ describe("remote hooks", () => {
     timeout,
   )
 })
+
+/**
+ * The provider -> host -> client chain with no CLI: a host replays a
+ * recording with real hook calls (test/fixtures/claude/hooks.jsonl), its
+ * Claude session's SDK hooks forward them to this process, and the replay
+ * logs what the SDK got back (`replayHookLog`).
+ */
+describe("remote hooks over a recording with hook calls", () => {
+  const prompt = "Use the Bash tool once to run `echo hello`, then reply with the secret word."
+  const replayLayer = (hookLog: string, options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
+    RemoteAgent.layer({
+      provider: "claude",
+      replay: join(import.meta.dirname, "fixtures", "claude", "hooks.jsonl"),
+      replayHookLog: hookLog,
+      dir,
+      onScopeClose: "detach",
+      ...options,
+    })
+  const answered = (hookLog: string, event: string) =>
+    readFileSync(hookLog, "utf8")
+      .split("\n")
+      .filter((l) => l !== "")
+      .map((l) => JSON.parse(l) as { event: string; outputs: Array<{ hookSpecificOutput?: { additionalContext?: string } }> })
+      .filter((h) => h.event === event)
+      .map((h) => (h.outputs.length === 0 ? "no hook" : (h.outputs[0]?.hookSpecificOutput?.additionalContext ?? null)))
+
+  it.live(
+    "the CLI's hook calls reach the client's functions, and their answers reach the SDK",
+    () =>
+      Effect.gen(function* () {
+        const hookLog = join(dir, "replayed-hooks-1.jsonl")
+        const calls: Array<unknown> = []
+        let stops = 0
+        yield* Effect.gen(function* () {
+          const session = yield* open({
+            beforeTool: (call) => Effect.sync(() => (calls.push({ before: call }), Option.some("remote: secret"))),
+            afterTool: (call) => Effect.sync(() => (calls.push({ after: call.output, isError: call.isError }), Option.some("remote: checked"))),
+            beforeStop: () => Effect.sync(() => (calls.push("stop"), stops++ === 0 ? Option.some("remote: keep going") : Option.none())),
+          })
+          const done = yield* session.turn(prompt)
+          expect(done.finalText).toBe("KIWI")
+          yield* session.stop
+        }).pipe(Effect.scoped, Effect.provide(replayLayer(hookLog)))
+        expect(calls).toEqual([
+          { before: { callId: expect.stringMatching(/^toolu_/), name: "Bash", input: expect.objectContaining({ command: "echo hello" }) } },
+          { after: "hello", isError: false },
+          "stop",
+          "stop",
+        ])
+        expect(answered(hookLog, "PreToolUse")).toEqual(["remote: secret"])
+        expect(answered(hookLog, "PostToolUse")).toEqual(["remote: checked"])
+        expect(answered(hookLog, "Stop")).toEqual(["remote: keep going", null])
+      }),
+    timeout,
+  )
+
+  it.live(
+    "a session opened with no hooks gets a beforeTool from a client that attaches later",
+    () =>
+      Effect.gen(function* () {
+        const hookLog = join(dir, "replayed-hooks-2.jsonl")
+        const calls: Array<string> = []
+        yield* Effect.gen(function* () {
+          const hosts = yield* AgentHosts
+          const { sessionId } = yield* Effect.scoped(open(undefined))
+          const session = yield* hosts.attach(sessionId, {
+            hooks: { beforeTool: (call) => Effect.sync(() => (calls.push(call.name), Option.some("late: secret"))) },
+          })
+          yield* session.turn(prompt)
+          yield* session.stop
+        }).pipe(Effect.scoped, Effect.provide(replayLayer(hookLog)))
+        expect(calls).toEqual(["Bash"])
+        expect(answered(hookLog, "PreToolUse")).toEqual(["late: secret"])
+        // Every kind is registered on the session; with no client for them, they answer nothing.
+        expect(answered(hookLog, "PostToolUse")).toEqual([null])
+        expect(answered(hookLog, "Stop")).toEqual([null, null])
+      }),
+    timeout,
+  )
+})
+

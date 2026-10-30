@@ -14,6 +14,8 @@ const replay = (name: string, options?: ClaudeReplay.ReplayOptions) =>
   ClaudeAgent.layer().pipe(Layer.provide(ClaudeReplay.layerFile(fixture(name), options)))
 
 const cwd = "/tmp/effect-agent-replay"
+const observed: Array<ClaudeReplay.ReplayedHook> = []
+const observedNone: Array<ClaudeReplay.ReplayedHook> = []
 
 const collect = (session: AgentSession) =>
   Effect.gen(function* () {
@@ -43,6 +45,54 @@ const failureOf = <A, E>(exit: Exit.Exit<A, E>) =>
   Exit.isFailure(exit) ? Option.getOrUndefined(Cause.findErrorOption(exit.cause)) : undefined
 
 describe("ClaudeAgent over recordings", () => {
+  it.effect("recorded hook calls reach the session's hooks, with the CLI's inputs, and their answers reach the SDK", () =>
+    Effect.gen(function* () {
+      const calls: Array<unknown> = []
+      let stops = 0
+      const session = yield* (yield* Agent).open({
+        cwd,
+        hooks: {
+          beforeTool: (call) => Effect.sync(() => (calls.push({ before: call }), Option.some("replayed: secret"))),
+          afterTool: (call) => Effect.sync(() => (calls.push({ after: call }), Option.some("replayed: checked"))),
+          beforeStop: () => Effect.sync(() => (calls.push("stop"), stops++ === 0 ? Option.some("replayed: keep going") : Option.none())),
+        },
+      })
+      const done = yield* session.turn("Use the Bash tool once to run `echo hello`, then reply with the secret word.")
+      expect(done.finalText).toBe("KIWI") // recorded: a replay's reply can't change
+      expect(calls).toEqual([
+        { before: { callId: expect.stringMatching(/^toolu_/), name: "Bash", input: expect.objectContaining({ command: "echo hello" }) } },
+        {
+          after: {
+            callId: expect.stringMatching(/^toolu_/),
+            name: "Bash",
+            input: expect.objectContaining({ command: "echo hello" }),
+            output: "hello",
+            isError: false,
+          },
+        },
+        "stop",
+        "stop",
+      ])
+      // What the SDK got back from each hook call: this session's answers, not the recorded ones.
+      const context = (event: string) =>
+        observed
+          .filter((h) => h.event === event)
+          .map((h) => (h.outputs[0] as { hookSpecificOutput?: { additionalContext?: string } }).hookSpecificOutput?.additionalContext ?? null)
+      expect(context("PreToolUse")).toEqual(["replayed: secret"])
+      expect(context("PostToolUse")).toEqual(["replayed: checked"])
+      expect(context("Stop")).toEqual(["replayed: keep going", null])
+      expect(observed.map((h) => (h.input as { session_id?: string }).session_id)).toEqual(Array(4).fill(session.sessionId))
+    }).pipe(Effect.scoped, Effect.provide(replay("hooks", { onHook: (h) => observed.push(h) }))),
+  )
+
+  it.effect("recorded hook calls with no hooks set call nothing", () =>
+    Effect.gen(function* () {
+      const session = yield* (yield* Agent).open({ cwd })
+      yield* session.turn("Use the Bash tool once to run `echo hello`, then reply with the secret word.")
+      expect(observedNone.map((h) => h.outputs)).toEqual([[], [], [], []])
+    }).pipe(Effect.scoped, Effect.provide(replay("hooks", { onHook: (h) => observedNone.push(h) }))),
+  )
+
   it.effect("simple turn", () =>
     Effect.gen(function* () {
       const agent = yield* Agent

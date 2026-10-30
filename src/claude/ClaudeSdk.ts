@@ -21,11 +21,14 @@
  * `status` and `history` are the account and transcript reads `ClaudeAgent`
  * needs outside a session.
  *
- * With `record`, every frame (and every status/history answer) is appended
- * to a JSONL file that `ClaudeReplay.layer` can play back without a process.
+ * With `record`, every frame (and every status/history answer, and every
+ * SDK hook call with what it returned) is appended to a JSONL file that
+ * `ClaudeReplay.layer` can play back without a process.
  */
 import {
   type AccountInfo,
+  type HookCallbackMatcher,
+  type HookEvent,
   getSessionInfo,
   getSessionMessages,
   query as sdkQuery,
@@ -123,12 +126,24 @@ export interface RecordedOpen {
 /**
  * One line of a JSONL recording. `in`/`out`/`ctl interrupt` are the core format;
  * `ctl open`/`ctl end` mark session boundaries and `error` a thrown transport error.
+ * `hook` is one call of an SDK hook callback (`Options.hooks`): its event, the
+ * input the CLI passed, what the callback returned, and `position`, the number
+ * of `in` frames the session had received when the CLI called it. It is
+ * written when the callback returns, so it may come after later lines; replay
+ * goes by `position`.
  */
 export type RecordLine =
   | { readonly dir: "out"; readonly frame: SDKUserMessage }
   | { readonly dir: "in"; readonly frame: Frame }
   | { readonly dir: "ctl"; readonly call: "interrupt" | "end" }
   | { readonly dir: "ctl"; readonly call: "open"; readonly options: RecordedOpen }
+  | {
+      readonly dir: "hook"
+      readonly event: HookEvent
+      readonly position: number
+      readonly input: unknown
+      readonly output: unknown
+    }
   | { readonly dir: "status"; readonly status: StatusSnapshot }
   | {
       readonly dir: "history"
@@ -398,8 +413,38 @@ const reap = (spawner: ReturnType<typeof makeSpawner>, wait: Duration.Input, gra
     ),
   )
 
-const openQuery = Effect.fnUntraced(function* (options: Options, launch: Launch, record: (line: RecordLine) => void) {
+/** `hooks` with every callback recorded as a `hook` line (at `position()` frames). */
+const recordHooks = (
+  hooks: NonNullable<Options["hooks"]>,
+  record: (line: RecordLine) => void,
+  position: () => number,
+): NonNullable<Options["hooks"]> =>
+  Object.fromEntries(
+    Object.entries(hooks).map(([event, matchers]) => [
+      event,
+      (matchers ?? []).map(
+        (matcher): HookCallbackMatcher => ({
+          ...matcher,
+          hooks: matcher.hooks.map((callback) => async (input, toolUseId, opts) => {
+            const at = position()
+            const output = await callback(input, toolUseId, opts)
+            record({ dir: "hook", event: event as HookEvent, position: at, input, output })
+            return output
+          }),
+        }),
+      ),
+    ]),
+  )
+
+const openQuery = Effect.fnUntraced(function* (
+  options: Options,
+  launch: Launch,
+  record: (line: RecordLine) => void,
+  recording: boolean,
+) {
   const spawner = makeSpawner(launch)
+  /** `in` frames so far: where a hook call happened, for `hook` lines. */
+  let frames = 0
   const input = yield* Queue.unbounded<SDKUserMessage, Cause.Done>()
   const output = yield* Queue.unbounded<Frame, ClaudeSdkError | Cause.Done>()
 
@@ -417,7 +462,11 @@ const openQuery = Effect.fnUntraced(function* (options: Options, launch: Launch,
     try: () =>
       sdkQuery({
         prompt: Stream.toAsyncIterable(Stream.fromQueue(input)),
-        options: { ...options, spawnClaudeCodeProcess: spawner.spawn },
+        options: {
+          ...options,
+          ...(recording && options.hooks !== undefined && { hooks: recordHooks(options.hooks, record, () => frames) }),
+          spawnClaudeCodeProcess: spawner.spawn,
+        },
       }),
     catch: toSdkError("open"),
   })
@@ -427,6 +476,7 @@ const openQuery = Effect.fnUntraced(function* (options: Options, launch: Launch,
   const pump = yield* Stream.fromAsyncIterable(query as AsyncIterable<Frame>, toSdkError("frames")).pipe(
     Stream.runForEach((frame) =>
       Effect.sync(() => {
+        frames++
         record({ dir: "in", frame })
         Queue.offerUnsafe(output, frame)
       }),
@@ -563,7 +613,7 @@ export const layer = (options: LayerOptions = {}): Layer.Layer<ClaudeSdk> =>
   Layer.sync(ClaudeSdk, () => {
     const record = recorder(options.record)
     return ClaudeSdk.of({
-      open: (sdkOptions, launch = noLaunch) => openQuery(sdkOptions, launch, record),
+      open: (sdkOptions, launch = noLaunch) => openQuery(sdkOptions, launch, record, options.record !== undefined),
       sessionExists: ({ sessionId, cwd, transcript }) =>
         Effect.promise(() => getSessionInfo(sessionId, { dir: cwd }).catch(() => undefined)).pipe(
           Effect.map((info) => info !== undefined || existsSync(transcript)),

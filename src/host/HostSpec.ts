@@ -8,7 +8,7 @@
  */
 import { NodeServices } from "@effect/platform-node"
 import { Duration, Layer, Option, Schema } from "effect"
-import { chmodSync, mkdirSync, readFileSync, statSync } from "node:fs"
+import { appendFileSync, chmodSync, mkdirSync, readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Agent, Effort, type RunOptions } from "../Agent.ts"
@@ -101,6 +101,8 @@ export const ProviderSpec = Schema.Struct({
   replay: Schema.optionalKey(Schema.String),
   /** Claude replays: `ClaudeReplay.ReplayOptions.knownSessions`. */
   replayKnownSessions: Schema.optionalKey(Schema.Union([Schema.Literal("all"), Schema.Array(Schema.String)])),
+  /** Tests, Claude replays: append each replayed hook call (`ClaudeReplay.ReplayedHook`) to this file as a JSON line. */
+  replayHookLog: Schema.optionalKey(Schema.String),
 })
 export type ProviderSpec = typeof ProviderSpec.Type
 
@@ -124,17 +126,6 @@ export const HostSpec = Schema.Struct({
    * to the first call of each of these RPCs (after the host has acted on it).
    */
   testDropBeforeReply: Schema.optionalKey(Schema.Array(Schema.String)),
-  /**
-   * Which `RunOptions.hooks` the session was opened with. The functions stay
-   * in the clients; the host forwards each call to an attached client.
-   */
-  hooks: Schema.optionalKey(
-    Schema.Struct({
-      beforeTool: Schema.optionalKey(Schema.Boolean),
-      afterTool: Schema.optionalKey(Schema.Boolean),
-      beforeStop: Schema.optionalKey(Schema.Boolean),
-    }),
-  ),
   /** Internal, tests only: serve the `TestInvokeHook` RPC. */
   testInvokeHook: Schema.optionalKey(Schema.Boolean),
   /** End an idle session no client has been attached to for this long. Default 30 minutes. */
@@ -268,7 +259,12 @@ export const providerLayer = (spec: ProviderSpec): Layer.Layer<Agent> => {
   if (spec.provider === "claude") {
     const sdk =
       replay !== undefined
-        ? ClaudeReplay.layerFile(replay, spec.replayKnownSessions !== undefined ? { knownSessions: spec.replayKnownSessions } : {})
+        ? ClaudeReplay.layerFile(replay, {
+            ...(spec.replayKnownSessions !== undefined && { knownSessions: spec.replayKnownSessions }),
+            ...(spec.replayHookLog !== undefined && {
+              onHook: (call: ClaudeReplay.ReplayedHook) => appendFileSync(spec.replayHookLog!, `${JSON.stringify(call)}\n`),
+            }),
+          })
         : ClaudeSdk.layer()
     return ClaudeAgent.layer(claudeOptions(spec.claude)).pipe(Layer.provide(sdk))
   }

@@ -5,6 +5,12 @@
  * behind what subscribers have seen. It outlives the host for `retainEvents`
  * (counted from the file's mtime, which the host sets when it exits).
  *
+ * When the session ends, the host writes one last line, `{"ended":null}` for a
+ * clean end or `{"ended":<encoded AgentError>}`, so a reader of the file ends
+ * as a live subscription would: completing, or failing with that error. A
+ * file without it (its host was SIGKILLed) is known to be incomplete; reading
+ * it completes at its end.
+ *
  * A line without its trailing newline (being written, or cut off by a crash)
  * is not part of the log.
  */
@@ -23,6 +29,7 @@ import {
   writeSync,
 } from "node:fs"
 import { join } from "node:path"
+import { AgentError } from "../AgentError.ts"
 import { SeqEvent } from "./protocol.ts"
 
 export const suffix = ".events.jsonl"
@@ -34,6 +41,13 @@ const encodeLine = Schema.encodeSync(SeqEventJson)
 const decodeLine = Schema.decodeUnknownExit(SeqEventJson)
 /** Lines are encoded with `seq` first, so it can be read without decoding the event. */
 const seqPrefix = /^\{"seq":(\d+),/
+
+/** The last line: how the session ended (null: cleanly). */
+const Ending = Schema.Struct({ ended: Schema.NullOr(AgentError) })
+const EndingJson = Schema.fromJsonString(Ending)
+const encodeEnding = Schema.encodeSync(EndingJson)
+const decodeEnding = Schema.decodeUnknownExit(EndingJson)
+const isEnding = (text: string) => text.startsWith('{"ended":')
 
 /** Every 1 024th seq's byte offset is remembered, so a catch-up seeks instead of scanning from 0. */
 const checkpointEvery = 1024
@@ -79,10 +93,17 @@ function* entries(
   until: number | undefined,
   start: number,
   path: string,
-): Generator<SeqEvent | EventFileError> {
+): Generator<SeqEvent | EventFileError | AgentError> {
   let expected = from
   for (const line of lines(fd, start)) {
     if (until !== undefined && expected >= until) return
+    if (isEnding(line.text)) {
+      const ending = decodeEnding(line.text)
+      if (Exit.isFailure(ending)) yield new EventFileError({ message: `${path}: unreadable ending at byte ${line.offset}` })
+      else if (until !== undefined && expected < until) break
+      else if (ending.value.ended !== null) yield ending.value.ended
+      return
+    }
     const quick = seqPrefix.exec(line.text)
     if (quick !== null && Number(quick[1]) < expected) continue
     const decoded = decodeLine(line.text)
@@ -104,12 +125,16 @@ function* entries(
   }
 }
 
-/** Read the entries `from <= seq < until` of an events file (see `entries`). */
+/**
+ * Read the entries `from <= seq < until` of an events file (see `entries`).
+ * Read to its end, it ends as the session did: failing with the session's
+ * `AgentError` if it ended with one.
+ */
 export const read = (
   path: string,
   from: number,
   options: { readonly until?: number; readonly startOffset?: number } = {},
-): Stream.Stream<SeqEvent, EventFileError> =>
+): Stream.Stream<SeqEvent, EventFileError | AgentError> =>
   Stream.unwrap(
     Effect.gen(function* () {
       const fd = yield* Effect.acquireRelease(
@@ -120,7 +145,9 @@ export const read = (
         (fd) => Effect.sync(() => closeSync(fd)),
       )
       return Stream.fromIterable(entries(fd, Math.max(0, from), options.until, options.startOffset ?? 0, path)).pipe(
-        Stream.mapEffect((item) => (item instanceof EventFileError ? Effect.fail(item) : Effect.succeed(item))),
+        Stream.mapEffect((item) =>
+          item instanceof EventFileError || item instanceof AgentError ? Effect.fail(item) : Effect.succeed(item),
+        ),
       )
     }),
   )
@@ -131,6 +158,8 @@ export interface Writer {
   readonly next: number
   /** Append one line; throws if the write fails. */
   readonly append: (entry: SeqEvent) => void
+  /** Write the last line: how the session ended. Throws if the write fails. */
+  readonly end: (error: AgentError | null) => void
   /** A byte offset at or before `seq`'s line, to start reading from. */
   readonly offsetFor: (seq: number) => number
   /** Stamp the mtime (retention counts from it) and close. Idempotent. */
@@ -155,6 +184,8 @@ export const openWriter = (path: string, existing: ((entry: SeqEvent) => void) |
     let next = 0
     let size = 0
     for (const line of existing !== null ? lines(fd, 0) : []) {
+      // The earlier host's ending: the resumed session goes on, so it is cut off.
+      if (isEnding(line.text)) break
       const decoded = decodeLine(line.text)
       if (Exit.isFailure(decoded) || decoded.value.seq !== next) break
       if (next % checkpointEvery === 0) checkpoints.push(line.offset)
@@ -163,16 +194,20 @@ export const openWriter = (path: string, existing: ((entry: SeqEvent) => void) |
       size = line.offset + line.bytes
     }
     if (fstatSync(fd).size !== size) ftruncateSync(fd, size)
+    const write = (text: string) => {
+      const line = Buffer.from(`${text}\n`, "utf8")
+      let written = 0
+      while (written < line.length) written += writeSync(fd, line, written)
+      size += line.length
+    }
     return {
       path,
       next,
       append: (entry) => {
-        const line = Buffer.from(`${encodeLine(entry)}\n`, "utf8")
         if (entry.seq % checkpointEvery === 0) checkpoints[entry.seq / checkpointEvery] = size
-        let written = 0
-        while (written < line.length) written += writeSync(fd, line, written)
-        size += line.length
+        write(encodeLine(entry))
       },
+      end: (error) => write(encodeEnding({ ended: error })),
       offsetFor: (seq) => {
         const index = Math.min(Math.floor(seq / checkpointEvery), checkpoints.length - 1)
         return index < 0 ? 0 : (checkpoints[index] ?? 0)

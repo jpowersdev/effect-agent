@@ -49,8 +49,8 @@ afterAll(() => {
 const fixture = (provider: string, name: string) => join(import.meta.dirname, "fixtures", provider, `${name}.jsonl`)
 
 const providers = [
-  { name: "claude", cwd: "/tmp/effect-agent-replay", simple: "simple-turn", interrupt: "interrupt-then-turn" },
-  { name: "codex", cwd: "/tmp/effect-agent-live/codex/work", simple: "simple", interrupt: "interrupt" },
+  { name: "claude", cwd: "/tmp/effect-agent-replay", simple: "simple-turn", interrupt: "interrupt-then-turn", killed: "process-killed" },
+  { name: "codex", cwd: "/tmp/effect-agent-live/codex/work", simple: "simple", interrupt: "interrupt", killed: "process-killed" },
 ] as const
 
 const failureOf = <A, E>(exit: Exit.Exit<A, E>) =>
@@ -82,12 +82,22 @@ const seqs = (entries: ReadonlyArray<SeqEvent>) => entries.map((e) => e.seq)
 const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => from + i)
 const tags = (events: ReadonlyArray<AgentEvent>) => events.map((e) => e._tag)
 
-/** The events file as written, line by line. */
-const fileSeqs = (d: string, sessionId: string) =>
+const fileLines = (d: string, sessionId: string) =>
   readFileSync(HostSpec.eventsPath(d, sessionId), "utf8")
     .split("\n")
     .filter((l) => l !== "")
-    .map((l) => (JSON.parse(l) as { seq: number }).seq)
+    .map((l) => JSON.parse(l) as { seq?: number; ended?: unknown })
+
+/** The events file's seqs, line by line. */
+const fileSeqs = (d: string, sessionId: string) => fileLines(d, sessionId).flatMap((l) => (l.seq !== undefined ? [l.seq] : []))
+
+/** The file's ending line (`{ ended }`), if it has one; it must be the last line. */
+const fileEnding = (d: string, sessionId: string) => {
+  const all = fileLines(d, sessionId)
+  const endings = all.filter((l) => "ended" in l)
+  expect(endings.length <= 1 && (endings.length === 0 || all.at(-1) === endings[0])).toBe(true)
+  return endings[0]
+}
 
 const hostLog = (d: string, sessionId: string) => {
   try {
@@ -188,6 +198,8 @@ for (const p of providers) {
 
           const ended = yield* hosts.events(sessionId).pipe(Stream.runCollect)
           expect(ended).toEqual(followed)
+          // It ended cleanly, and the file says so: reading it completes, as the live stream did.
+          expect(fileEnding(dir, sessionId)).toEqual({ ended: null })
           const tail = yield* hosts.events(sessionId, 3).pipe(Stream.runCollect)
           expect(seqs(tail)).toEqual(range(3, followed.length - 1))
           expect(yield* hosts.events(sessionId, 10_000).pipe(Stream.runCollect)).toEqual([])
@@ -197,6 +209,51 @@ for (const p of providers) {
           // `attach` still needs a live host.
           expect(failureOf(yield* hosts.attach(sessionId).pipe(Effect.scoped, Effect.exit))).toBeInstanceOf(SessionNotFound)
         }).pipe(Effect.provide(layer(p.simple))),
+      timeout,
+    )
+
+    it.live(
+      "a session that ended with an error: AgentHosts.events on the ended host fails with that error, as the live stream did",
+      () =>
+        Effect.gen(function* () {
+          const hosts = yield* AgentHosts
+          const { sessionId, hostPid, liveError } = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const session = yield* hosts.open({ cwd: p.cwd })
+              started.add(session.hostPid)
+              const live = yield* collect(session.subscribeFrom(0))
+              const turn = failureOf(yield* session.turn("sleep").pipe(Effect.exit))
+              expect(turn?._tag).toBe("ProcessKilled")
+              const liveError = failureOf(yield* Fiber.join(live.fiber))
+              expect(liveError).toBeInstanceOf(AgentError)
+              return { sessionId: session.sessionId, hostPid: session.hostPid, liveError: liveError as AgentError }
+            }),
+          )
+          yield* waitUntil(() => !isAlive(hostPid), "the host to exit")
+          expect(fileEnding(dir, sessionId)).toMatchObject({ ended: { _tag: "AgentError", message: liveError.message } })
+          const exit = yield* hosts.events(sessionId).pipe(Stream.runCollect, Effect.exit)
+          const error = failureOf(exit)
+          expect(error).toBeInstanceOf(AgentError)
+          expect(error).toMatchObject({ message: liveError.message, provider: liveError.provider })
+        }).pipe(Effect.provide(layer(p.killed, { onScopeClose: "detach" }))),
+      timeout,
+    )
+
+    it.live(
+      "a host SIGKILLed mid-session leaves no ending: AgentHosts.events reads the file to its end and completes",
+      () =>
+        Effect.gen(function* () {
+          const hosts = yield* AgentHosts
+          const session = yield* hosts.open({ cwd: p.cwd })
+          started.add(session.hostPid)
+          yield* session.turn("Reply with just the word: pong")
+          const last = yield* session.lastSeq
+          process.kill(session.hostPid, "SIGKILL")
+          yield* waitUntil(() => !isAlive(session.hostPid), "the host to die")
+          expect(fileEnding(dir, session.sessionId)).toBeUndefined()
+          const read = yield* hosts.events(session.sessionId).pipe(Stream.runCollect)
+          expect(seqs(read)).toEqual(range(0, last))
+        }).pipe(Effect.scoped, Effect.provide(layer(p.simple, { onScopeClose: "detach" }))),
       timeout,
     )
 
@@ -508,6 +565,16 @@ describe("host events file: resumed sessions", () => {
       expect(yield* second.awaitTurn("t1")).toMatchObject({ _tag: "Succeeded", finalText: "t1" })
       second.closeFile()
       expect(fileSeqs(root, "resumed")).toEqual(range(0, 5))
+      expect(fileEnding(root, "resumed")).toEqual({ ended: null })
+
+      // Resumed again: the earlier ending is cut off, and the new one is the last line.
+      const third = yield* Host.makeLog(2, "test", { path, resumed: true })
+      expect(third.lastSeq()).toBe(5)
+      for (const event of turn("t3")) yield* third.append(event)
+      yield* third.end(new AgentError({ message: "it broke", provider: "test" }))
+      third.closeFile()
+      expect(fileSeqs(root, "resumed")).toEqual(range(0, 7))
+      expect(fileEnding(root, "resumed")).toMatchObject({ ended: { _tag: "AgentError", message: "it broke" } })
 
       const fresh = yield* Host.makeLog(2, "test", { path, resumed: false })
       expect(fresh.lastSeq()).toBe(-1)

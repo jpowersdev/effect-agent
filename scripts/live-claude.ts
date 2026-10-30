@@ -527,6 +527,50 @@ const scenarios: Record<string, { readonly run: Scenario; readonly options?: Cla
     ),
   },
 
+  // Recorded as test/fixtures/claude/hooks.jsonl: one call of each hook, for replaying hook calls.
+  hooks: {
+    run: Effect.scoped(
+      Effect.gen(function* () {
+        const agent = yield* Agent
+        const calls: Array<string> = []
+        const stops = yield* Ref.make(0)
+        const session = yield* agent.open({
+          cwd: cwdFor("hooks"),
+          hooks: {
+            beforeTool: (call) =>
+              Effect.sync(() => {
+                calls.push(`beforeTool:${call.name}`)
+                return Option.some("The secret word is MANGO.")
+              }),
+            afterTool: (call) =>
+              Effect.sync(() => {
+                calls.push(`afterTool:${call.name}:${call.output.trim()}`)
+                return Option.some("The command's output was checked.")
+              }),
+            beforeStop: () =>
+              Ref.getAndUpdate(stops, (n) => n + 1).pipe(
+                Effect.map((n) => {
+                  calls.push("beforeStop")
+                  return n === 0 ? Option.some("Before you finish, reply once more with just the word KIWI.") : Option.none()
+                }),
+              ),
+          },
+        })
+        const { events } = yield* collect(session)
+        const done = yield* session.turn(
+          "Use the Bash tool once to run `echo hello`. Context added while the tool runs will tell you a secret word. Then reply with just the secret word.",
+        )
+        const texts = events.flatMap((e) => (e._tag === "Text" ? [e.text] : []))
+        console.log(`  hook calls ${calls.join(", ")}; texts ${JSON.stringify(texts)}; final ${done.finalText}`)
+        check(calls.includes("beforeTool:Bash"), "beforeTool ran for Bash")
+        check(calls.includes("afterTool:Bash:hello"), "afterTool ran with the output")
+        check(calls.filter((c) => c === "beforeStop").length >= 2, "beforeStop ran, and again after continuing")
+        check(texts.some((t) => /MANGO/.test(t)), "the reply had the secret word")
+        check(texts.some((t) => /KIWI/.test(t)), "the turn acted on the stop hook's text")
+      }),
+    ),
+  },
+
   "hook-failing": {
     run: Effect.scoped(
       Effect.gen(function* () {
