@@ -8,7 +8,7 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Deferred, Effect, Exit, Fiber, Layer, Option, Queue, Scope, Stream } from "effect"
 import { TestClock } from "effect/testing"
-import { Agent, type AgentSession, SessionClosed } from "../src/index.ts"
+import { Agent, type AgentSession, type RunOptions, SessionClosed } from "../src/index.ts"
 import { CodexAgent, CodexAppServer } from "../src/codex/index.ts"
 import type * as P from "../src/codex/protocol.ts"
 
@@ -102,10 +102,10 @@ const scripted = (options: { readonly holdStop?: boolean } = {}) => Effect.gen(f
 type Server = Effect.Success<ReturnType<typeof scripted>>
 
 /** Open a session against `server`, answering its `thread/start`. */
-const open = (server: Server) =>
+const open = (server: Server, options: Partial<RunOptions> = {}) =>
   Effect.gen(function* () {
     const agent = yield* Agent
-    const opening = yield* agent.open({ cwd: "/w" }).pipe(Effect.forkScoped)
+    const opening = yield* agent.open({ cwd: "/w", ...options }).pipe(Effect.forkScoped)
     const start = yield* server.next("thread/start")
     yield* start.reply({ thread: { id: threadId, path: null }, model: "gpt-test" } satisfies P.ThreadStartResponse)
     return yield* Fiber.join(opening)
@@ -353,5 +353,155 @@ describe("CodexAgent session races", () => {
       ).pipe(Effect.flatMap(Fiber.join))
       expect(Exit.isFailure(result) && Option.getOrUndefined(Exit.findErrorOption(result))).toBeInstanceOf(SessionClosed)
     }),
+  )
+})
+
+/**
+ * The session's lifecycle contract, for orderings an independent review
+ * found (round 7): every waiting caller settles; `end` succeeds only after a
+ * clean end and otherwise fails with what ended the session; the event
+ * stream completes after a clean end and fails otherwise; app-server is
+ * stopped exactly when the session gives up on it.
+ */
+describe("CodexAgent session lifecycle", () => {
+  /** Drain the session's events in the background. */
+  const drain = (session: AgentSession) =>
+    Effect.flatMap(session.subscribe, (events) => events.pipe(Stream.runDrain, Effect.exit, Effect.forkScoped))
+
+  /** The session ended in a failure: a waiting `end`, the stream and a later `end` all say so. */
+  const failedEnding = (
+    session: AgentSession,
+    ending: Fiber.Fiber<Exit.Exit<void, unknown>>,
+    stream: Fiber.Fiber<Exit.Exit<void, unknown>>,
+  ) =>
+    Effect.gen(function* () {
+      expect(Option.getOrUndefined(Exit.findErrorOption(yield* Fiber.join(ending)))).toMatchObject({ _tag: "AgentError" })
+      expect(Exit.isFailure(yield* Fiber.join(stream))).toBe(true)
+      expect(Option.getOrUndefined(Exit.findErrorOption(yield* Effect.exit(session.end)))).toMatchObject({ _tag: "AgentError" })
+    })
+
+  const commandItem = (turnId: string) => ({
+    threadId,
+    turnId,
+    item: { type: "commandExecution", id: "cmd-1", command: "sleep 60", cwd: "/w", processId: null, status: "inProgress", commandActions: [], aggregatedOutput: null, exitCode: null },
+  })
+
+  it.effect("app-server dying while a turn/start is in flight, with end waiting, is a failed ending", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted()
+      const session = yield* open(server)
+      const stream = yield* drain(session)
+      const turn = yield* session.turn("work").pipe(Effect.exit, Effect.forkScoped)
+      yield* server.next("turn/start")
+      const ending = yield* session.end.pipe(Effect.exit, Effect.forkScoped)
+      yield* Effect.yieldNow
+      yield* server.die(9)
+      expect(Exit.isFailure(yield* Fiber.join(turn))).toBe(true)
+      yield* failedEnding(session, ending, stream)
+    }).pipe(Effect.scoped),
+  )
+
+  it.effect("app-server dying while an interrupted turn's commands are cleaned up, with end waiting, is a failed ending", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted()
+      const session = yield* open(server)
+      const stream = yield* drain(session)
+      const { turn } = yield* startTurn(server, session, "work", "t-1")
+      yield* server.notify("item/started", commandItem("t-1"))
+      const interrupting = yield* session.interrupt.pipe(Effect.exit, Effect.forkScoped)
+      const interrupt = yield* server.next("turn/interrupt")
+      yield* interrupt.reply({})
+      yield* server.completed("t-1", "interrupted")
+      // Held: the session is looking for the turn's commands when app-server dies.
+      yield* server.next("thread/backgroundTerminals/list")
+      const ending = yield* session.end.pipe(Effect.exit, Effect.forkScoped)
+      yield* Effect.yieldNow
+      yield* server.die(9)
+      yield* Fiber.join(interrupting)
+      expect(Exit.isFailure(yield* Fiber.join(turn))).toBe(true)
+      yield* failedEnding(session, ending, stream)
+    }).pipe(Effect.scoped),
+  )
+
+  it.effect("app-server dying while a usage-limited turn reads the rate limits, with end waiting, is a failed ending", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted()
+      const session = yield* open(server)
+      const stream = yield* drain(session)
+      const { turn } = yield* startTurn(server, session, "work", "t-1")
+      yield* server.notify("turn/completed", {
+        threadId,
+        turn: { id: "t-1", items: [], status: "failed", error: { message: "limit", codexErrorInfo: "usageLimitExceeded", additionalDetails: null } },
+      })
+      yield* server.next("account/rateLimits/read")
+      const ending = yield* session.end.pipe(Effect.exit, Effect.forkScoped)
+      yield* Effect.yieldNow
+      yield* server.die(9)
+      expect(Exit.isFailure(yield* Fiber.join(turn))).toBe(true)
+      yield* failedEnding(session, ending, stream)
+    }).pipe(Effect.scoped),
+  )
+
+  it.effect("a watchdog kill is a failed ending even if the turn completes while app-server is being stopped", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted({ holdStop: true })
+      const session = yield* open(server, { watchdog: { idle: "1 second", grace: "1 second" } })
+      const stream = yield* drain(session)
+      const { turn } = yield* startTurn(server, session, "work", "t-1")
+      const queued = yield* session.send("next").pipe(Effect.exit, Effect.forkScoped)
+      const ending = yield* session.end.pipe(Effect.exit, Effect.forkScoped)
+      yield* Effect.yieldNow
+      // Quiet for a second: the watchdog interrupts (unanswered), and a second later kills.
+      yield* TestClock.adjust("1100 millis")
+      yield* server.next("turn/interrupt")
+      yield* TestClock.adjust("1100 millis")
+      expect(server.stops()).toBe(1)
+      // The turn ends while app-server is being stopped: still a failed ending, nothing new starts.
+      yield* server.completed("t-1", "interrupted")
+      yield* TestClock.adjust("2 seconds")
+      expect(yield* server.idle).toBe(true)
+      yield* server.releaseStop
+      expect(Option.getOrUndefined(Exit.findErrorOption(yield* Fiber.join(turn)))).toMatchObject({ _tag: "Stalled" })
+      expect(Exit.isFailure(yield* Fiber.join(queued))).toBe(false)
+      yield* failedEnding(session, ending, stream)
+      expect(server.stops()).toBe(1)
+    }).pipe(Effect.scoped),
+  )
+
+  it.effect("closing the scope keeps a failure already recorded", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted({ holdStop: true })
+      const sessionScope = yield* Scope.make()
+      const session = yield* open(server).pipe(Scope.provide(sessionScope))
+      const stream = yield* drain(session)
+      const first = yield* session.send("first").pipe(Effect.exit, Effect.forkScoped)
+      yield* server.next("turn/start")
+      // No answer: the session gives up on app-server and starts stopping it.
+      yield* TestClock.adjust("61 seconds")
+      yield* Fiber.join(first)
+      yield* Scope.close(sessionScope, Exit.void).pipe(Effect.forkScoped)
+      yield* Effect.yieldNow
+      yield* server.releaseStop
+      expect(Exit.isFailure(yield* Fiber.join(stream))).toBe(true)
+      expect(Option.getOrUndefined(Exit.findErrorOption(yield* Effect.exit(session.end)))).toMatchObject({ _tag: "AgentError" })
+    }).pipe(Effect.scoped),
+  )
+
+  it.effect("a second end waits for the first one's close, and both succeed", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted({ holdStop: true })
+      const session = yield* open(server)
+      const stream = yield* drain(session)
+      const first = yield* session.end.pipe(Effect.exit, Effect.forkScoped)
+      yield* Effect.yieldNow
+      const second = yield* session.end.pipe(Effect.exit, Effect.forkScoped)
+      yield* Effect.yieldNow
+      expect(second.pollUnsafe()).toBeUndefined()
+      yield* server.releaseStop
+      expect(yield* Fiber.join(first)).toEqual(Exit.void)
+      expect(yield* Fiber.join(second)).toEqual(Exit.void)
+      expect(yield* Fiber.join(stream)).toEqual(Exit.void)
+      expect(server.stops()).toBe(1)
+    }).pipe(Effect.scoped),
   )
 })

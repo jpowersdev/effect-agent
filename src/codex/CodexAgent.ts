@@ -20,7 +20,7 @@
  *
  * @since 0.1.0
  */
-import { Cause, Clock, Deferred, Duration, Effect, Exit, Layer, Option, Stream } from "effect"
+import { Cause, Clock, Deferred, Duration, Effect, Exit, Layer, Option, Queue, Stream } from "effect"
 import {
   type AccountStatus,
   Agent,
@@ -36,6 +36,7 @@ import { MessageId, SessionId, type TokenUsage, TurnId } from "../Domain.ts"
 import * as Env from "../internal/env.ts"
 import * as Session from "../internal/session.ts"
 import * as Pricing from "../Pricing.ts"
+import type * as Watchdog from "../Watchdog.ts"
 import { CodexAppServer, CodexRpcError, type Connection, type ProcessExit, parseUserAgentVersion } from "./CodexAppServer.ts"
 import * as Events from "./CodexEvents.ts"
 import * as P from "./protocol.ts"
@@ -594,6 +595,70 @@ const causeError = (what: string, cause: Cause.Cause<CodexRpcError | AgentError>
   return Option.isSome(error) ? toAgentError(what)(error.value) : agentError(`${what}: ${Cause.pretty(cause)}`, Cause.squash(cause))
 }
 
+/** How a session's lifetime is going (owned by its actor). */
+type Life =
+  | { readonly _tag: "Open" }
+  /** `end` is closing the connection. */
+  | { readonly _tag: "Closing" }
+  /**
+   * The session gave up on app-server (`reason`: it stopped answering; null:
+   * a stalled turn's kill, or a lost connection) and waits for the transport
+   * to finish ending. Nothing more is started.
+   */
+  | { readonly _tag: "Failing"; readonly reason: string | null }
+  /** Over: `error` is what `end` reports (null: ended cleanly). */
+  | { readonly _tag: "Ended"; readonly error: AgentError | null }
+
+/** A request's result as the actor gets it: none if it timed out. */
+type Answer<A> = Option.Option<Exit.Exit<A, CodexRpcError | AgentError>>
+
+/** The actor's answer to `send`, `turn` and `steer`. */
+type SubmitReply =
+  | { readonly _tag: "Unavailable"; readonly error: SessionClosed }
+  | { readonly _tag: "CapReached"; readonly spent: number }
+  | { readonly _tag: "Queued"; readonly q: Queued; readonly starting: boolean }
+  | { readonly _tag: "Landed"; readonly turnId: TurnId }
+  | { readonly _tag: "Failed"; readonly error: AgentError }
+
+/** Everything the session's actor handles, one at a time. */
+type Input =
+  | { readonly _tag: "Frame"; readonly msg: P.Incoming }
+  | { readonly _tag: "TransportEnded"; readonly exit: ProcessExit }
+  | { readonly _tag: "Started"; readonly seq: number; readonly answer: Answer<P.TurnStartResponse> }
+  | {
+      readonly _tag: "Completed"
+      readonly seq: number
+      readonly rateLimits: P.GetAccountRateLimitsResponse | null
+      readonly processExit: ProcessExit | null
+      /** A request found the connection gone. */
+      readonly lost: boolean
+    }
+  | { readonly _tag: "Submit"; readonly input: string; readonly front: boolean; readonly messageId: MessageId; readonly reply: Deferred.Deferred<SubmitReply> }
+  | { readonly _tag: "Steer"; readonly input: string; readonly messageId: MessageId; readonly reply: Deferred.Deferred<SubmitReply> }
+  | {
+      readonly _tag: "Steered"
+      readonly input: string
+      readonly messageId: MessageId
+      readonly seq: number
+      readonly answer: Answer<P.TurnSteerResponse>
+      readonly reply: Deferred.Deferred<SubmitReply>
+    }
+  | { readonly _tag: "Interrupt"; readonly reply: Deferred.Deferred<TurnId | null, SessionClosed | AgentError> }
+  | {
+      readonly _tag: "Interrupted"
+      readonly turnId: TurnId
+      readonly answer: Answer<P.ClientRequests["turn/interrupt"]["result"]>
+      readonly reply: Deferred.Deferred<TurnId | null, SessionClosed | AgentError>
+    }
+  | { readonly _tag: "Stall"; readonly expiry: Watchdog.Expiry; readonly reply: Deferred.Deferred<boolean> }
+  | { readonly _tag: "Kill" }
+  | { readonly _tag: "End"; readonly reply: Deferred.Deferred<void, AgentError> }
+  | { readonly _tag: "Closed" }
+
+/** A request failed because the connection is gone (the transport's own error), not with app-server's answer. */
+const lostIn = (exit: Exit.Exit<unknown, CodexRpcError | AgentError>): boolean =>
+  Exit.isFailure(exit) && Option.exists(Cause.findErrorOption(exit.cause), (e) => e._tag === "AgentError")
+
 const openSession = Effect.fn("CodexAgent.open")(function* (
   server: CodexAppServer["Service"],
   agentOptions: CodexAgentOptions,
@@ -657,26 +722,46 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
     raw: { method: resumed ? "thread/resume" : "thread/start", result: started },
   })
 
-  // ---- state: changed only synchronously, so no lock is needed (or held across a request) ----
+  // ---- the session actor ----
+  //
+  // One fiber owns all of the state below and handles one input at a time,
+  // without waiting on anything outside it: requests run in their own fibers
+  // and come back as inputs. So there is no window between deciding on the
+  // state and acting on it for another fiber to change it in.
+
   const mapState = Events.makeMapState()
   let state = initialState
   /** Messages waiting for the running turn to end. */
   const queue: Array<Queued> = []
   /** Messages whose turn/start was sent, by run, until their start is settled. */
   const claimed = new Map<number, Queued>()
-  /** `end` was called: no new messages. */
-  let ending = false
-  /** The connection was closed (by `end`, or the scope). */
-  let closed = false
+  /** `end` was called: no new messages; close once the queue and the running turn are done. */
+  let endRequested = false
+  const endWaiters: Array<Deferred.Deferred<void, AgentError>> = []
+  /** app-server's death, once seen (it is final before the transport has finished ending). */
   let dead: ProcessKilled | null = null
-  /** app-server stopped answering `turn/start`: it is being stopped, and nothing more is sent. */
-  let stuck = false
-  /** Completed (and replaced) whenever a turn ends or the queue empties; `end` waits on it. */
-  let changed = Deferred.makeUnsafe<void>()
-  const notify = () => {
-    Deferred.doneUnsafe(changed, Exit.void)
-    changed = Deferred.makeUnsafe<void>()
-  }
+  /** The turn whose completion is gathering what it needs, and frames that arrived meanwhile. */
+  let completing: { readonly seq: number; readonly turn: P.Turn; readonly raw: P.Incoming } | null = null
+  const held: Array<P.Incoming> = []
+  let life: Life = { _tag: "Open" }
+
+  const inbox = yield* Queue.unbounded<Input>()
+  const tell = (input: Input) => Effect.asVoid(Queue.offer(inbox, input))
+  /** Ask the actor, and wait for its answer; at once if the session is over. */
+  const ask = <A, E>(make: (reply: Deferred.Deferred<A, E>) => Input, over: () => Exit.Exit<A, E>): Effect.Effect<A, E> =>
+    Effect.suspend(() => {
+      if (life._tag === "Ended") return over()
+      const reply = Deferred.makeUnsafe<A, E>()
+      Queue.offerUnsafe(inbox, make(reply))
+      return Deferred.await(reply)
+    })
+  /** Run `self` in the session's scope, sending its result back to the actor. */
+  const launch = <A>(self: Effect.Effect<A>, back?: (a: A) => Input) =>
+    Effect.asVoid(Effect.forkIn(back === undefined ? self : Effect.flatMap(self, (a) => tell(back(a))), scope))
+
+  /** A request to app-server, under the request timeout: none if it timed out, else how it ended. */
+  const send = <M extends P.ClientMethod>(method: M, params: P.ClientRequests[M]["params"]) =>
+    conn.request(method, params).pipe(Effect.exit, Effect.timeoutOption(Session.requestTimeout))
 
   const capFailure = (spent: number) =>
     new SpendCapReached({
@@ -686,42 +771,29 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
       estimated: true,
     })
 
-  const unavailable = (): SessionClosed | null =>
-    dead !== null
-      ? sessionClosed(`session is gone: ${dead.message}`)
-      : stuck
-        ? sessionClosed("session is gone: codex app-server stopped answering")
-        : closed || ending
-          ? sessionClosed("session has ended")
-          : null
+  const deathOf = (exit: ProcessExit) =>
+    new ProcessKilled({
+      message: `codex app-server exited (${exit.signal ?? `code ${exit.exitCode}`})`,
+      signal: exit.signal,
+      exitCode: exit.exitCode,
+    })
 
-  /**
-   * Take the next queued message as the running turn, if nothing is running.
-   * Synchronous, so two callers can't both start one; `startTurn` sends it.
-   */
-  const claimNext = (): { readonly q: Queued; readonly seq: number } | null => {
-    if (state.run !== null || dead !== null || closed || stuck) return null
-    if (state.capReached !== null) {
-      const failure = capFailure(state.capReached)
-      for (const q of queue.splice(0)) Deferred.doneUnsafe(q.started, Exit.fail(failure))
+  /** Why a call can't go in now; null if it can. `interrupt` still can while `end` waits. */
+  const unavailable = (forInterrupt = false): SessionClosed | null => {
+    switch (life._tag) {
+      case "Ended":
+        return sessionClosed(dead !== null ? `session is gone: ${dead.message}` : life.error !== null ? life.error.message : "session has ended")
+      case "Failing":
+        return sessionClosed(`session is gone: ${life.reason ?? (dead !== null ? dead.message : "lost the connection to codex app-server")}`)
+      case "Closing":
+        return sessionClosed("session has ended")
+      case "Open":
+        return endRequested && !forInterrupt ? sessionClosed("session has ended") : null
     }
-    const q = queue.shift()
-    if (q === undefined) {
-      notify()
-      return null
-    }
-    state = startRun(state, q.messageId)
-    const seq = state.nextSeq - 1
-    claimed.set(seq, q)
-    return { q, seq }
   }
 
-  /**
-   * Settle the start of run `seq`'s message, from whichever comes first: the
-   * `turn/start` answer, or app-server announcing the turn. False if it was
-   * already settled.
-   */
-  const settleStart = (seq: number, exit: Exit.Exit<TurnId, AgentError | SessionClosed | TurnFailure>): boolean => {
+  /** Settle the start of run `seq`'s message (the answer, or the turn's announcement, whichever is first). */
+  const settleStart = (seq: number, exit: Exit.Exit<TurnId, AgentError | SessionClosed | TurnFailure>) => {
     const q = claimed.get(seq)
     if (q === undefined) return false
     claimed.delete(seq)
@@ -735,104 +807,83 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
     for (const seq of [...claimed.keys()]) settleStart(seq, Exit.fail(error))
   }
 
-  /**
-   * `turn/start` for a claimed message. Runs in the session's scope, not the caller's.
-   *
-   * An error answer means the turn didn't start: the next message goes. No
-   * answer at all leaves it unknown whether the turn will start, unless
-   * `turn/started` already said so; starting another message then could run
-   * two turns at once, so app-server, which has stopped answering, is stopped
-   * and the session ends.
-   */
-  const startTurn = ({ q, seq }: { readonly q: Queued; readonly seq: number }): Effect.Effect<void> =>
-    conn
-      .request("turn/start", {
-        threadId,
-        input: textInput(q.input),
-        clientUserMessageId: q.messageId,
-        ...(options.effort !== undefined ? { effort: codexEffort(options.effort) } : {}),
-      })
-      .pipe(
-        Effect.timeoutOption(Session.requestTimeout),
-        Effect.exit,
-        Effect.flatMap((exit) =>
-          Effect.suspend(() => {
-            if (Exit.isSuccess(exit) && Option.isSome(exit.value)) {
-              const turnId = exit.value.value.turn.id
-              state = runStarted(state, seq, turnId)
-              settleStart(seq, Exit.succeed(TurnId.make(turnId)))
-              return Effect.void
-            }
-            // `turn/started` already settled it: the turn ran (or runs), whatever this answer is.
-            if (!claimed.has(seq)) return Effect.void
-            state = runFailed(state, seq).state
-            if (Exit.isFailure(exit)) {
-              settleStart(seq, Exit.fail(causeError("turn/start failed", exit.cause)))
-              return startNext
-            }
-            stuck = true
-            notify()
-            const error = agentError(
-              `turn/start: no answer within ${Duration.format(Session.requestTimeout)}; stopping codex app-server`,
-            )
-            settleStart(seq, Exit.fail(error))
-            return Effect.andThen(Effect.logError(error.message), conn.kill)
-          }),
-        ),
-      )
-
-  const startNext: Effect.Effect<void> = Effect.suspend(() => {
-    const claimed = claimNext()
-    return claimed === null ? Effect.void : startTurn(claimed).pipe(Effect.forkIn(scope), Effect.asVoid)
-  })
-
-  /** Kill the commands an interrupted turn left running (app-server doesn't). */
-  const killTurnCommands = (run: Run) =>
-    Effect.gen(function* () {
-      const list = yield* timed("thread/backgroundTerminals/list", conn.request("thread/backgroundTerminals/list", { threadId })).pipe(
-        Effect.option,
-      )
-      if (Option.isNone(list)) return
-      for (const terminal of list.value.data) {
-        if (!run.commandItems.has(terminal.itemId)) continue
-        yield* timed(
-          "thread/backgroundTerminals/terminate",
-          conn.request("thread/backgroundTerminals/terminate", { threadId, processId: terminal.processId }),
-        ).pipe(Effect.ignore)
-      }
-    })
-
-  const command = (c: Command): Effect.Effect<void> => {
-    switch (c._tag) {
-      case "Interrupt":
-        return timed("turn/interrupt", conn.request("turn/interrupt", { threadId, turnId: c.turnId })).pipe(
-          Effect.ignore,
-          Effect.forkIn(scope),
-          Effect.asVoid,
-        )
-      case "Complete":
-        return Effect.gen(function* () {
-          const run = state.run
-          if (run === null) return
-          const needs = completionNeeds(run, c.turn)
-          if (needs.killCommands) yield* killTurnCommands(run)
-          const rateLimits = needs.rateLimits
-            ? Option.getOrNull(yield* timed("account/rateLimits/read", conn.request("account/rateLimits/read", undefined)).pipe(Effect.option))
-            : null
-          const processExit = needs.processExit ? Option.getOrNull(yield* conn.exit.pipe(Effect.timeoutOption(Duration.seconds(1)))) : null
-          // app-server is gone: say so before the turn ends and wakes anyone (an `end` waiting
-          // for this turn must see a death, not an idle session), and before the next one starts.
-          if (processExit !== null) dead ??= deathOf(processExit)
-          const done = completeTurn({ cap }, state, { seq: run.seq, turn: c.turn, raw: c.raw, price, rateLimits, processExit })
-          state = done.state
-          yield* runtime.emitAll(done.events)
-          yield* startNext
-        })
-    }
+  /** The session gave up on app-server, or lost it: nothing more is started, and the transport's end finishes it. */
+  const fail = (reason: string | null) => {
+    if (life._tag === "Open") life = { _tag: "Failing", reason }
   }
 
-  const handle = (msg: P.Incoming) =>
+  /** The session is over: `end` callers get `error` (none: it ended cleanly). */
+  const finish = (error: AgentError | null, streamError: AgentError | null = error, waiters?: AgentError | SessionClosed) =>
+    Effect.suspend(() => {
+      life = { _tag: "Ended", error }
+      for (const w of endWaiters.splice(0)) Deferred.doneUnsafe(w, error === null ? Exit.void : Exit.fail(error))
+      return runtime.end(streamError, waiters)
+    })
+
+  /** Kill the commands an interrupted turn left running (app-server doesn't). Whether the connection was lost meanwhile. */
+  const killTurnCommands = (run: Run) =>
     Effect.gen(function* () {
+      const list = yield* send("thread/backgroundTerminals/list", { threadId })
+      if (Option.isNone(list) || Exit.isFailure(list.value)) return Option.isSome(list) && lostIn(list.value)
+      for (const terminal of list.value.value.data) {
+        if (!run.commandItems.has(terminal.itemId)) continue
+        const done = yield* send("thread/backgroundTerminals/terminate", { threadId, processId: terminal.processId })
+        if (Option.isSome(done) && lostIn(done.value)) return true
+      }
+      return false
+    })
+
+  /** Gather what a completed turn needs from outside the frame (a separate fiber: it may wait on app-server). */
+  const gatherCompletion = (run: Run, c: Extract<Command, { _tag: "Complete" }>) =>
+    Effect.gen(function* () {
+      const needs = completionNeeds(run, c.turn)
+      let lost = needs.killCommands ? yield* killTurnCommands(run) : false
+      let rateLimits: P.GetAccountRateLimitsResponse | null = null
+      if (needs.rateLimits && !lost) {
+        const read = yield* send("account/rateLimits/read", undefined)
+        if (Option.isSome(read)) {
+          if (Exit.isSuccess(read.value)) rateLimits = read.value.value
+          else lost = lostIn(read.value)
+        }
+      }
+      const processExit = needs.processExit ? Option.getOrNull(yield* conn.exit.pipe(Effect.timeoutOption(Duration.seconds(1)))) : null
+      return { _tag: "Completed", seq: run.seq, rateLimits, processExit, lost } satisfies Input
+    })
+
+  /** Start the next queued message if nothing is running, or close if `end` is waiting and nothing is left. */
+  const drive: Effect.Effect<void> = Effect.suspend(() => {
+    if (life._tag !== "Open" || dead !== null || state.run !== null) return Effect.void
+    if (state.capReached !== null) {
+      const failure = capFailure(state.capReached)
+      for (const q of queue.splice(0)) Deferred.doneUnsafe(q.started, Exit.fail(failure))
+    }
+    const q = queue.shift()
+    if (q !== undefined) {
+      state = startRun(state, q.messageId)
+      const seq = state.nextSeq - 1
+      claimed.set(seq, q)
+      return launch(
+        send("turn/start", {
+          threadId,
+          input: textInput(q.input),
+          clientUserMessageId: q.messageId,
+          ...(options.effort !== undefined ? { effort: codexEffort(options.effort) } : {}),
+        }),
+        (answer): Input => ({ _tag: "Started", seq, answer }),
+      )
+    }
+    if (!endRequested) return Effect.void
+    life = { _tag: "Closing" }
+    return launch(conn.close, (): Input => ({ _tag: "Closed" }))
+  })
+
+  /** A frame from app-server: fold it into the state; a completed turn first gathers what it needs. */
+  const onFrame = (msg: P.Incoming): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      if (completing !== null) {
+        held.push(msg)
+        return
+      }
       const nowMs = yield* Clock.currentTimeMillis
       const result = step({ threadId, nowMs, mapState, cap }, state, msg)
       state = result.state
@@ -840,148 +891,312 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
       // app-server announced the turn: its message has started, answer or not.
       const run = state.run
       if (run !== null && run.announced && run.turnId !== null) settleStart(run.seq, Exit.succeed(run.turnId))
-      for (const c of result.commands) yield* command(c)
+      for (const c of result.commands) {
+        if (c._tag === "Interrupt") {
+          yield* launch(Effect.asVoid(send("turn/interrupt", { threadId, turnId: c.turnId })))
+        } else if (state.run !== null) {
+          completing = { seq: state.run.seq, turn: c.turn, raw: c.raw }
+          yield* launch(gatherCompletion(state.run, c), (input) => input)
+        }
+      }
     })
 
-  const deathOf = (exit: ProcessExit) =>
-    new ProcessKilled({
-      message: `codex app-server exited (${exit.signal ?? `code ${exit.exitCode}`})`,
-      signal: exit.signal,
-      exitCode: exit.exitCode,
+  /** End the completing turn with what is known, then take the frames held while it gathered. */
+  const complete = (rateLimits: P.GetAccountRateLimitsResponse | null, processExit: ProcessExit | null) =>
+    Effect.gen(function* () {
+      if (completing === null) return
+      const { seq, turn, raw } = completing
+      completing = null
+      // app-server is gone: final before the turn ends and anyone is told.
+      if (processExit !== null) dead ??= deathOf(processExit)
+      const done = completeTurn({ cap }, state, { seq, turn, raw, price, rateLimits, processExit })
+      state = done.state
+      yield* runtime.emitAll(done.events)
+      for (const msg of held.splice(0)) yield* onFrame(msg)
     })
 
-  /** After app-server's output ends: either we closed it, or it died. */
-  const onTransportEnd = Effect.gen(function* () {
-    const exit: ProcessExit = yield* conn.exit
-    if (closed) return yield* runtime.end(null)
-    dead ??= deathOf(exit)
-    const ended = stepExit(state, dead, exit, price)
-    state = ended.state
-    yield* runtime.emitAll(ended.events)
-    failWaiting(dead)
-    notify()
-    yield* runtime.end(agentError(dead.message))
-  })
+  const process = (input: Input): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      if (life._tag === "Ended") return reject(input)
+      switch (input._tag) {
+        case "Frame":
+          yield* onFrame(input.msg)
+          return yield* drive
+        case "Completed":
+          if (completing?.seq !== input.seq) return
+          if (input.lost) fail(null)
+          yield* complete(input.rateLimits, input.processExit)
+          return yield* drive
+        case "Started": {
+          const { seq, answer } = input
+          if (Option.isSome(answer) && Exit.isSuccess(answer.value)) {
+            const turnId = answer.value.value.turn.id
+            state = runStarted(state, seq, turnId)
+            settleStart(seq, Exit.succeed(TurnId.make(turnId)))
+            return
+          }
+          // `turn/started` already settled it: the turn ran (or runs), whatever this answer is.
+          if (!claimed.has(seq)) return
+          state = runFailed(state, seq).state
+          if (Option.isSome(answer) && Exit.isFailure(answer.value)) {
+            const exit = answer.value
+            settleStart(seq, Exit.fail(causeError("turn/start failed", exit.cause)))
+            // An error answer: the next message goes. The connection gone: wait for the transport to end.
+            if (lostIn(exit)) fail(null)
+            return yield* drive
+          }
+          // No answer, and no `turn/started`: whether that turn will run can't be known, and
+          // starting another could run two at once. app-server has stopped answering: stop it.
+          const error = agentError(`turn/start: no answer within ${Duration.format(Session.requestTimeout)}; stopping codex app-server`)
+          settleStart(seq, Exit.fail(error))
+          fail("codex app-server stopped answering")
+          yield* Effect.logError(error.message)
+          return yield* launch(conn.kill)
+        }
+        case "Submit": {
+          const error = unavailable()
+          if (error !== null) return Deferred.doneUnsafe(input.reply, Exit.succeed({ _tag: "Unavailable", error }))
+          if (state.capReached !== null && !input.front) {
+            return Deferred.doneUnsafe(input.reply, Exit.succeed({ _tag: "CapReached", spent: state.capReached }))
+          }
+          const q: Queued = { messageId: input.messageId, input: input.input, started: Deferred.makeUnsafe() }
+          if (input.front) queue.unshift(q)
+          else queue.push(q)
+          yield* drive
+          return Deferred.doneUnsafe(input.reply, Exit.succeed({ _tag: "Queued", q, starting: claimed.get(state.run?.seq ?? -1) === q }))
+        }
+        case "Steer": {
+          const error = unavailable()
+          if (error !== null) return Deferred.doneUnsafe(input.reply, Exit.succeed({ _tag: "Unavailable", error }))
+          if (state.capReached !== null) {
+            return Deferred.doneUnsafe(input.reply, Exit.succeed({ _tag: "CapReached", spent: state.capReached }))
+          }
+          const run = state.run
+          if (!steerable(run)) return yield* process({ _tag: "Submit", input: input.input, front: true, messageId: input.messageId, reply: input.reply })
+          state = addSteer(state, run.seq, input.messageId)
+          const steering = send("turn/steer", {
+            threadId,
+            input: textInput(input.input),
+            expectedTurnId: run.turnId,
+            clientUserMessageId: input.messageId,
+          })
+          return yield* launch(steering, (answer): Input => ({ ...input, _tag: "Steered", seq: run.seq, answer }))
+        }
+        case "Steered": {
+          const { answer, reply } = input
+          if (Option.isSome(answer) && Exit.isSuccess(answer.value)) {
+            return Deferred.doneUnsafe(reply, Exit.succeed({ _tag: "Landed", turnId: TurnId.make(answer.value.value.turnId) }))
+          }
+          state = removeSteer(state, input.seq, input.messageId)
+          if (Option.isNone(answer)) {
+            return Deferred.doneUnsafe(reply, Exit.succeed({ _tag: "Failed", error: agentError(`turn/steer: no answer within ${Duration.format(Session.requestTimeout)}`) }))
+          }
+          const exit = answer.value
+          if (Exit.isSuccess(exit)) return
+          const failure = Cause.findErrorOption(exit.cause)
+          // The turn ended first: this message starts the next turn, ahead of anything queued.
+          if (Option.isSome(failure) && failure.value._tag === "CodexRpcError" && isStaleSteerError(failure.value)) {
+            return yield* process({ _tag: "Submit", input: input.input, front: true, messageId: input.messageId, reply })
+          }
+          if (lostIn(exit)) fail(null)
+          return Deferred.doneUnsafe(reply, Exit.succeed({ _tag: "Failed", error: causeError("turn/steer failed", exit.cause) }))
+        }
+        case "Interrupt": {
+          const error = unavailable(true)
+          if (error !== null) return Deferred.doneUnsafe(input.reply, Exit.fail(error))
+          const run = state.run
+          if (run === null || run.turnId === null) return Deferred.doneUnsafe(input.reply, Exit.succeed(null))
+          if (run.interruptRequested) return Deferred.doneUnsafe(input.reply, Exit.succeed(run.turnId))
+          state = markInterrupt(state, run.seq)
+          const turnId = run.turnId
+          return yield* launch(send("turn/interrupt", { threadId, turnId }), (answer): Input => ({
+            _tag: "Interrupted",
+            turnId,
+            answer,
+            reply: input.reply,
+          }))
+        }
+        case "Interrupted": {
+          const { answer, reply } = input
+          if (Option.isNone(answer)) {
+            return Deferred.doneUnsafe(reply, Exit.fail(agentError(`turn/interrupt: no answer within ${Duration.format(Session.requestTimeout)}`)))
+          }
+          const exit = answer.value
+          // An error answer: already finished, so the turn ends on its own.
+          if (Exit.isSuccess(exit) || !lostIn(exit)) return Deferred.doneUnsafe(reply, Exit.succeed(input.turnId))
+          fail(null)
+          return Deferred.doneUnsafe(reply, Exit.fail(causeError("turn/interrupt failed", exit.cause)))
+        }
+        case "Stall": {
+          const marked = markStalled(state, input.expiry.turnId, input.expiry)
+          state = marked.state
+          return Deferred.doneUnsafe(input.reply, Exit.succeed(marked.marked && life._tag === "Open"))
+        }
+        case "Kill":
+          if (life._tag !== "Open" && life._tag !== "Closing") return
+          life = { _tag: "Failing", reason: null }
+          return yield* launch(conn.kill)
+        case "End":
+          switch (life._tag) {
+            case "Failing":
+              // Already a failure; with a reason, it is known now.
+              if (life.reason !== null) return Deferred.doneUnsafe(input.reply, Exit.fail(agentError(`session is gone: ${life.reason}`)))
+              endWaiters.push(input.reply)
+              return
+            case "Closing":
+              endWaiters.push(input.reply)
+              return
+            case "Open":
+              endRequested = true
+              endWaiters.push(input.reply)
+              return yield* drive
+          }
+          return
+        case "Closed":
+          if (life._tag === "Closing") return yield* finish(null)
+          return
+        case "TransportEnded": {
+          if (life._tag === "Closing") return yield* finish(null)
+          // A turn completing as app-server goes: it ends with what is known.
+          if (completing !== null) yield* complete(null, input.exit)
+          const death = (dead ??= deathOf(input.exit))
+          const ended = stepExit(state, death, input.exit, price)
+          state = ended.state
+          yield* runtime.emitAll(ended.events)
+          failWaiting(death)
+          const reason = life._tag === "Failing" ? life.reason : null
+          return yield* finish(agentError(`session is gone: ${reason ?? death.message}`), agentError(death.message))
+        }
+      }
+    })
 
-  // Closing the session's scope without `end`: release everyone still waiting.
+  /** An input that arrived after the end: its caller is told the session is over. */
+  const reject = (input: Input) => {
+    const error = unavailable(input._tag === "Interrupt") ?? sessionClosed("session has ended")
+    switch (input._tag) {
+      case "Submit":
+      case "Steer":
+      case "Steered":
+        return Deferred.doneUnsafe(input.reply, Exit.succeed({ _tag: "Unavailable", error }))
+      case "Interrupt":
+      case "Interrupted":
+        return Deferred.doneUnsafe(input.reply, Exit.fail(error))
+      case "Stall":
+        return Deferred.doneUnsafe(input.reply, Exit.succeed(false))
+      case "End":
+        return Deferred.doneUnsafe(input.reply, life._tag === "Ended" && life.error !== null ? Exit.fail(life.error) : Exit.void)
+    }
+  }
+
+  // Closing the session's scope: the actor has been interrupted (between inputs) by now, so
+  // this is the only one touching the state. A failure already recorded stays the ending.
   yield* Effect.addFinalizer(() =>
     Effect.suspend(() => {
-      if (runtime.ended() !== null) return Effect.void
-      closed = true
-      const error = sessionClosed("session closed")
-      failWaiting(error)
-      notify()
-      return runtime.end(null, error)
+      // Inputs the actor didn't get to: their callers are told the session is over.
+      const left: Array<Input> = []
+      for (let next = Queue.takeUnsafe(inbox); next !== undefined && Exit.isSuccess(next); next = Queue.takeUnsafe(inbox)) {
+        left.push(next.value)
+      }
+      if (life._tag === "Ended") {
+        for (const input of left) reject(input)
+        return Effect.void
+      }
+      const failure =
+        life._tag === "Failing" || dead !== null
+          ? agentError(`session is gone: ${(life._tag === "Failing" ? life.reason : null) ?? dead?.message ?? "lost the connection to codex app-server"}`)
+          : null
+      const waiting = failure ?? sessionClosed("session closed")
+      failWaiting(waiting)
+      return finish(failure, failure, waiting).pipe(Effect.andThen(Effect.sync(() => left.forEach(reject))))
     }),
   )
 
-  yield* conn.incoming.pipe(Stream.runForEach(handle), Effect.andThen(onTransportEnd), Effect.forkScoped)
+  yield* Queue.take(inbox).pipe(
+    Effect.flatMap((input) => Effect.uninterruptible(process(input))),
+    Effect.forever,
+    Effect.forkScoped,
+  )
+  yield* conn.incoming.pipe(
+    Stream.runForEach((msg) => tell({ _tag: "Frame", msg })),
+    Effect.andThen(conn.exit),
+    Effect.flatMap((exit) => tell({ _tag: "TransportEnded", exit })),
+    Effect.forkScoped,
+  )
 
-  // A stalled turn is interrupted (`Complete` then terminates its commands, as
-  // for any interrupt). If it hasn't ended within the grace period, app-server
-  // is unresponsive: kill it, which ends the turn (still `Stalled`) and the session.
+  // A stalled turn is interrupted (its completion then terminates its commands, as for
+  // any interrupt). If it hasn't ended within the grace period, app-server is
+  // unresponsive: kill it, which ends the turn (still `Stalled`) and the session.
   yield* runtime.supervise({
-    stall: (expiry) =>
-      Effect.sync(() => {
-        const marked = markStalled(state, expiry.turnId, expiry)
-        state = marked.state
-        return marked.marked
-      }),
+    stall: (expiry) => ask<boolean, never>((reply) => ({ _tag: "Stall", expiry, reply }), () => Exit.succeed(false)),
     interrupt: (expiry) => timed("turn/interrupt", conn.request("turn/interrupt", { threadId, turnId: expiry.turnId })),
-    kill: conn.kill,
+    kill: tell({ _tag: "Kill" }),
   })
 
-  // ---- public API ----
+  // ---- public API: each call asks the actor ----
 
-  /**
-   * Queue a message (at the front for a steer) and start it if nothing is
-   * running. A steer that lost its turn keeps the id it was steered with.
-   */
-  const enqueue = (input: string, front: boolean, messageId: MessageId = Session.newMessageId()) =>
-    Effect.suspend(() => {
-      const error = unavailable()
-      if (error !== null) return Effect.fail(error)
-      const q: Queued = { messageId, input, started: Deferred.makeUnsafe() }
-      if (front) queue.unshift(q)
-      else queue.push(q)
-      return Effect.as(startNext, q)
-    })
+  const over = <A>(): Exit.Exit<A, SessionClosed | AgentError> => Exit.fail(unavailable(true) ?? sessionClosed("session has ended"))
 
-  const send = Effect.fn("CodexAgent.send")(function* (input: string) {
-    if (state.capReached !== null && unavailable() === null) return yield* agentError(capFailure(state.capReached).message)
-    const q = yield* enqueue(input, false)
+  const submit = (input: string) =>
+    ask<SubmitReply, never>(
+      (reply) => ({ _tag: "Submit", input, front: false, messageId: Session.newMessageId(), reply }),
+      () => Exit.succeed({ _tag: "Unavailable", error: unavailable() ?? sessionClosed("session has ended") }),
+    )
+
+  const sendMessage = Effect.fn("CodexAgent.send")(function* (input: string) {
+    const r = yield* submit(input)
+    if (r._tag === "Unavailable") return yield* r.error
+    if (r._tag === "CapReached") return yield* agentError(capFailure(r.spent).message)
+    if (r._tag !== "Queued") return yield* agentError("unexpected answer")
     // A message that started a turn reports a failed `turn/start`; a queued one returns at once.
-    if (state.run?.unlanded[0] === q.messageId || (yield* Deferred.isDone(q.started))) {
-      yield* Deferred.await(q.started).pipe(Effect.mapError(asAgentError))
+    if (r.starting || (yield* Deferred.isDone(r.q.started))) {
+      yield* Deferred.await(r.q.started).pipe(Effect.mapError(asAgentError))
     }
-    return q.messageId
+    return r.q.messageId
   })
 
   const turn = Effect.fn("CodexAgent.turn")(function* (input: string) {
-    if (state.capReached !== null && unavailable() === null) return yield* capFailure(state.capReached)
-    const q = yield* enqueue(input, false)
-    const turnId = yield* Deferred.await(q.started)
+    const r = yield* submit(input)
+    if (r._tag === "Unavailable") return yield* r.error
+    if (r._tag === "CapReached") return yield* capFailure(r.spent)
+    if (r._tag !== "Queued") return yield* agentError("unexpected answer")
+    const turnId = yield* Deferred.await(r.q.started)
     const outcome = yield* turns.outcome(turnId)
     if (outcome._tag === "Succeeded") return outcome satisfies TurnSucceeded
     return yield* Effect.fail(outcome)
   })
 
   const steer = Effect.fn("CodexAgent.steer")(function* (input: string) {
-    const error = unavailable()
-    if (error !== null) return yield* error
-    if (state.capReached !== null) return yield* agentError(capFailure(state.capReached).message)
-    const run = state.run
     const messageId = Session.newMessageId()
-    if (steerable(run)) {
-      state = addSteer(state, run.seq, messageId)
-      const exit = yield* timed(
-        "turn/steer",
-        conn.request("turn/steer", { threadId, input: textInput(input), expectedTurnId: run.turnId, clientUserMessageId: messageId }),
-      ).pipe(Effect.exit)
-      if (Exit.isSuccess(exit)) {
-        return { _tag: "Landed", messageId, turnId: TurnId.make(exit.value.turnId) } satisfies SteerOutcome
+    const r = yield* ask<SubmitReply, never>(
+      (reply) => ({ _tag: "Steer", input, messageId, reply }),
+      () => Exit.succeed({ _tag: "Unavailable", error: unavailable() ?? sessionClosed("session has ended") }),
+    )
+    switch (r._tag) {
+      case "Unavailable":
+        return yield* r.error
+      case "CapReached":
+        return yield* agentError(capFailure(r.spent).message)
+      case "Failed":
+        return yield* r.error
+      case "Landed":
+        return { _tag: "Landed", messageId, turnId: r.turnId } satisfies SteerOutcome
+      case "Queued": {
+        const turnId = yield* Deferred.await(r.q.started).pipe(Effect.mapError(asAgentError))
+        return { _tag: "StartedNewTurn", messageId: r.q.messageId, turnId } satisfies SteerOutcome
       }
-      state = removeSteer(state, run.seq, messageId)
-      const failure = Cause.findErrorOption(exit.cause)
-      const stale = Option.isSome(failure) && failure.value._tag === "CodexRpcError" && isStaleSteerError(failure.value)
-      if (!stale) return yield* causeError("turn/steer failed", exit.cause)
-      // The turn ended first: this message starts the next turn, ahead of anything queued.
     }
-    const q = yield* enqueue(input, true, messageId)
-    const turnId = yield* Deferred.await(q.started).pipe(Effect.mapError(asAgentError))
-    return { _tag: "StartedNewTurn", messageId: q.messageId, turnId } satisfies SteerOutcome
   })
 
   const interrupt = Effect.gen(function* () {
-    // Not `unavailable()`: while `end` waits, a running turn can still be interrupted.
-    const error = closed || dead !== null || stuck ? unavailable() : null
-    if (error !== null) return yield* error
-    const run = state.run
-    if (run === null || run.turnId === null) return
-    if (!run.interruptRequested) {
-      state = markInterrupt(state, run.seq)
-      yield* timed("turn/interrupt", conn.request("turn/interrupt", { threadId, turnId: run.turnId })).pipe(
-        // Already finished: the turn ends on its own.
-        Effect.catchTag("CodexRpcError", () => Effect.void),
-      )
-    }
-    yield* turns.outcome(run.turnId).pipe(Effect.ignore)
+    const turnId = yield* ask<TurnId | null, SessionClosed | AgentError>((reply) => ({ _tag: "Interrupt", reply }), over)
+    if (turnId !== null) yield* turns.outcome(turnId).pipe(Effect.ignore)
   }).pipe(Effect.withSpan("CodexAgent.interrupt"))
 
   // Ending an ended session reports how it ended.
-  const end: Effect.Effect<void, AgentError> = Effect.gen(function* () {
-    if (dead === null && !closed && !stuck) {
-      ending = true
-      while (dead === null && !stuck && !closed && (state.run !== null || queue.length > 0)) yield* Deferred.await(changed)
-    }
-    if (dead !== null) return yield* agentError(`session is gone: ${dead.message}`)
-    // Being stopped for not answering: that is how this session ends, not cleanly.
-    if (stuck) return yield* agentError("session is gone: codex app-server stopped answering")
-    if (closed) return
-    closed = true
-    yield* conn.close
-    yield* runtime.end(null)
-  }).pipe(Effect.withSpan("CodexAgent.end"))
+  const end: Effect.Effect<void, AgentError> = ask<void, AgentError>(
+    (reply) => ({ _tag: "End", reply }),
+    () => (life._tag === "Ended" && life.error !== null ? Exit.fail(life.error) : Exit.void),
+  ).pipe(Effect.withSpan("CodexAgent.end"))
 
   return {
     sessionId: SessionId.make(threadId),
@@ -990,7 +1205,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
     pid: Effect.map(conn.exited, (exited) => (Option.isSome(exited) ? Option.none() : Option.fromNullishOr(conn.pid))),
     subscribe: runtime.subscribe,
     events: Stream.unwrap(runtime.subscribe),
-    send,
+    send: sendMessage,
     turn,
     steer,
     interrupt,
