@@ -193,6 +193,23 @@ describe("CodexAgent session races", () => {
     }).pipe(Effect.scoped),
   )
 
+  it.effect("closing the session releases an end() waiting for the running turn", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted()
+      const sessionScope = yield* Scope.make()
+      const session = yield* open(server).pipe(Scope.provide(sessionScope))
+      yield* startTurn(server, session, "running", "t-1")
+      // end waits for the running turn; the caller outlives the session's scope.
+      const ending = yield* session.end.pipe(Effect.exit, Effect.forkScoped)
+      yield* Effect.yieldNow
+      yield* Scope.close(sessionScope, Exit.void)
+      const result = yield* Fiber.join(ending).pipe(Effect.timeoutOption("1 second"), Effect.forkChild)
+      yield* TestClock.adjust("2 seconds")
+      // Closed by its scope: a clean end, so `end` succeeds.
+      expect(yield* Fiber.join(result)).toEqual(Option.some(Exit.void))
+    }).pipe(Effect.scoped),
+  )
+
   it.effect("a turn/start answered with an error lets the next message go", () =>
     Effect.gen(function* () {
       const server = yield* scripted()

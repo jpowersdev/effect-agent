@@ -966,7 +966,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
   const end: Effect.Effect<void, AgentError> = Effect.gen(function* () {
     if (dead === null && !closed && !stuck) {
       ending = true
-      while (dead === null && !stuck && (state.run !== null || queue.length > 0)) yield* Deferred.await(changed)
+      while (dead === null && !stuck && !closed && (state.run !== null || queue.length > 0)) yield* Deferred.await(changed)
     }
     if (dead !== null) return yield* agentError(`session is gone: ${dead.message}`)
     // Being stopped for not answering: that is how this session ends, not cleanly.
