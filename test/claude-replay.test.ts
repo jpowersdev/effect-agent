@@ -218,6 +218,11 @@ describe("ClaudeAgent over recordings", () => {
       Schema.encodeUnknownSync(AccountStatus)(status)
       expect(status).toMatchObject({ provider: "claude", usable: true, reason: null, plan: "max" })
       expect(status.windows.map((w) => w.window)).toEqual(["five_hour", "weekly", "other"])
+      expect(status.windows.map((w) => [w.label, Option.getOrNull(w.model)])).toEqual([
+        ["five_hour", null],
+        ["seven_day", null],
+        ["model_scoped:Fable", "fable"],
+      ])
       expect(status.windows.every((w) => w.resetsAt !== null)).toBe(true)
     }).pipe(Effect.provide(replay("status"))),
   )

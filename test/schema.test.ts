@@ -1,6 +1,16 @@
 import { describe, expect, it } from "@effect/vitest"
-import { DateTime, Schema } from "effect"
-import { AgentEvent, Pricing, SessionId, TurnId, UsageLimited } from "../src/index.ts"
+import { DateTime, Option, Schema } from "effect"
+import {
+  type AccountStatus,
+  AgentEvent,
+  appliesTo,
+  LimitWindowStatus,
+  Pricing,
+  SessionId,
+  TurnId,
+  UsageLimited,
+  usableFor,
+} from "../src/index.ts"
 
 describe("schemas", () => {
   it("round-trips a TurnEnded with a typed usage-limit outcome through JSON", () => {
@@ -35,5 +45,43 @@ describe("schemas", () => {
       { inputTokens: 1_000_000, cachedInputTokens: 400_000, outputTokens: 100_000, reasoningTokens: null },
     )
     expect(usd).toBeCloseTo(0.6 * 2 + 0.4 * 0.5 + 0.1 * 8)
+  })
+
+  it("encodes a window's model Option as null or a string", () => {
+    const encode = Schema.encodeUnknownSync(LimitWindowStatus)
+    const base = { window: "weekly", label: "seven_day", usedPercent: 25, resetsAt: null } as const
+    expect(encode({ ...base, model: Option.none() })).toMatchObject({ model: null })
+    expect(encode({ ...base, label: "seven_day_opus", model: Option.some("opus") })).toMatchObject({ model: "opus" })
+    expect(Schema.decodeUnknownSync(LimitWindowStatus)({ ...base, model: null }).model).toEqual(Option.none())
+  })
+
+  describe("usableFor", () => {
+    const window = (label: string, usedPercent: number, model: Option.Option<string>) =>
+      ({ window: model._tag === "None" ? "weekly" : "other", label, usedPercent, resetsAt: null, model }) as const
+    const status = (usable: boolean, windows: AccountStatus["windows"]): AccountStatus => ({
+      provider: "claude",
+      usable,
+      reason: usable ? null : "usage_limited",
+      windows,
+      plan: "max",
+      checkedAt: DateTime.makeUnsafe(0),
+    })
+
+    it("a full per-model window stops only that model", () => {
+      const s = status(true, [window("seven_day", 40, Option.none()), window("model_scoped:Fable", 100, Option.some("fable"))])
+      expect(usableFor(s, "claude-fable-5-1")).toBe(false)
+      expect(usableFor(s, "claude-haiku-5-5")).toBe(true)
+    })
+
+    it("an unusable account is unusable for every model", () => {
+      const s = status(false, [window("five_hour", 100, Option.none())])
+      expect(usableFor(s, "claude-haiku-5-5")).toBe(false)
+    })
+
+    it("matches the family name case-insensitively, and account-wide windows apply to all", () => {
+      expect(appliesTo(window("seven_day_opus", 0, Option.some("opus")), "Claude-Opus-5-5")).toBe(true)
+      expect(appliesTo(window("seven_day_opus", 0, Option.some("opus")), "claude-sonnet-5-5")).toBe(false)
+      expect(appliesTo(window("five_hour", 0, Option.none()), "anything")).toBe(true)
+    })
   })
 })

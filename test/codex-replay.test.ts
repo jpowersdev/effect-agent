@@ -233,7 +233,7 @@ describe("CodexAgent over replays", () => {
       Schema.encodeUnknownSync(AccountStatus)(status)
       expect(status).toMatchObject({ provider: "codex", usable: true, reason: null, plan: "pro" })
       expect(status.windows).toEqual([
-        { window: "weekly", label: "primary", usedPercent: 20, resetsAt: DateTime.makeUnsafe(1793803680_000) },
+        { window: "weekly", label: "primary", usedPercent: 20, resetsAt: DateTime.makeUnsafe(1793803680_000), model: Option.none() },
       ])
     }).pipe(Effect.provide(agent("status"))),
   )

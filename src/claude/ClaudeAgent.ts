@@ -368,6 +368,16 @@ export const normalizeWindow = (label: string): LimitWindow =>
 const secondsToDateTime = (seconds: unknown): DateTime.Utc | null =>
   typeof seconds === "number" && Number.isFinite(seconds) ? DateTime.makeUnsafe(seconds * 1000) : null
 
+/** A display name's family, e.g. `Fable` → `fable`, `Opus 5` → `opus`. */
+const modelFamily = (displayName: string): string => displayName.trim().split(/\s+/)[0]!.toLowerCase()
+
+/** The model a window label caps: `seven_day_opus` → `opus`, `model_scoped:Fable` → `fable`; none for account-wide windows. */
+export const modelOfLabel = (label: string): Option.Option<string> => {
+  if (label.startsWith("model_scoped:")) return Option.some(modelFamily(label.slice("model_scoped:".length)))
+  const perModel = /^seven_day_(opus|sonnet|haiku|fable)$/.exec(label)
+  return perModel !== null ? Option.some(perModel[1]!) : Option.none()
+}
+
 /**
  * Windows from a `rate_limit_info`. Prefers the undocumented `unifiedWindows`
  * (`utilization` is a fraction, `resetsAt` unix seconds); falls back to the
@@ -380,6 +390,7 @@ export const limitWindows = (info: SDKRateLimitInfo): Array<LimitWindowStatus> =
     label,
     usedPercent: typeof w.utilization === "number" ? Math.round(w.utilization * 10000) / 100 : null,
     resetsAt: secondsToDateTime(w.resetsAt),
+    model: modelOfLabel(label),
   })
   if (typeof unified === "object" && unified !== null) {
     return Object.entries(unified as Record<string, unknown>).flatMap(([label, w]) =>
@@ -1081,8 +1092,6 @@ const isoToDateTime = (iso: unknown): DateTime.Utc | null =>
 
 const percent = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null)
 
-/** Per-model windows: reported, but one running out doesn't stop other models. */
-const modelScoped = (label: string) => label.startsWith("model_scoped:") || /^seven_day_(opus|sonnet|haiku|fable)$/.test(label)
 
 /**
  * Windows from the usage API's `rate_limits`: every named window
@@ -1099,7 +1108,13 @@ export const usageWindows = (rateLimits: unknown): Array<LimitWindowStatus> => {
     if (label === "extra_usage" || typeof value !== "object" || value === null || Array.isArray(value)) continue
     const w = value as Record<string, unknown>
     if (!("utilization" in w) || !("resets_at" in w)) continue
-    windows.push({ window: normalizeWindow(label), label, usedPercent: percent(w.utilization), resetsAt: isoToDateTime(w.resets_at) })
+    windows.push({
+      window: normalizeWindow(label),
+      label,
+      usedPercent: percent(w.utilization),
+      resetsAt: isoToDateTime(w.resets_at),
+      model: modelOfLabel(label),
+    })
   }
   if (Array.isArray(r.model_scoped)) {
     for (const value of r.model_scoped as ReadonlyArray<Record<string, unknown>>) {
@@ -1109,6 +1124,7 @@ export const usageWindows = (rateLimits: unknown): Array<LimitWindowStatus> => {
         label: `model_scoped:${value.display_name}`,
         usedPercent: percent(value.utilization),
         resetsAt: isoToDateTime(value.resets_at),
+        model: Option.some(modelFamily(value.display_name)),
       })
     }
   }
@@ -1122,6 +1138,7 @@ export const usageWindows = (rateLimits: unknown): Array<LimitWindowStatus> => {
         label: typeof model === "string" ? `model_scoped:${model}` : value.kind,
         usedPercent: percent(value.percent),
         resetsAt: isoToDateTime(value.resets_at),
+        model: typeof model === "string" ? Option.some(modelFamily(model)) : Option.none(),
       })
     }
   }
@@ -1142,7 +1159,8 @@ export const accountStatus = (snapshot: ClaudeSdk.StatusSnapshot, checkedAt: Dat
     ?.extra_usage
   const spendReached = extra?.spend_limit_reached === true
   const overage = extra?.is_enabled === true && !spendReached
-  const accountWide = windows.filter((w) => !modelScoped(w.label))
+  // A full per-model window stops only that model, so it doesn't make the account unusable.
+  const accountWide = windows.filter((w) => Option.isNone(w.model))
   const reason: AccountStatus["reason"] = !signedIn(snapshot.account)
     ? "unauthenticated"
     : accountWide.some((w) => (w.usedPercent ?? 0) >= 100) && !overage

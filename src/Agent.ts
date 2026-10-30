@@ -112,6 +112,26 @@ export const AccountStatus = Schema.Struct({
 })
 export type AccountStatus = typeof AccountStatus.Type
 
+/**
+ * Whether a limit window applies to `model`: windows without a model apply
+ * to all; a per-model window applies when the model id contains its family
+ * name (e.g. `claude-fable-5-1` and `fable`).
+ */
+export const appliesTo = (window: LimitWindowStatus, model: string): boolean =>
+  Option.match(window.model, {
+    onNone: () => true,
+    onSome: (family) => model.toLowerCase().includes(family.toLowerCase()),
+  })
+
+/**
+ * `status.usable`, and no exhausted per-model window caps `model`. A full
+ * per-model window doesn't make the whole account unusable (other models
+ * still run), but it does stop a run on that model.
+ */
+export const usableFor = (status: AccountStatus, model: string): boolean =>
+  status.usable &&
+  !status.windows.some((w) => Option.isSome(w.model) && appliesTo(w, model) && (w.usedPercent ?? 0) >= 100)
+
 export const SteerOutcome = Schema.Union([
   /** Landed in the turn that was running when `steer` was called. */
   Schema.TaggedStruct("Landed", { messageId: MessageId, turnId: TurnId }),

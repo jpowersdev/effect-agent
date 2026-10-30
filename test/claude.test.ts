@@ -748,3 +748,14 @@ describe("ClaudeSdk transcript helpers", () => {
     expect(ClaudeAgent.historyEvents(restored)).toMatchObject([{ _tag: "Compacted", trigger: "auto" }])
   })
 })
+
+describe("ClaudeAgent.modelOfLabel", () => {
+  it("names the model a per-model window caps", () => {
+    expect(ClaudeAgent.modelOfLabel("seven_day_opus")).toEqual(Option.some("opus"))
+    expect(ClaudeAgent.modelOfLabel("model_scoped:Fable")).toEqual(Option.some("fable"))
+    expect(ClaudeAgent.modelOfLabel("model_scoped:Opus 5")).toEqual(Option.some("opus"))
+    expect(ClaudeAgent.modelOfLabel("five_hour")).toEqual(Option.none())
+    expect(ClaudeAgent.modelOfLabel("seven_day")).toEqual(Option.none())
+  })
+})
+

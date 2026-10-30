@@ -42,5 +42,10 @@ export const LimitWindowStatus = Schema.Struct({
   /** 0 to 100. */
   usedPercent: Schema.NullOr(Schema.Number),
   resetsAt: Schema.NullOr(Schema.DateTimeUtcFromMillis),
+  /**
+   * The model family this window caps, lowercase (e.g. `opus`, `fable`);
+   * none for a window that applies to every model. Encoded as `null`.
+   */
+  model: Schema.OptionFromNullOr(Schema.String),
 })
 export type LimitWindowStatus = typeof LimitWindowStatus.Type

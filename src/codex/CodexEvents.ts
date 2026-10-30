@@ -4,7 +4,7 @@
  * `CodexAgent` owns the state and the turn lifecycle (TurnStarted,
  * MessageLanded, TurnEnded); this module maps everything else.
  */
-import { DateTime } from "effect"
+import { DateTime, Option } from "effect"
 import type { AccountStatus } from "../Agent.ts"
 import {
   AgentFailed,
@@ -101,6 +101,8 @@ export const limitWindows = (snapshot: P.RateLimitSnapshot): Array<LimitWindowSt
       label: `${prefix}${label}`,
       usedPercent: w.usedPercent,
       resetsAt: resetsAtOf(w.resetsAt),
+      // Codex reports no per-model windows.
+      model: Option.none(),
     })
   }
   return out
