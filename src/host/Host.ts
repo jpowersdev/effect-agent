@@ -38,7 +38,6 @@ import {
   type ReadyLine,
   socketPath,
   toDuration,
-  toRunOptions,
 } from "./HostSpec.ts"
 import { EventsTrimmed, HostRpcs, type SeqEvent } from "./protocol.ts"
 
@@ -120,12 +119,16 @@ type Reason = "ended" | "stop" | "sigterm" | "orphan"
  * @category utils
  */
 export const readManifest = (path: string): Manifest | undefined => {
+  let text: string
   try {
-    return Schema.decodeUnknownSync(Schema.fromJsonString(Manifest))(readFileSync(path, "utf8"))
+    text = readFileSync(path, "utf8")
   } catch {
     return undefined
   }
+  return Option.getOrUndefined(decodeManifest(text))
 }
+
+const decodeManifest = Schema.decodeUnknownOption(Schema.fromJsonString(Manifest))
 
 /**
  * Whether the manifest's host process is still running.
@@ -357,7 +360,7 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
         Effect.map((c) => c.hooks),
         Effect.orElseSucceed(() => false),
       )
-      const runOptions: RunOptions = { ...toRunOptions(spec.run), ...(hasHooks && { hooks: remoteHooks(hookBridge) }) }
+      const runOptions: RunOptions = { ...spec.run, ...(hasHooks && { hooks: remoteHooks(hookBridge) }) }
 
       // ---- open ----
       // A child of `run`'s scope: however `run` ends (even interrupted, as

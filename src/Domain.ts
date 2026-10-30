@@ -3,7 +3,7 @@
  *
  * @since 0.1.0
  */
-import { Schema } from "effect"
+import { Duration, Option, Schema, SchemaGetter } from "effect"
 
 /**
  * The provider's id for a session, used to resume it.
@@ -114,3 +114,39 @@ export const LimitWindowStatus = Schema.Struct({
  * @category models
  */
 export type LimitWindowStatus = typeof LimitWindowStatus.Type
+
+const isDurationInput = (u: unknown): u is Duration.Input => {
+  try {
+    return Option.isSome(Duration.fromInput(u as Duration.Input))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A `Duration.Input` (`"30 seconds"`, millis, a `Duration`, ...), encoded as
+ * millis so it can cross a process boundary. Decodes millis or `Duration` text.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export const DurationInput = Schema.Union([Schema.String, Schema.Number]).pipe(
+  Schema.check(Schema.makeFilter(isDurationInput)),
+  Schema.decodeTo(Schema.declare(isDurationInput), {
+    decode: SchemaGetter.transform((spec) => Duration.fromInputUnsafe(spec as Duration.Input)),
+    encode: SchemaGetter.transform((input) => Duration.toMillis(Duration.fromInputUnsafe(input))),
+  }),
+)
+
+/**
+ * Environment overrides: `undefined` removes a variable. Encoded with `null` for `undefined`.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export const EnvOverrides = Schema.Record(Schema.String, Schema.NullOr(Schema.String)).pipe(
+  Schema.decodeTo(Schema.Record(Schema.String, Schema.UndefinedOr(Schema.String)), {
+    decode: SchemaGetter.transform((env) => Object.fromEntries(Object.entries(env).map(([k, v]) => [k, v ?? undefined]))),
+    encode: SchemaGetter.transform((env) => Object.fromEntries(Object.entries(env).map(([k, v]) => [k, v ?? null]))),
+  }),
+)

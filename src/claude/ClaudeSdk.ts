@@ -76,18 +76,23 @@ export type LifecycleState = typeof LifecycleState.Type
 
 /**
  * `command_lifecycle` frames (capability `msg_lifecycle_v1`). Not part of the
- * SDK's `SDKMessage` union, so they are decoded defensively with `decodeLifecycle`.
+ * SDK's `SDKMessage` union, so frames are checked against this with `decodeLifecycle`.
  *
  * @since 0.1.0
  * @category models
  */
-export interface CommandLifecycle {
-  readonly type: "command_lifecycle"
-  readonly command_uuid: string
-  readonly state: LifecycleState
-  readonly uuid?: string
-  readonly session_id?: string
-}
+export const CommandLifecycle = Schema.Struct({
+  type: Schema.Literal("command_lifecycle"),
+  command_uuid: Schema.String,
+  state: LifecycleState,
+  uuid: Schema.optionalKey(Schema.String),
+  session_id: Schema.optionalKey(Schema.String),
+})
+/**
+ * @since 0.1.0
+ * @category models
+ */
+export type CommandLifecycle = typeof CommandLifecycle.Type
 
 /**
  * Anything the CLI writes to us.
@@ -97,21 +102,17 @@ export interface CommandLifecycle {
  */
 export type Frame = SDKMessage | CommandLifecycle
 
-const isLifecycleState = Schema.is(LifecycleState)
+const isLifecycle = Schema.is(CommandLifecycle)
 
 /**
  * A frame as a `CommandLifecycle`, or undefined if it isn't one.
  *
  * @internal
  */
-export const decodeLifecycle = (frame: unknown): CommandLifecycle | undefined => {
-  if (typeof frame !== "object" || frame === null) return undefined
-  const f = frame as Record<string, unknown>
-  if (f.type !== "command_lifecycle" || typeof f.command_uuid !== "string" || !isLifecycleState(f.state)) {
-    return undefined
-  }
-  return frame as CommandLifecycle
-}
+export const decodeLifecycle = (frame: unknown): CommandLifecycle | undefined => (isLifecycle(frame) ? frame : undefined)
+
+/** Any JSON text, parsed; none if it isn't JSON. */
+const parseJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -257,20 +258,19 @@ export const transcriptPath = (cwd: string, sessionId: string, configDir?: strin
     `${sessionId}.jsonl`,
   )
 
+const decodeManifest = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Struct({ version: Schema.String })))
+
 /**
  * The CLI version bundled with the installed SDK (its `manifest.json`), or null.
  *
  * @internal
  */
-export const bundledVersion: Effect.Effect<string | null> = Effect.sync(() => {
-  try {
-    const entry = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"))
-    const manifest = JSON.parse(readFileSync(join(dirname(entry), "manifest.json"), "utf8")) as { version?: unknown }
-    return typeof manifest.version === "string" ? manifest.version : null
-  } catch {
-    return null
-  }
-})
+export const bundledVersion: Effect.Effect<string | null> = Effect.try(() =>
+  readFileSync(join(dirname(fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"))), "manifest.json"), "utf8"),
+).pipe(
+  Effect.map((text) => Option.getOrNull(Option.map(decodeManifest(text), (m) => m.version))),
+  Effect.orElseSucceed(() => null),
+)
 
 // ---------------------------------------------------------------------------
 // Process
@@ -409,6 +409,8 @@ export const restoreSystemFields = (
   })
 }
 
+const isEntry = Schema.is(Schema.Struct({ type: Schema.String }))
+
 /**
  * Entries of a transcript JSONL file; lines that are not JSON objects with a `type` are skipped.
  *
@@ -416,15 +418,9 @@ export const restoreSystemFields = (
  */
 export const parseTranscript = (text: string): Array<SessionStoreEntry> =>
   text.split("\n").flatMap((line) => {
-    if (line.trim() === "") return []
-    try {
-      const entry = JSON.parse(line) as unknown
-      return typeof entry === "object" && entry !== null && typeof (entry as { type?: unknown }).type === "string"
-        ? [entry as SessionStoreEntry]
-        : []
-    } catch {
-      return [] // a line cut off by a crash mid-write
-    }
+    // Blank, or cut off by a crash mid-write.
+    const entry = Option.getOrUndefined(parseJson(line))
+    return isEntry(entry) ? [entry as SessionStoreEntry] : []
   })
 
 // ---------------------------------------------------------------------------

@@ -53,7 +53,7 @@ import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { closeSync, existsSync, openSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
-import { Agent, type AgentSession, type Hooks, type RunOptions } from "../Agent.ts"
+import { Agent, type AgentSession, type Hooks, type RunOptions, settingsOf } from "../Agent.ts"
 import { AgentError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnSucceeded } from "../AgentEvent.ts"
 import { type MessageId, SessionId, type TurnId } from "../Domain.ts"
@@ -65,7 +65,6 @@ import {
   defaultDir,
   ensureDir,
   eventsPath,
-  fromRunOptions,
   HostSpec,
   type Manifest,
   manifestPath,
@@ -802,7 +801,7 @@ export const layer = (
             ...(options.replay !== undefined && { replay: options.replay }),
             ...(options.replayKnownSessions !== undefined && { replayKnownSessions: options.replayKnownSessions }),
             ...(options.replayHookLog !== undefined && { replayHookLog: options.replayHookLog }),
-            run: fromRunOptions(run),
+            run: settingsOf(run),
             dir,
             ...(options.maxEvents !== undefined && { maxEvents: options.maxEvents }),
             ...(options.orphanTimeout !== undefined && { orphanTimeout: Duration.toMillis(Duration.fromInputUnsafe(options.orphanTimeout)) }),

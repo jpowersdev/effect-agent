@@ -312,15 +312,24 @@ const WireMessage = Schema.Struct({
   error: Schema.optionalKey(Schema.NullOr(RpcErrorBody)),
   emittedAtMs: Schema.optionalKey(Schema.Number),
 })
+const fromWire = ({ error, ...rest }: typeof WireMessage.Type): P.Message =>
+  error === null || error === undefined ? rest : { ...rest, error }
 const decodeWireLine = Schema.decodeUnknownOption(Schema.fromJsonString(WireMessage))
+const decodeWire = Schema.decodeUnknownOption(WireMessage)
 
 /**
  * A line of app-server output as a `Message`; none for anything that isn't a JSON-RPC object.
  *
  * @internal
  */
-export const decodeMessage = (line: string): Option.Option<P.Message> =>
-  Option.map(decodeWireLine(line), ({ error, ...rest }): P.Message => (error === null || error === undefined ? rest : { ...rest, error }))
+export const decodeMessage = (line: string): Option.Option<P.Message> => Option.map(decodeWireLine(line), fromWire)
+
+/**
+ * An already-parsed frame as a `Message`; none for anything that isn't a JSON-RPC object.
+ *
+ * @internal
+ */
+export const decodeMessageValue = (value: unknown): Option.Option<P.Message> => Option.map(decodeWire(value), fromWire)
 
 /** JSON-RPC "internal error": our handler for a server request failed unexpectedly. */
 const INTERNAL_ERROR = -32603

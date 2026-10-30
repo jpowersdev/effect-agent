@@ -38,14 +38,14 @@ export interface Message {
 
 export interface Notification {
   readonly method: string
-  readonly params?: any
+  readonly params?: unknown
   readonly emittedAtMs?: number
 }
 
 export interface ServerRequest {
   readonly id: RequestId
   readonly method: string
-  readonly params?: any
+  readonly params?: unknown
 }
 
 /** A notification or a server-to-client request, in arrival order. */
