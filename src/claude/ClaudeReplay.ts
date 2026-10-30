@@ -17,10 +17,12 @@
  *
  * Recorded `hook` lines (SDK hook calls) are replayed by calling the
  * session's own `Options.hooks` callbacks for that event, with the recorded
- * input, just before the `in` frame at the recorded position; frames after it
- * wait for the callbacks, as the CLI would. What they return is passed to
- * `ReplayOptions.onHook` (the model's reply can't change in a replay).
- * Client calls (`send`, `interrupt`, `endInput`) are taken one at a time.
+ * input, just before the `in` frame at the recorded position. Frames after it
+ * wait for the callbacks, as the CLI would.
+ *
+ * What the callbacks return is passed to `ReplayOptions.onHook`; the model's
+ * reply can't change in a replay. Client calls (`send`, `interrupt`,
+ * `endInput`) are taken one at a time.
  *
  * `status` and `history` lines are served apart from the session lines:
  * `status` answers with each recorded status in turn (repeating the last),

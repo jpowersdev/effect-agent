@@ -1,43 +1,67 @@
 ---
 title: "Getting started"
-description: "Install effect-agent, run a first turn, and provide platform services."
+description: "Install effect-agent and run a first turn."
 ---
 
-> Status: early development (Effect 4.1). The API will change.
+:::caution
+Early development, on Effect 4.1. The API will change.
+:::
+
+## Install
 
 ```sh
 pnpm add @jpowersdev/effect-agent effect
-pnpm add @effect/platform-node   # or @effect/platform-bun; see Platform below
+pnpm add @effect/platform-node   # or @effect/platform-bun
 ```
 
+## A first turn
+
 ```ts
+import { NodeRuntime } from "@effect/platform-node"
 import { Effect, Layer, Stream } from "effect"
 import { Agent } from "@jpowersdev/effect-agent"
 import { ClaudeAgent, ClaudeSdk } from "@jpowersdev/effect-agent/claude"
 
-const program = Effect.scoped(
-  Effect.gen(function* () {
-    const agent = yield* Agent
-    const session = yield* agent.open({ cwd, model, appendSystemPrompt, spendCapUsd: 5 })
-    const events = yield* session.subscribe // subscribe before sending so nothing is missed
-    yield* events.pipe(Stream.runForEach(persist), Effect.forkScoped)
+const program = Effect.gen(function* () {
+  const agent = yield* Agent
+  const session = yield* agent.open({ cwd: process.cwd(), spendCapUsd: 5 })
 
-    const result = yield* session.turn("Fix the failing test")
-    //    ^ fails with UsageLimited | AuthFailed | SpendCapReached | Stalled | ...
-  }),
-).pipe(Effect.provide(ClaudeAgent.layer().pipe(Layer.provide(ClaudeSdk.layer()))))
+  // Subscribe before sending, so no event is missed
+  const events = yield* session.subscribe
+  yield* events.pipe(Stream.runForEach(Effect.logInfo), Effect.forkScoped)
+
+  const result = yield* session.turn("Fix the failing test")
+  yield* Effect.log(result.finalText)
+})
+
+const Claude = ClaudeAgent.layer().pipe(Layer.provide(ClaudeSdk.layer()))
+
+// Closing the scope ends the session and stops every process it started
+program.pipe(Effect.scoped, Effect.provide(Claude), NodeRuntime.runMain)
 ```
 
-Closing the scope ends the session and stops the agent process and everything it started.
+## Platform services
 
+`effect` is a peer dependency, and the library imports no platform package. Two parts
+need services from context:
 
+- Codex starts `codex app-server` with `ChildProcessSpawner`.
+- A session host talks to its parent over `Stdio`.
 
-## Platform
+Provide your runtime's layer:
 
-The library imports no platform package; `effect` is a peer dependency. Where Effect has a platform service, the library takes it from context: Codex spawns its app-server through `ChildProcessSpawner`, and a session host reads its spec and reports readiness through `Stdio`. Provide `NodeServices.layer` from `@effect/platform-node`, or `BunServices.layer` from `@effect/platform-bun`. Everything else uses Node's built-in modules, which Bun implements; Effect's own Bun platform is built on the same modules. That covers files, the Claude SDK's process, the leftover-process sweep, and unix sockets through `@effect/platform-node-shared`. The test suite runs hosts on both runtimes.
+```ts
+import { NodeServices } from "@effect/platform-node"
+// Bun: import { BunServices } from "@effect/platform-bun"
+
+program.pipe(Effect.provide(NodeServices.layer))
+```
+
+Everything else uses Node's built-in modules, which Bun implements too. The test suite
+runs session hosts on both.
 
 ## Next
 
-- [Providers](../guides/providers/): what each provider supports.
-- [Sessions](../guides/sessions/): sending, steering and interrupting.
-- [API reference](../api/core/agent/): every export, generated from the source.
+- [Providers](../guides/providers/): what Claude Code and Codex each support.
+- [Sessions](../guides/sessions/): send, steer, interrupt.
+- [API reference](../api/core/): every export, generated from the source.

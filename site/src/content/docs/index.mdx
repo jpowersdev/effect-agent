@@ -1,9 +1,9 @@
 ---
 title: effect-agent
-description: Effect-native control of coding-agent CLIs (Claude Code, Codex).
+description: Effect-native control of Claude Code and Codex.
 template: splash
 hero:
-  tagline: "Effect-native control of coding-agent CLIs (Claude Code, Codex): live sessions with steering, resumable sessions, one normalized event stream, typed endings, and account status."
+  tagline: Effect-native control of Claude Code and Codex
   image:
     file: ../../assets/logo.svg
   actions:
@@ -11,23 +11,87 @@ hero:
       link: getting-started/
       icon: right-arrow
     - text: API reference
-      link: api/core/agent/
+      link: api/core/
       variant: minimal
 ---
 
-import { Card, CardGrid } from "@astrojs/starlight/components"
+import { Card, CardGrid, LinkButton } from "@astrojs/starlight/components"
+
+```ts
+const program = Effect.gen(function* () {
+  const agent = yield* Agent
+  const session = yield* agent.open({ cwd: process.cwd(), spendCapUsd: 5 })
+
+  // Print each command the agent runs
+  const events = yield* session.subscribe
+  yield* events.pipe(
+    Stream.runForEach((event) =>
+      event._tag === "ToolCall" ? Console.log(`$ ${event.summary}`) : Effect.void,
+    ),
+    Effect.forkScoped,
+  )
+
+  const result = yield* session.turn("Fix the failing test")
+  // $ pnpm test
+  // $ rg -n "parseRange" src
+  // $ pnpm test test/range.test.ts
+
+  yield* Console.log(result.finalText)
+  // Fixed an off-by-one in parseRange. All 42 tests pass.
+}).pipe(
+  Effect.scoped, // stops the agent and everything it started
+  Effect.catchTags({
+    UsageLimited: (e) => Console.log(`Hit the ${e.window} usage limit`),
+    SpendCapReached: (e) => Console.log(`Stopped at $${e.spentUsd}`),
+  }),
+)
+```
 
 <CardGrid>
-  <Card title="One API, two agents" icon="puzzle">
-    Claude Code and Codex behind the same `Agent` service. Swap the provider layer; the program stays the same.
+  <Card title="Claude Code and Codex" icon="puzzle">
+    Both sit behind one `Agent` service. Switching providers is a layer change.
+
+    ```ts
+    const AgentLive = ClaudeAgent.layer().pipe(
+      Layer.provide(ClaudeSdk.layer()),
+    )
+    // or CodexAgent.layer() + CodexAppServer.layer()
+    ```
+
+    <LinkButton href="guides/providers/" variant="minimal" icon="right-arrow">Learn more</LinkButton>
   </Card>
-  <Card title="Steer a running turn" icon="right-caret">
-    Send into the turn that's running, queue after it, or interrupt it. The session stays usable.
+  <Card title="Steering" icon="right-caret">
+    `steer` sends into the running turn. `interrupt` stops the turn and keeps the session.
+
+    ```ts
+    yield* session.send("Add a --json flag")
+    yield* session.steer("Call it --format")
+    yield* session.interrupt
+    ```
+
+    <LinkButton href="guides/sessions/#add-to-a-turn-while-it-runs" variant="minimal" icon="right-arrow">Learn more</LinkButton>
   </Card>
   <Card title="Typed endings" icon="warning">
-    A turn fails with `UsageLimited`, `SpendCapReached`, `Stalled`, `ProcessKilled`, and the rest, as Schema tagged errors.
+    A failed turn is a tagged error you can match on, and a value you can store.
+
+    ```ts
+    session.turn(prompt).pipe(
+      Effect.catchTag("Stalled", () =>
+        session.turn("Still there?")),
+    )
+    ```
+
+    <LinkButton href="guides/events-and-endings/" variant="minimal" icon="right-arrow">Learn more</LinkButton>
   </Card>
-  <Card title="Sessions that survive restarts" icon="random">
-    Run each session in its own host process, then reattach from any process and catch up on what you missed.
+  <Card title="Reattach" icon="random">
+    Sessions can run in their own process. After a restart, attach by id and catch up.
+
+    ```ts
+    // After a restart
+    const session = yield* hosts.attach(id)
+    yield* session.awaitMessage(messageId)
+    ```
+
+    <LinkButton href="guides/reattach/#pick-it-up-again" variant="minimal" icon="right-arrow">Learn more</LinkButton>
   </Card>
 </CardGrid>
