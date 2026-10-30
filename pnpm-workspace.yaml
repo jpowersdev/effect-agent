@@ -1,4 +1,6 @@
 packages:
+  # The library itself (changesets only versions packages listed here), and the docs site.
+  - .
   - site
 
 minimumReleaseAgeExclude:
