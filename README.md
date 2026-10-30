@@ -8,6 +8,10 @@
   Effect-native control of coding-agent CLIs (Claude Code, Codex): live sessions with steering, resumable sessions, one normalized event stream, typed endings, and account status.
 </p>
 
+<p align="center">
+  <a href="https://github.com/jpowersdev/effect-agent/actions/workflows/ci.yml"><img src="https://github.com/jpowersdev/effect-agent/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
+
 > Status: early development (Effect 4.1). The API will change.
 
 ```sh
