@@ -1,20 +1,14 @@
 /**
  * Control over how agent processes start. Optional: without a `Launcher`,
  * commands run as-is. Provide one to wrap each agent process, e.g. in a
- * systemd scope so stopping the run also stops whatever its commands left
- * running:
- *
- *   Launcher.layer(({ provider }) =>
- *     Effect.succeed((cmd) => ({
- *       command: "systemd-run",
- *       args: ["--user", "--scope", "--quiet", `--unit=agent-${provider}-${crypto.randomUUID()}.scope`, "--", cmd.command, ...cmd.args],
- *     })),
- *   )
+ * systemd scope (`examples/SystemdLauncher.ts` in the repository), so that
+ * stopping the session also stops whatever its commands left running, under
+ * resource limits.
  *
  * When the session's Scope closes, the agent process and everything it
- * started are stopped (see `ProcessTree`). Use a cgroup launcher like the one
- * above for a guarantee: it also catches commands that cleared their
- * environment, and works on platforms without /proc.
+ * started are stopped (see `ProcessTree`). A cgroup launcher is the stronger
+ * guarantee: it also catches commands that cleared their environment, and
+ * works on platforms without /proc.
  */
 import { Context, Effect, Layer, type Scope } from "effect"
 import type { AgentError } from "./AgentError.ts"
