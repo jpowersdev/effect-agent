@@ -6,7 +6,7 @@
  * answered.
  */
 import { describe, expect, it } from "@effect/vitest"
-import { Deferred, Effect, Exit, Fiber, Layer, Option, Queue, Scope } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Option, Queue, Scope, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { Agent, type AgentSession, SessionClosed } from "../src/index.ts"
 import { CodexAgent, CodexAppServer } from "../src/codex/index.ts"
@@ -89,7 +89,14 @@ const scripted = (options: { readonly holdStop?: boolean } = {}) => Effect.gen(f
       Layer.succeed(CodexAppServer.CodexAppServer, CodexAppServer.CodexAppServer.of({ connect: () => Effect.succeed(connection), version: Effect.succeed("0.162.1") })),
     ),
   )
-  return { next, idle, notify, started, completed, landed, layer, stops: () => stops, releaseStop: Deferred.succeed(stopReleased, undefined) }
+  /** app-server dies on its own, in the real transport's order: pending requests fail, output ends, then the exit. */
+  const die = (exitCode: number) =>
+    rpc.failPending(`codex app-server exited (code ${exitCode})`).pipe(
+      Effect.andThen(rpc.endIncoming),
+      Effect.andThen(Deferred.succeed(rpc.exitSignal, { exitCode, signal: null })),
+      Effect.asVoid,
+    )
+  return { next, idle, notify, started, completed, landed, die, layer, stops: () => stops, releaseStop: Deferred.succeed(stopReleased, undefined) }
 })
 
 type Server = Effect.Success<ReturnType<typeof scripted>>
@@ -207,6 +214,26 @@ describe("CodexAgent session races", () => {
       yield* TestClock.adjust("2 seconds")
       // Closed by its scope: a clean end, so `end` succeeds.
       expect(yield* Fiber.join(result)).toEqual(Option.some(Exit.void))
+    }).pipe(Effect.scoped),
+  )
+
+  it.effect("app-server dying as a turn completes ends the session with that death, not cleanly", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted()
+      const session = yield* open(server)
+      const events = yield* session.subscribe
+      const stream = yield* events.pipe(Stream.runDrain, Effect.exit, Effect.forkScoped)
+      const { turn } = yield* startTurn(server, session, "work", "t-1")
+      const ending = yield* session.end.pipe(Effect.exit, Effect.forkScoped)
+      yield* Effect.yieldNow
+      // Interrupted without being asked: the session checks whether app-server is exiting...
+      yield* server.completed("t-1", "interrupted")
+      // ...and it is.
+      yield* server.die(9)
+      expect(Option.getOrUndefined(Exit.findErrorOption(yield* Fiber.join(turn)))).toMatchObject({ _tag: "ProcessKilled", exitCode: 9 })
+      expect(Exit.isFailure(yield* Fiber.join(ending))).toBe(true)
+      expect(Exit.isFailure(yield* Fiber.join(stream))).toBe(true)
+      expect(Exit.isFailure(yield* Effect.exit(session.end))).toBe(true)
     }).pipe(Effect.scoped),
   )
 

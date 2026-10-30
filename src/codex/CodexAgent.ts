@@ -820,6 +820,9 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
             ? Option.getOrNull(yield* timed("account/rateLimits/read", conn.request("account/rateLimits/read", undefined)).pipe(Effect.option))
             : null
           const processExit = needs.processExit ? Option.getOrNull(yield* conn.exit.pipe(Effect.timeoutOption(Duration.seconds(1)))) : null
+          // app-server is gone: say so before the turn ends and wakes anyone (an `end` waiting
+          // for this turn must see a death, not an idle session), and before the next one starts.
+          if (processExit !== null) dead ??= deathOf(processExit)
           const done = completeTurn({ cap }, state, { seq: run.seq, turn: c.turn, raw: c.raw, price, rateLimits, processExit })
           state = done.state
           yield* runtime.emitAll(done.events)
@@ -840,15 +843,18 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
       for (const c of result.commands) yield* command(c)
     })
 
-  /** After app-server's output ends: either we closed it, or it died. */
-  const onTransportEnd = Effect.gen(function* () {
-    const exit: ProcessExit = yield* conn.exit
-    if (closed) return yield* runtime.end(null)
-    dead = new ProcessKilled({
+  const deathOf = (exit: ProcessExit) =>
+    new ProcessKilled({
       message: `codex app-server exited (${exit.signal ?? `code ${exit.exitCode}`})`,
       signal: exit.signal,
       exitCode: exit.exitCode,
     })
+
+  /** After app-server's output ends: either we closed it, or it died. */
+  const onTransportEnd = Effect.gen(function* () {
+    const exit: ProcessExit = yield* conn.exit
+    if (closed) return yield* runtime.end(null)
+    dead ??= deathOf(exit)
     const ended = stepExit(state, dead, exit, price)
     state = ended.state
     yield* runtime.emitAll(ended.events)
