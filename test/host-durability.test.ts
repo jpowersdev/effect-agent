@@ -550,6 +550,19 @@ describe("host events file: resumed sessions", () => {
     raw: null,
   })
 
+  it.live("AwaitTurn on a turn too old to remember fails at once instead of waiting", () =>
+    Effect.gen(function* () {
+      // In memory only, with a ring of 2: the host keeps 10 000 turn endings either way.
+      const log = yield* Host.makeLog(2, "test")
+      yield* log.append(started(false))
+      for (let i = 0; i <= 10_000; i++) for (const event of turn(`t${i}`)) yield* log.append(event)
+      // The session is still running, so waiting on t0 would never end.
+      const old = yield* log.awaitTurn("t0").pipe(Effect.flip, Effect.timeoutOption("1 second"))
+      expect(Option.getOrUndefined(old)).toMatchObject({ _tag: "AgentError", message: expect.stringMatching(/settled too long ago/) })
+      expect(yield* log.awaitTurn("t10000")).toMatchObject({ _tag: "Succeeded", finalText: "t10000" })
+    }),
+  )
+
   it.live("a resumed session's host numbers on from the file an earlier host left; a new one starts it afresh", () =>
     Effect.gen(function* () {
       const path = HostSpec.eventsPath(root, "resumed")

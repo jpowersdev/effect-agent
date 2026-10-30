@@ -148,14 +148,15 @@ export const isNestingMarker: (name: string) => boolean = Env.isNestingMarker
 
 /**
  * The env overrides for app-server (applied over the host env by the
- * spawner): nesting markers removed, then `RunOptions.env`.
+ * spawner): nesting markers and Claude Code's credentials removed (Codex
+ * would pass them to every command it runs), then `RunOptions.env`.
  *
  * @internal
  */
-export const sessionEnv: (
+export const sessionEnv = (
   host: Readonly<Record<string, string | undefined>>,
   overrides?: Readonly<Record<string, string | undefined>>,
-) => Record<string, string | undefined> = Env.overrides
+): Record<string, string | undefined> => Env.overrides(host, overrides, Env.claudeCredentials)
 
 /**
  * app-server's answers for a thread it has no record of.
@@ -602,7 +603,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
     }
   }
 
-  const conn: Connection = yield* server.connect({ cwd: options.cwd, env: Env.overrides(Env.host(), options.env) })
+  const conn: Connection = yield* server.connect({ cwd: options.cwd, env: sessionEnv(Env.host(), options.env) })
   const version = parseUserAgentVersion(conn.initialize.userAgent)
   // A failed open must not leave app-server running until the caller's scope closes.
   const closeOnError = <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.tapError(self, () => conn.close)
@@ -943,7 +944,7 @@ export const readStatus = (
 ): Effect.Effect<AccountStatus, AgentError> =>
   Effect.scoped(
     Effect.gen(function* () {
-      const conn = yield* server.connect({ cwd: neutralCwd(), env: Env.overrides(Env.host(), env) })
+      const conn = yield* server.connect({ cwd: neutralCwd(), env: sessionEnv(Env.host(), env) })
       const account = yield* timed("account/read", conn.request("account/read", {})).pipe(
         Effect.mapError(toAgentError("account/read failed")),
       )
@@ -973,7 +974,7 @@ export const readHistory = (
 ): Effect.Effect<ReadonlyArray<AgentEvent>, SessionNotFound | AgentError> =>
   Effect.scoped(
     Effect.gen(function* () {
-      const conn = yield* server.connect({ cwd: options.cwd, env: Env.overrides(Env.host()) })
+      const conn = yield* server.connect({ cwd: options.cwd, env: sessionEnv(Env.host()) })
       const turns: Array<P.Turn> = []
       let cursor: string | null = null
       for (let page = 0; page < 10_000; page++) {

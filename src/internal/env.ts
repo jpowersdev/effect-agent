@@ -8,7 +8,7 @@
 
 /**
  * Variables a parent Claude Code or Codex session sets. Credentials such as
- * `CLAUDE_CODE_OAUTH_TOKEN` are not markers: they pass through.
+ * `CLAUDE_CODE_OAUTH_TOKEN` are not markers (see `claudeCredentials`).
  *
  * @internal
  */
@@ -43,11 +43,25 @@ export type Env = Readonly<Record<string, string | undefined>>
  *
  * @internal
  */
-export const overrides = (host: Env, overrides: Env = {}): Record<string, string | undefined> => {
+export const overrides = (
+  host: Env,
+  overrides: Env = {},
+  /** Also removed (unless `overrides` sets them), e.g. another provider's credentials. */
+  remove: ReadonlyArray<string> = [],
+): Record<string, string | undefined> => {
   const env: Record<string, string | undefined> = {}
-  for (const name of Object.keys(host)) if (isNestingMarker(name)) env[name] = undefined
+  for (const name of Object.keys(host)) if (isNestingMarker(name) || remove.includes(name)) env[name] = undefined
   return { ...env, ...overrides }
 }
+
+/**
+ * Claude Code's credentials in the environment. Claude Code signs in with
+ * them; any other agent has no use for them, and would hand them to every
+ * command it runs (neither agent filters a command's environment).
+ *
+ * @internal
+ */
+export const claudeCredentials: ReadonlyArray<string> = ["CLAUDE_CODE_OAUTH_TOKEN"]
 
 /**
  * The whole environment (for spawners that replace it): `host` with the
