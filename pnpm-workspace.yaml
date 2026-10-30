@@ -3,3 +3,6 @@ minimumReleaseAgeExclude:
   - '@effect/platform-node-shared@4.1.0'
   - '@effect/platform-node@4.1.0'
   - '@effect/vitest@4.1.0'
+
+allowBuilds:
+  esbuild: false
