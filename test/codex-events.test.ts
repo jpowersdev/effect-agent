@@ -386,6 +386,16 @@ describe("accountStatus", () => {
 })
 
 describe("historyEvents", () => {
+  it("skips user-message content that isn't a text block, null included", () => {
+    const turn: P.Turn = {
+      id: "t-1",
+      items: [{ type: "userMessage", id: "u-1", clientId: null, content: [null, 7, { type: "image" }, { type: "text", text: "kept" }] }],
+      status: "inProgress",
+      error: null,
+    }
+    expect(CodexEvents.historyEvents([turn])).toMatchObject([{ _tag: "TurnStarted" }, { _tag: "UserMessage", text: "kept" }])
+  })
+
   const user = (id: string, text: string, clientId: string | null = null): P.ThreadItem => ({
     type: "userMessage",
     id,

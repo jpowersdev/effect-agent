@@ -370,19 +370,27 @@ export const make = (options: Options = {}) =>
     const connect = (connectOptions: ConnectOptions): Effect.Effect<Connection, AgentError, Scope.Scope> =>
       Effect.gen(function* () {
         // A connection that starts while another is recording isn't recorded.
-        const recorder =
-          options.record !== undefined && !recording
-            ? yield* Effect.acquireRelease(
+        // Check and claim the recording in one step (another connection may be starting too);
+        // only the connection that claimed it records, and gives it up when it closes.
+        const recordPath = options.record
+        const owns =
+          recordPath === undefined
+            ? false
+            : yield* Effect.acquireRelease(
                 Effect.sync(() => {
+                  if (recording) return false
                   recording = true
+                  return true
                 }),
-                () =>
+                (claimed) =>
                   Effect.sync(() => {
-                    recording = false
+                    if (claimed) recording = false
                   }),
-              ).pipe(
-                Effect.andThen(Recorder.make(options.record, { truncate: true })),
-                Effect.mapError((cause) => agentError(`cannot write recording ${options.record}`, cause)),
+              )
+        const recorder =
+          owns && recordPath !== undefined
+            ? yield* Recorder.make(recordPath, { truncate: true }).pipe(
+                Effect.mapError((cause) => agentError(`cannot write recording ${recordPath}`, cause)),
               )
             : Recorder.none
         const record = (dir: "in" | "out", msg: unknown) => recorder.record({ dir, msg })

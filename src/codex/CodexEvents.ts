@@ -540,7 +540,7 @@ const userText = (content: ReadonlyArray<unknown>): string =>
   content
     .flatMap((c) => {
       const text = textOf(c)
-      return (c as { type?: unknown }).type === "text" && text !== undefined ? [text] : []
+      return typeof c === "object" && c !== null && (c as { type?: unknown }).type === "text" && text !== undefined ? [text] : []
     })
     .join("\n")
 
