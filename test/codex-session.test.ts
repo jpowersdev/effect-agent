@@ -27,9 +27,13 @@ interface Pending {
  * `holdStop`, stopping it (close or kill) waits for `releaseStop`, as a
  * process slow to die would.
  */
-const scripted = (options: { readonly holdStop?: boolean } = {}) => Effect.gen(function* () {
+const scripted = (options: { readonly holdStop?: boolean; readonly holdCleanup?: boolean } = {}) => Effect.gen(function* () {
   const stopReleased = yield* Deferred.make<void>()
   if (options.holdStop !== true) yield* Deferred.succeed(stopReleased, undefined)
+  // With `holdCleanup`, stopping signals the exit and then waits, as the real transport's
+  // `close` still sweeps processes and flushes the recording after app-server has exited.
+  const cleanupReleased = yield* Deferred.make<void>()
+  if (options.holdCleanup !== true) yield* Deferred.succeed(cleanupReleased, undefined)
   const requests = yield* Queue.unbounded<Pending>()
   let core: Effect.Success<ReturnType<typeof CodexAppServer.makeRpcCore>> | undefined
   const write = (msg: P.Message) =>
@@ -52,6 +56,7 @@ const scripted = (options: { readonly holdStop?: boolean } = {}) => Effect.gen(f
         Effect.andThen(rpc.failPending("closed")),
         Effect.andThen(rpc.endIncoming),
         Effect.andThen(Deferred.succeed(rpc.exitSignal, { exitCode: null, signal })),
+        Effect.andThen(Deferred.await(cleanupReleased)),
         Effect.asVoid,
       )
     })
@@ -96,7 +101,7 @@ const scripted = (options: { readonly holdStop?: boolean } = {}) => Effect.gen(f
       Effect.andThen(Deferred.succeed(rpc.exitSignal, { exitCode, signal: null })),
       Effect.asVoid,
     )
-  return { next, idle, notify, started, completed, landed, die, layer, stops: () => stops, releaseStop: Deferred.succeed(stopReleased, undefined) }
+  return { next, idle, notify, started, completed, landed, die, layer, stops: () => stops, releaseStop: Deferred.succeed(stopReleased, undefined), releaseCleanup: Deferred.succeed(cleanupReleased, undefined) }
 })
 
 type Server = Effect.Success<ReturnType<typeof scripted>>
@@ -502,6 +507,44 @@ describe("CodexAgent session lifecycle", () => {
       expect(yield* Fiber.join(second)).toEqual(Exit.void)
       expect(yield* Fiber.join(stream)).toEqual(Exit.void)
       expect(server.stops()).toBe(1)
+    }).pipe(Effect.scoped),
+  )
+
+  for (const call of ["steer", "interrupt"] as const) {
+    it.effect(`closing the scope releases a ${call} waiting for app-server's answer`, () =>
+      Effect.gen(function* () {
+        const server = yield* scripted()
+        const sessionScope = yield* Scope.make()
+        const session = yield* open(server).pipe(Scope.provide(sessionScope))
+        yield* startTurn(server, session, "work", "t-1").pipe(Scope.provide(sessionScope))
+        // The caller outlives the session's scope; app-server never answers.
+        const waiting = yield* (call === "steer" ? Effect.asVoid(session.steer("also")) : session.interrupt).pipe(
+          Effect.exit,
+          Effect.forkScoped,
+        )
+        yield* server.next(call === "steer" ? "turn/steer" : "turn/interrupt")
+        yield* Scope.close(sessionScope, Exit.void)
+        const result = yield* Fiber.join(waiting).pipe(Effect.timeoutOption("1 second"), Effect.forkChild)
+        yield* TestClock.adjust("2 seconds")
+        const exit = yield* Fiber.join(result)
+        expect(Option.isSome(exit) && Option.getOrUndefined(Exit.findErrorOption(exit.value))).toBeInstanceOf(SessionClosed)
+      }).pipe(Effect.scoped),
+    )
+  }
+
+  it.effect("end returns only once the connection's close has finished, not when app-server exits", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted({ holdCleanup: true })
+      const session = yield* open(server)
+      const first = yield* session.end.pipe(Effect.exit, Effect.forkScoped)
+      const second = yield* session.end.pipe(Effect.exit, Effect.forkScoped)
+      // app-server has exited, but the close is still cleaning up.
+      for (let i = 0; i < 10; i++) yield* Effect.yieldNow
+      expect(first.pollUnsafe()).toBeUndefined()
+      expect(second.pollUnsafe()).toBeUndefined()
+      yield* server.releaseCleanup
+      expect(yield* Fiber.join(first)).toEqual(Exit.void)
+      expect(yield* Fiber.join(second)).toEqual(Exit.void)
     }).pipe(Effect.scoped),
   )
 })

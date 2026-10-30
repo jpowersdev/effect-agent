@@ -642,6 +642,8 @@ type Input =
       readonly seq: number
       readonly answer: Answer<P.TurnSteerResponse>
       readonly reply: Deferred.Deferred<SubmitReply>
+      /** Its entry in `outstanding`. */
+      readonly token: object
     }
   | { readonly _tag: "Interrupt"; readonly reply: Deferred.Deferred<TurnId | null, SessionClosed | AgentError> }
   | {
@@ -649,6 +651,8 @@ type Input =
       readonly turnId: TurnId
       readonly answer: Answer<P.ClientRequests["turn/interrupt"]["result"]>
       readonly reply: Deferred.Deferred<TurnId | null, SessionClosed | AgentError>
+      /** Its entry in `outstanding`. */
+      readonly token: object
     }
   | { readonly _tag: "Stall"; readonly expiry: Watchdog.Expiry; readonly reply: Deferred.Deferred<boolean> }
   | { readonly _tag: "Kill" }
@@ -744,6 +748,12 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
   let completing: { readonly seq: number; readonly turn: P.Turn; readonly raw: P.Incoming } | null = null
   const held: Array<P.Incoming> = []
   let life: Life = { _tag: "Open" }
+  /**
+   * Callers whose reply went with a request (steer, interrupt), until its
+   * answer comes back. If the session's scope closes first, that request's
+   * fiber is interrupted and never answers, so the finalizer settles these.
+   */
+  const outstanding = new Map<object, (error: SessionClosed) => void>()
 
   const inbox = yield* Queue.unbounded<Input>()
   const tell = (input: Input) => Effect.asVoid(Queue.offer(inbox, input))
@@ -980,9 +990,12 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
             expectedTurnId: run.turnId,
             clientUserMessageId: input.messageId,
           })
-          return yield* launch(steering, (answer): Input => ({ ...input, _tag: "Steered", seq: run.seq, answer }))
+          const token = {}
+          outstanding.set(token, (error) => Deferred.doneUnsafe(input.reply, Exit.succeed({ _tag: "Unavailable", error })))
+          return yield* launch(steering, (answer): Input => ({ ...input, _tag: "Steered", seq: run.seq, answer, token }))
         }
         case "Steered": {
+          outstanding.delete(input.token)
           const { answer, reply } = input
           if (Option.isSome(answer) && Exit.isSuccess(answer.value)) {
             return Deferred.doneUnsafe(reply, Exit.succeed({ _tag: "Landed", turnId: TurnId.make(answer.value.value.turnId) }))
@@ -1009,14 +1022,18 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
           if (run.interruptRequested) return Deferred.doneUnsafe(input.reply, Exit.succeed(run.turnId))
           state = markInterrupt(state, run.seq)
           const turnId = run.turnId
+          const token = {}
+          outstanding.set(token, (error) => Deferred.doneUnsafe(input.reply, Exit.fail(error)))
           return yield* launch(send("turn/interrupt", { threadId, turnId }), (answer): Input => ({
             _tag: "Interrupted",
             turnId,
             answer,
             reply: input.reply,
+            token,
           }))
         }
         case "Interrupted": {
+          outstanding.delete(input.token)
           const { answer, reply } = input
           if (Option.isNone(answer)) {
             return Deferred.doneUnsafe(reply, Exit.fail(agentError(`turn/interrupt: no answer within ${Duration.format(Session.requestTimeout)}`)))
@@ -1056,7 +1073,9 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
           if (life._tag === "Closing") return yield* finish(null)
           return
         case "TransportEnded": {
-          if (life._tag === "Closing") return yield* finish(null)
+          // Our own close: app-server has exited, but the close still cleans up (stops what
+          // it left running, flushes the recording). `Closed` ends the session once it has.
+          if (life._tag === "Closing") return
           // A turn completing as app-server goes: it ends with what is known.
           if (completing !== null) yield* complete(null, input.exit)
           const death = (dead ??= deathOf(input.exit))
@@ -1097,8 +1116,14 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
       for (let next = Queue.takeUnsafe(inbox); next !== undefined && Exit.isSuccess(next); next = Queue.takeUnsafe(inbox)) {
         left.push(next.value)
       }
+      const settleOutstanding = () => {
+        const error = unavailable(true) ?? sessionClosed("session closed")
+        for (const settle of outstanding.values()) settle(error)
+        outstanding.clear()
+      }
       if (life._tag === "Ended") {
         for (const input of left) reject(input)
+        settleOutstanding()
         return Effect.void
       }
       const failure =
@@ -1107,7 +1132,14 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
           : null
       const waiting = failure ?? sessionClosed("session closed")
       failWaiting(waiting)
-      return finish(failure, failure, waiting).pipe(Effect.andThen(Effect.sync(() => left.forEach(reject))))
+      return finish(failure, failure, waiting).pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            left.forEach(reject)
+            settleOutstanding()
+          }),
+        ),
+      )
     }),
   )
 
