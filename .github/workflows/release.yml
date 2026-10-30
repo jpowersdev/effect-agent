@@ -32,6 +32,8 @@ jobs:
       # whose prepack builds), then tag and create the GitHub release.
       - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         with:
+          # changesets/action v2 publishes only with a publish script.
+          publish-script: pnpm changeset publish
           # A token of yours, so CI runs on the release branch; the default
           # token works too, but its PR gets no checks.
           github-token: ${{ secrets.CHANGESET_GITHUB_TOKEN || github.token }}
