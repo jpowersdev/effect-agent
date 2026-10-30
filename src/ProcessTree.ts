@@ -118,22 +118,24 @@ export const kill = (
       for (const p of pids) alive = signal(p, sig) || alive
       return alive
     }
-    /**
-     * Sweep /proc for marked processes not seen yet, and SIGTERM those the
-     * group signal didn't reach. Whether any is alive.
-     */
-    const terminateNew = () => {
+    /** Sweep /proc for marked processes not seen yet, and SIGTERM them (but not `skip`). Whether any is alive. */
+    const terminateNew = (skip: ReadonlySet<number> = new Set()) => {
       const found = markedProcesses(marker).filter((p) => !known.has(p))
       for (const p of found) known.add(p)
-      const inGroup = (p: number) => options.pid !== undefined && processGroupOf(p) === options.pid
-      return signalAll(found.filter((p) => !inGroup(p)), "SIGTERM") || found.some(isAlive)
+      return signalAll(found.filter((p) => !skip.has(p)), "SIGTERM") || found.some(isAlive)
     }
+    // Sweep before signalling the group, so the members found now are exactly those the
+    // group signal reaches: they aren't signalled twice. Anything found later is.
+    const before = markedProcesses(marker)
+    const inGroup = new Set(options.pid !== undefined ? before.filter((p) => processGroupOf(p) === options.pid) : [])
     const groupAlive = group !== undefined && signal(group, "SIGTERM")
-    if (!terminateNew() && !groupAlive) return
-    // Until all are gone; then sweep again, for any they started (with the marker) while stopping.
+    if (!terminateNew(inGroup) && !groupAlive) return
+    // Until all are gone. Whenever the known ones have, sweep again for any they started
+    // (with the marker) while stopping: the group may still be alive because of one.
     const done = yield* Effect.sync(() => {
-      if ((group !== undefined && signal(group, 0)) || signalAll(known, 0)) return false
-      return !terminateNew()
+      if (signalAll(known, 0)) return false
+      if (terminateNew()) return false
+      return !(group !== undefined && signal(group, 0))
     }).pipe(
       Effect.repeat({ schedule: Schedule.spaced("50 millis"), until: (gone) => gone }),
       Effect.timeoutOption(options.grace ?? Duration.seconds(3)),

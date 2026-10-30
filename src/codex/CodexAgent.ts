@@ -753,6 +753,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
               return startNext
             }
             stuck = true
+            notify()
             const error = agentError(
               `turn/start: no answer within ${Duration.format(Session.requestTimeout)}; stopping codex app-server`,
             )
@@ -925,7 +926,8 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
   })
 
   const interrupt = Effect.gen(function* () {
-    const error = closed || dead !== null ? unavailable() : null
+    // Not `unavailable()`: while `end` waits, a running turn can still be interrupted.
+    const error = closed || dead !== null || stuck ? unavailable() : null
     if (error !== null) return yield* error
     const run = state.run
     if (run === null || run.turnId === null) return
@@ -941,11 +943,13 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
 
   // Ending an ended session reports how it ended.
   const end: Effect.Effect<void, AgentError> = Effect.gen(function* () {
-    if (dead === null && !closed) {
+    if (dead === null && !closed && !stuck) {
       ending = true
-      while (dead === null && (state.run !== null || queue.length > 0)) yield* Deferred.await(changed)
+      while (dead === null && !stuck && (state.run !== null || queue.length > 0)) yield* Deferred.await(changed)
     }
     if (dead !== null) return yield* agentError(`session is gone: ${dead.message}`)
+    // Being stopped for not answering: that is how this session ends, not cleanly.
+    if (stuck) return yield* agentError("session is gone: codex app-server stopped answering")
     if (closed) return
     closed = true
     yield* conn.close

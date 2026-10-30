@@ -22,8 +22,14 @@ interface Pending {
   readonly fail: (code: number, message: string) => Effect.Effect<void>
 }
 
-/** A scripted app-server: one connection, driven by the test. */
-const scripted = Effect.gen(function* () {
+/**
+ * A scripted app-server: one connection, driven by the test. With
+ * `holdStop`, stopping it (close or kill) waits for `releaseStop`, as a
+ * process slow to die would.
+ */
+const scripted = (options: { readonly holdStop?: boolean } = {}) => Effect.gen(function* () {
+  const stopReleased = yield* Deferred.make<void>()
+  if (options.holdStop !== true) yield* Deferred.succeed(stopReleased, undefined)
   const requests = yield* Queue.unbounded<Pending>()
   let core: Effect.Success<ReturnType<typeof CodexAppServer.makeRpcCore>> | undefined
   const write = (msg: P.Message) =>
@@ -42,7 +48,8 @@ const scripted = Effect.gen(function* () {
   const stop = (signal: string) =>
     Effect.suspend(() => {
       stops++
-      return rpc.failPending("closed").pipe(
+      return Deferred.await(stopReleased).pipe(
+        Effect.andThen(rpc.failPending("closed")),
         Effect.andThen(rpc.endIncoming),
         Effect.andThen(Deferred.succeed(rpc.exitSignal, { exitCode: null, signal })),
         Effect.asVoid,
@@ -82,10 +89,10 @@ const scripted = Effect.gen(function* () {
       Layer.succeed(CodexAppServer.CodexAppServer, CodexAppServer.CodexAppServer.of({ connect: () => Effect.succeed(connection), version: Effect.succeed("0.162.1") })),
     ),
   )
-  return { next, idle, notify, started, completed, landed, layer, stops: () => stops }
+  return { next, idle, notify, started, completed, landed, layer, stops: () => stops, releaseStop: Deferred.succeed(stopReleased, undefined) }
 })
 
-type Server = Effect.Success<typeof scripted>
+type Server = Effect.Success<ReturnType<typeof scripted>>
 
 /** Open a session against `server`, answering its `thread/start`. */
 const open = (server: Server) =>
@@ -111,7 +118,7 @@ const startTurn = (server: Server, session: AgentSession, input: string, turnId:
 describe("CodexAgent session races", () => {
   it.effect("a turn/start that never answers blocks neither send nor interrupt; then app-server is stopped", () =>
     Effect.gen(function* () {
-      const server = yield* scripted
+      const server = yield* scripted()
       const session = yield* open(server)
       const first = yield* session.send("first").pipe(Effect.exit, Effect.forkScoped)
       yield* server.next("turn/start")
@@ -132,9 +139,25 @@ describe("CodexAgent session races", () => {
     }).pipe(Effect.scoped),
   )
 
+  it.effect("a session stopping a stuck app-server doesn't report a clean end", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted({ holdStop: true })
+      const session = yield* open(server)
+      const first = yield* session.send("first").pipe(Effect.exit, Effect.forkScoped)
+      yield* server.next("turn/start")
+      yield* TestClock.adjust("61 seconds")
+      expect(Exit.isFailure(yield* Fiber.join(first))).toBe(true)
+      // app-server is slow to die: meanwhile the session is gone, not idle.
+      expect(server.stops()).toBe(1)
+      expect(yield* session.interrupt.pipe(Effect.flip)).toBeInstanceOf(SessionClosed)
+      expect(yield* session.end.pipe(Effect.flip)).toMatchObject({ _tag: "AgentError", message: expect.stringMatching(/stopped answering/) })
+      yield* server.releaseStop
+    }).pipe(Effect.scoped),
+  )
+
   it.effect("a turn/start answered with an error lets the next message go", () =>
     Effect.gen(function* () {
-      const server = yield* scripted
+      const server = yield* scripted()
       const session = yield* open(server)
       const first = yield* session.send("first").pipe(Effect.exit, Effect.forkScoped)
       const start = yield* server.next("turn/start")
@@ -151,7 +174,7 @@ describe("CodexAgent session races", () => {
 
   it.effect("a turn/start that times out after its turn started keeps that turn, even mid-completion", () =>
     Effect.gen(function* () {
-      const server = yield* scripted
+      const server = yield* scripted()
       const session = yield* open(server)
       const first = yield* session.turn("first").pipe(Effect.exit, Effect.forkScoped)
       const start = yield* server.next("turn/start")
@@ -184,7 +207,7 @@ describe("CodexAgent session races", () => {
 
   it.effect("a caller that gives up during turn/start doesn't cut the turn short", () =>
     Effect.gen(function* () {
-      const server = yield* scripted
+      const server = yield* scripted()
       const session = yield* open(server)
       const sending = yield* session.send("hello").pipe(Effect.forkScoped)
       const request = yield* server.next("turn/start")
@@ -203,7 +226,7 @@ describe("CodexAgent session races", () => {
 
   it.effect("a steer that loses to the end of its turn starts the next turn", () =>
     Effect.gen(function* () {
-      const server = yield* scripted
+      const server = yield* scripted()
       const session = yield* open(server)
       const { turn } = yield* startTurn(server, session, "work", "t-1")
       const steering = yield* session.steer("also this").pipe(Effect.forkScoped)
@@ -222,7 +245,7 @@ describe("CodexAgent session races", () => {
 
   it.effect("a steer that wins lands in the running turn, which then ends for both callers", () =>
     Effect.gen(function* () {
-      const server = yield* scripted
+      const server = yield* scripted()
       const session = yield* open(server)
       const { turn } = yield* startTurn(server, session, "work", "t-1")
       const steering = yield* session.steer("also this").pipe(Effect.forkScoped)
@@ -238,7 +261,7 @@ describe("CodexAgent session races", () => {
 
   it.effect("closing the session releases a turn waiting in the queue with SessionClosed", () =>
     Effect.gen(function* () {
-      const server = yield* scripted
+      const server = yield* scripted()
       const result = yield* Effect.scoped(
         Effect.gen(function* () {
           const session = yield* open(server)
