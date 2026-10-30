@@ -12,10 +12,11 @@
  * sends SIGTERM to that group and SIGKILLs it after `forceKillAfter`.
  *
  * Codex (0.162.1) runs each command in its own PTY session, so commands are
- * not in that group: they stop because app-server stops them on SIGTERM
- * (verified, including `nohup ... &` children of a running command). If
- * app-server has to be SIGKILLed, a running command's foreground process
- * dies with its PTY but a `nohup`ed background one survives. Use a
+ * not in that group. They stop because app-server stops them on SIGTERM
+ * (verified, including `nohup ... &` children of a running command).
+ *
+ * If app-server has to be SIGKILLed, a running command's foreground process
+ * dies with its PTY, but a `nohup`ed background one survives. Use a
  * `Launcher` that puts the process in a cgroup (`systemd-run --scope`) to
  * catch those too.
  *

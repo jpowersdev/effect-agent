@@ -14,12 +14,13 @@
  *
  * (On Bun: `BunRuntime` and `BunServices` from `@effect/platform-bun`.)
  *
- * `run` reads a JSON `HostSpec` from `Stdio.stdin`, writes one readiness line
- * to `Stdio.stdout` (`Ready` or `Failed`), then sends all further output to
- * `<dir>/<sessionId>.log` and serves one session until it ends. It owns the
- * process while it runs (stdio, signals), so run nothing else in that process.
- * Bundling and the runtime are the entry's business, like any other entry
- * point in your app.
+ * `run` reads a JSON `HostSpec` from `Stdio.stdin` and writes one readiness
+ * line to `Stdio.stdout` (`Ready` or `Failed`). After that, all output goes
+ * to `<dir>/<sessionId>.log`, and it serves one session until it ends.
+ *
+ * It owns the process while it runs (stdio, signals), so run nothing else in
+ * that process. Bundling and the runtime are up to the entry, as for any
+ * other entry point in your app.
  *
  * @since 0.1.0
  */

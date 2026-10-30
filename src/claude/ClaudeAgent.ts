@@ -94,7 +94,8 @@ export interface ClaudeAgentOptions {
   readonly model?: string
   /**
    * Check that a resumed session exists (`getSessionInfo`) before spawning.
-   * Default true; the CLI's own "No conversation found" is still mapped to `SessionNotFound` either way.
+   * Default true; the CLI's own "No conversation found" is still mapped to
+   * `SessionNotFound` either way.
    */
   readonly checkResume?: boolean
   /**

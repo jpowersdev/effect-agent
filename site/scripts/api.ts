@@ -11,18 +11,30 @@
 // docgen's pages for the barrels (index.ts) list re-exports by file name, so
 // each entry point's overview is written here instead, from its barrel: the
 // barrel's module comment, then its modules with their summaries.
+//
+// docgen formats code at 120 columns; pages are formatted again at 88, the
+// width the content column fits without scrolling.
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { basename, dirname, join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
+import * as Prettier from "prettier"
 
 const site = join(dirname(fileURLToPath(import.meta.url)), "..")
 const input = join(site, ".docgen", "modules")
 const output = join(site, "src", "content", "docs", "api")
 const repo = "https://github.com/jpowersdev/effect-agent/blob/main"
 
-// src/ directory -> the entry point's directory under api/, and its import path
-const entryPoints: Record<string, { readonly dir: string; readonly path: string }> = {
-  ".": { dir: "core", path: "@jpowersdev/effect-agent" },
+// src/ directory -> the entry point's directory under api/, its import path, and a
+// few of the exports it re-exports flat (for the overview's import example)
+const entryPoints: Record<
+  string,
+  { readonly dir: string; readonly path: string; readonly sample?: ReadonlyArray<string> }
+> = {
+  ".": {
+    dir: "core",
+    path: "@jpowersdev/effect-agent",
+    sample: ["Agent", "AgentFailed", "TurnEnded", "SessionId"],
+  },
   claude: { dir: "claude", path: "@jpowersdev/effect-agent/claude" },
   codex: { dir: "codex", path: "@jpowersdev/effect-agent/codex" },
   host: { dir: "host", path: "@jpowersdev/effect-agent/host" },
@@ -38,6 +50,30 @@ if (!existsSync(input)) {
 const files = (dir: string): Array<string> =>
   readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
     entry.isDirectory() ? files(join(dir, entry.name)) : entry.name.endsWith(".ts.md") ? [join(dir, entry.name)] : [],
+  )
+
+const width = 88
+
+// Prettier leaves comments as they are, so one-line doc comments are wrapped here
+const wrapComments = (markdown: string) =>
+  markdown.replace(/^( *)\/\*\* (.*) \*\/$/gm, (line, indent: string, text: string) => {
+    if (line.length <= width) return line
+    const lines: Array<string> = []
+    let current = ""
+    for (const word of text.split(" ")) {
+      if (current !== "" && indent.length + 3 + current.length + 1 + word.length > width) {
+        lines.push(current)
+        current = word
+      } else current = current === "" ? word : `${current} ${word}`
+    }
+    lines.push(current)
+    return [`${indent}/**`, ...lines.map((l) => `${indent} * ${l}`), `${indent} */`].join("\n")
+  })
+
+// docgen's options, narrower
+const format = async (markdown: string) =>
+  wrapComments(
+    await Prettier.format(markdown, { parser: "markdown", semi: false, printWidth: width, trailingComma: "all" }),
   )
 
 const yamlString = (s: string) => JSON.stringify(s)
@@ -119,7 +155,7 @@ const barrelComment = (source: string): string => {
 }
 
 const overview = (dir: string, pages: ReadonlyMap<string, Page>): string => {
-  const { path } = entryPoints[dir]!
+  const { path, sample = [] } = entryPoints[dir]!
   const source = readFileSync(join(site, "..", "src", dir, "index.ts"), "utf8")
   const intro = barrelComment(source)
   const modules = Array.from(source.matchAll(/^export \* (?:as (\w+) )?from "\.\/(\w+)\.ts"/gm), ([, namespace, file]) => {
@@ -127,24 +163,30 @@ const overview = (dir: string, pages: ReadonlyMap<string, Page>): string => {
     const page = pages.get(module)
     return { name: page?.title ?? namespace ?? file!, namespace, module, page }
   })
-  const flat = modules.filter((m) => m.namespace === undefined).map((m) => `\`${m.name}\``)
+  const flat = modules.filter((m) => m.namespace === undefined).map((m) => m.name)
   const namespaces = modules.flatMap((m) => (m.namespace === undefined ? [] : [m.namespace]))
   const items = modules.map(({ name, module, page }) =>
     page === undefined
-      ? `- \`${name}\`: internal, exported for the tests; not documented here.`
+      ? `- \`${name}\`: internal, exported for the tests.`
       : `- [${name}](./${basename(module).toLowerCase()}/): ${page.summary ?? ""}`,
   )
+  const imports =
+    flat.length === 0
+      ? [`import { ${namespaces.join(", ")} } from "${path}"`]
+      : [
+          `// Everything from ${flat.join(", ").replace(/, ([^,]*)$/, " and $1")}`,
+          `import { ${sample.join(", ")} } from "${path}"`,
+          "",
+          "// The rest, as namespaces",
+          `import { ${namespaces.join(", ")} } from "${path}"`,
+        ]
   return [
     frontMatter({ title: "Overview", description: firstSentence(intro.split("\n\n")[0]!), order: 0 }),
     "",
     intro,
     "",
-    flat.length === 0
-      ? "Each module is a namespace:"
-      : `The exports of ${flat.join(", ").replace(/, ([^,]*)$/, " and $1")} are the entry point's own; the other modules are namespaces:`,
-    "",
     "```ts",
-    `import { ${namespaces.join(", ")} } from "${path}"`,
+    ...imports,
     "```",
     "",
     "## Modules",
@@ -164,10 +206,10 @@ for (const file of files(input)) {
   const page = convert(file, module)
   const target = join(output, entryPoint.dir, `${basename(module)}.md`)
   mkdirSync(dirname(target), { recursive: true })
-  writeFileSync(target, page.markdown)
+  writeFileSync(target, await format(page.markdown))
   pages.set(module, page)
 }
 for (const [dir, entryPoint] of Object.entries(entryPoints)) {
-  writeFileSync(join(output, entryPoint.dir, "index.md"), overview(dir, pages))
+  writeFileSync(join(output, entryPoint.dir, "index.md"), await format(overview(dir, pages)))
 }
 console.log(`Wrote ${pages.size} API pages and ${Object.keys(entryPoints).length} overviews to ${relative(process.cwd(), output)}`)

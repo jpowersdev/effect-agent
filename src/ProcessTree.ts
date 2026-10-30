@@ -1,11 +1,15 @@
 /**
- * Stopping everything an agent started. A process-group kill is not enough:
- * both Claude Code's Bash tool and Codex start each command in a new session
- * with its own process group. So every agent process gets a unique
- * `EFFECT_AGENT_PROCESS` variable, which everything it starts inherits, and a
- * sweep signals every live process carrying it (Linux, via /proc). Elsewhere,
- * or for a command that clears its environment, only the agent's own process
- * group is reached; a cgroup `Launcher` (`systemd-run --scope`) closes that gap.
+ * Stopping everything an agent started.
+ *
+ * A process-group kill is not enough: both Claude Code's Bash tool and Codex
+ * start each command in a new session with its own process group. So every
+ * agent process gets a unique `EFFECT_AGENT_PROCESS` variable, which
+ * everything it starts inherits, and a sweep signals every live process
+ * carrying it (Linux, via /proc).
+ *
+ * Elsewhere, or for a command that clears its environment, only the agent's
+ * own process group is reached. A cgroup `Launcher` (`systemd-run --scope`)
+ * closes that gap.
  *
  * @since 0.1.0
  */

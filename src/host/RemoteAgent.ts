@@ -33,13 +33,14 @@
  * `BunServices.layer`. It talks to hosts over unix sockets through
  * `@effect/platform-node-shared`, as both of those platforms do.
  *
- * Process supervision: hosts are started with `detached: true` and survive
- * their caller, but a service manager may still kill them. A runner under
- * systemd with the default `KillMode=control-group` has every process in its
- * cgroup killed when it restarts, hosts included. Provide a `Launcher` that
- * wraps the host in its own scope (`systemd-run --user --scope ...`, see
- * `Launcher.ts`); it applies to the host command, so the host and the agent
- * CLI it runs live in that scope.
+ * Hosts are started with `detached: true` and survive their caller, but a
+ * service manager may still kill them. A runner under systemd with the
+ * default `KillMode=control-group` has every process in its cgroup killed
+ * when it restarts, hosts included.
+ *
+ * To prevent that, provide a `Launcher` that wraps the host in its own scope
+ * (`systemd-run --user --scope ...`, see `Launcher.ts`). It applies to the
+ * host command, so the host and the agent CLI it runs share that scope.
  *
  * @since 0.1.0
  */

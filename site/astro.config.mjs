@@ -8,9 +8,12 @@ export default defineConfig({
     starlight({
       title: "effect-agent",
       description:
-        "Effect-native control of coding-agent CLIs (Claude Code, Codex): live sessions, steering, typed endings.",
+        "Effect-native control of Claude Code and Codex: live sessions, steering, typed endings, reattach.",
       logo: { src: "./src/assets/logo.svg" },
       favicon: "/favicon.svg",
+      customCss: ["./src/styles/custom.css"],
+      // Code fits the content column from 1440px up; narrower screens wrap it
+      expressiveCode: { defaultProps: { wrap: true } },
       social: [{ icon: "github", label: "GitHub", href: "https://github.com/jpowersdev/effect-agent" }],
       editLink: { baseUrl: "https://github.com/jpowersdev/effect-agent/edit/main/site/" },
       sidebar: [
