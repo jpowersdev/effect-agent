@@ -2,7 +2,7 @@
  * Transport for Claude Code: one `query()` from `@anthropic-ai/claude-agent-sdk`
  * in streaming-input mode, as an Effect service.
  *
- *   import * as ClaudeSdk from "effect-agent/claude/ClaudeSdk"
+ *   import { ClaudeSdk } from "@jpowersdev/effect-agent/claude"
  *   ClaudeSdk.layer({ record: "/tmp/run.jsonl" })
  *
  * `open` spawns the CLI, waits for its initialize handshake and returns a

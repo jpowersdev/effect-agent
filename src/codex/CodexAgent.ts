@@ -2,7 +2,7 @@
  * `Agent` backed by `codex app-server` (JSON-RPC over stdio), one app-server
  * process per session.
  *
- *   import { CodexAgent, CodexAppServer } from "effect-agent/codex"
+ *   import { CodexAgent, CodexAppServer } from "@jpowersdev/effect-agent/codex"
  *   CodexAgent.layer({ pricing }).pipe(
  *     Layer.provide(CodexAppServer.layer()),
  *     Layer.provide(NodeServices.layer),

@@ -1,14 +1,25 @@
 {
-  "name": "effect-agent",
-  "version": "0.0.0",
+  "name": "@jpowersdev/effect-agent",
+  "version": "0.1.0",
   "description": "Effect-native control of coding-agent CLIs (Claude Code, Codex): live sessions, steering, typed endings.",
   "type": "module",
   "license": "MIT",
-  "private": true,
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jpowersdev/effect-agent.git"
   },
+  "homepage": "https://github.com/jpowersdev/effect-agent#readme",
+  "bugs": {
+    "url": "https://github.com/jpowersdev/effect-agent/issues"
+  },
+  "keywords": [
+    "effect",
+    "agent",
+    "claude",
+    "claude-code",
+    "codex",
+    "llm"
+  ],
   "sideEffects": false,
   "exports": {
     "./package.json": "./package.json",
@@ -37,7 +48,8 @@
     "live:reattach": "node scripts/live-reattach.ts",
     "build": "pnpm build:tsc && pnpm build:babel",
     "build:tsc": "rm -rf dist && tsc -p tsconfig.build.json",
-    "build:babel": "babel dist --plugins annotate-pure-calls --out-dir dist --source-maps"
+    "build:babel": "babel dist --plugins annotate-pure-calls --out-dir dist --source-maps",
+    "prepack": "pnpm build"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.312",
@@ -57,5 +69,8 @@
   },
   "peerDependencies": {
     "effect": "^4.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

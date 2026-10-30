@@ -6,7 +6,7 @@
  *   // host.ts
  *   import { NodeRuntime, NodeServices } from "@effect/platform-node"
  *   import { Effect } from "effect"
- *   import { SessionHost } from "effect-agent/host"
+ *   import { SessionHost } from "@jpowersdev/effect-agent/host"
  *
  *   NodeRuntime.runMain(SessionHost.run.pipe(Effect.provide(NodeServices.layer)))
  *

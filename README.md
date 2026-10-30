@@ -4,10 +4,15 @@ Effect-native control of coding-agent CLIs (Claude Code, Codex): live sessions w
 
 > Status: early development (Effect 4.1). The API will change.
 
+```sh
+pnpm add @jpowersdev/effect-agent effect
+pnpm add @effect/platform-node   # or @effect/platform-bun; see Platform
+```
+
 ```ts
 import { Effect, Layer, Stream } from "effect"
-import { Agent } from "effect-agent"
-import { ClaudeAgent, ClaudeSdk } from "effect-agent/claude"
+import { Agent } from "@jpowersdev/effect-agent"
+import { ClaudeAgent, ClaudeSdk } from "@jpowersdev/effect-agent/claude"
 
 const program = Effect.scoped(
   Effect.gen(function* () {
@@ -80,7 +85,7 @@ A turn ends `Succeeded`, or fails with one of these `Schema` tagged errors (also
 Some windows cap a single model family (Claude's weekly Opus or `model_scoped` caps); those carry `model: Option<string>` (e.g. `Option.some("fable")`, encoded as `null` when absent). A full per-model window doesn't make the account unusable, since other models still run, so check the model you're about to use:
 
 ```ts
-import { usableFor } from "effect-agent"
+import { usableFor } from "@jpowersdev/effect-agent"
 
 if (usableFor(status, persona.model)) dispatch(task)  // false if e.g. the Fable cap is full for a Fable persona
 ```
@@ -90,7 +95,7 @@ if (usableFor(status, persona.model)) dispatch(task)  // false if e.g. the Fable
 Provide a `Launcher` to wrap every agent process, e.g. in a systemd scope:
 
 ```ts
-import { Launcher } from "effect-agent"
+import { Launcher } from "@jpowersdev/effect-agent"
 
 Launcher.layer(({ provider }) =>
   Effect.succeed((cmd) => ({
@@ -114,14 +119,14 @@ The host process runs an entry point in *your* app; the library ships no executa
 // host.ts
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Effect } from "effect"
-import { SessionHost } from "effect-agent/host"
+import { SessionHost } from "@jpowersdev/effect-agent/host"
 
 NodeRuntime.runMain(SessionHost.run.pipe(Effect.provide(NodeServices.layer)))
 // Bun: BunRuntime.runMain(SessionHost.run.pipe(Effect.provide(BunServices.layer)))
 ```
 
 ```ts
-import { AgentHosts, RemoteAgent } from "effect-agent/host"
+import { AgentHosts, RemoteAgent } from "@jpowersdev/effect-agent/host"
 
 const layer = RemoteAgent.layer({
   provider: "claude",

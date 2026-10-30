@@ -2,7 +2,7 @@
  * Provider-neutral coding agent. Each provider module exports a `layer` that
  * provides `Agent`:
  *
- *   import * as ClaudeAgent from "effect-agent/claude"
+ *   import * as ClaudeAgent from "@jpowersdev/effect-agent/claude"
  *   program.pipe(Effect.provide(ClaudeAgent.layer()))
  *
  * A session is a scoped resource: closing its Scope stops the agent process.

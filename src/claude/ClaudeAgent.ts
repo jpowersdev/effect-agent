@@ -1,7 +1,7 @@
 /**
  * `Agent` backed by Claude Code (`@anthropic-ai/claude-agent-sdk`).
  *
- *   import { ClaudeAgent, ClaudeSdk } from "effect-agent/claude"
+ *   import { ClaudeAgent, ClaudeSdk } from "@jpowersdev/effect-agent/claude"
  *   program.pipe(Effect.provide(ClaudeAgent.layer().pipe(Layer.provide(ClaudeSdk.layer()))))
  *
  * Turns are defined by the CLI's `command_lifecycle` frames: a turn starts
