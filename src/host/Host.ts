@@ -68,22 +68,25 @@ export const pruneEvents = (dir: string, retainEvents: Duration.Duration): void 
   })
 
 /**
- * Run `effect` once per `requestId`: a repeated id (a client retrying after a
- * reconnect) waits for, and gets, the first run's result. The effect runs in
- * `scope`, not in the request, so a client that disconnects doesn't cut it
- * short. The last `limit` ids are remembered.
+ * Run `effect` once per `requestId` of an RPC: a repeated id (a client
+ * retrying after a reconnect) waits for, and gets, the first run's result.
+ * Ids are scoped to the RPC, so the same id sent to two RPCs runs both. The
+ * effect runs in `scope`, not in the request, so a client that disconnects
+ * doesn't cut it short. The last `limit` ids are remembered.
  *
  * @since 0.1.0
  * @category constructors
  */
 export const makeOnce = (scope: Scope.Scope, limit: number) => {
   const results = new Map<string, Deferred.Deferred<unknown, unknown>>()
-  return <A, E>(requestId: string, effect: Effect.Effect<A, E>): Effect.Effect<A, E> =>
+  return <A, E>(rpc: string, requestId: string, effect: Effect.Effect<A, E>): Effect.Effect<A, E> =>
     Effect.suspend(() => {
-      const existing = results.get(requestId) as Deferred.Deferred<A, E> | undefined
+      const key = `${rpc}:${requestId}`
+      // Only `rpc` stores results under `key`, and it always stores an `Exit<A, E>`.
+      const existing = results.get(key) as Deferred.Deferred<A, E> | undefined
       if (existing !== undefined) return Deferred.await(existing)
       const result = Deferred.makeUnsafe<A, E>()
-      results.set(requestId, result as Deferred.Deferred<unknown, unknown>)
+      results.set(key, result as Deferred.Deferred<unknown, unknown>)
       if (results.size > limit) results.delete(results.keys().next().value!)
       return effect.pipe(
         Effect.onExit((exit) => Deferred.done(result, exit)),
@@ -453,7 +456,9 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       const runOptions: RunOptions = { ...toRunOptions(spec.run), ...(hasHooks && { hooks: remoteHooks(hookBridge) }) }
 
       // ---- open ----
-      const sessionScope = yield* Scope.make()
+      // A child of `run`'s scope: however `run` ends (even interrupted, as
+      // `NodeRuntime.runMain` does on SIGTERM), the session is closed.
+      const sessionScope = yield* Scope.fork(yield* Effect.scope)
       const opened = yield* agent.open(runOptions).pipe(Scope.provide(sessionScope), Effect.exit)
       if (Exit.isFailure(opened)) {
         const failure = Cause.findErrorOption(opened.cause)
@@ -584,24 +589,24 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
         // `once`: a client that disconnects mid-call doesn't cut a provider call in half,
         // and one that retries it after reconnecting gets the first call's result.
         Send: ({ input, requestId }) =>
-          once(requestId, session.send(input).pipe(Effect.tap((id) => Effect.sync(() => log.sent(id))))).pipe(replyOrDrop("Send")),
+          once("Send", requestId, session.send(input).pipe(Effect.tap((id) => Effect.sync(() => log.sent(id))))).pipe(replyOrDrop("Send")),
         Steer: ({ input, requestId }) =>
-          once(requestId, session.steer(input).pipe(Effect.tap((o) => Effect.sync(() => log.sent(o.messageId))))).pipe(
+          once("Steer", requestId, session.steer(input).pipe(Effect.tap((o) => Effect.sync(() => log.sent(o.messageId))))).pipe(
             replyOrDrop("Steer"),
           ),
         // Deduped like `Send`: a retry after a reconnect must not interrupt a newer turn.
-        Interrupt: ({ requestId }) => once(requestId, session.interrupt).pipe(replyOrDrop("Interrupt")),
+        Interrupt: ({ requestId }) => once("Interrupt", requestId, session.interrupt).pipe(replyOrDrop("Interrupt")),
         End: () => session.end,
         Stop: () => Deferred.succeed(shutdown, "stop").pipe(Effect.andThen(Deferred.await(sessionClosed))),
         // A retried `Turn` waits on the original turn.
-        Turn: ({ input, requestId }) => once(requestId, session.turn(input)).pipe(replyOrDrop("Turn")),
+        Turn: ({ input, requestId }) => once("Turn", requestId, session.turn(input)).pipe(replyOrDrop("Turn")),
         AwaitTurn: ({ turnId }) => log.awaitTurn(turnId).pipe(Effect.flatMap(settle), replyOrDrop("AwaitTurn")),
         AwaitMessage: ({ messageId }) => log.awaitMessage(messageId).pipe(Effect.flatMap(settle), replyOrDrop("AwaitMessage")),
         HookRequests: (answerer) => hookBridge.register(answerer),
         HookResponse: ({ hookId, result }) => hookBridge.respond(hookId, result),
         TestInvokeHook: ({ requestId, hook, call }) =>
           spec.testInvokeHook === true
-            ? once(requestId, hookBridge.call(hook, call).pipe(Effect.map(Option.getOrNull)))
+            ? once("TestInvokeHook", requestId, hookBridge.call(hook, call).pipe(Effect.map(Option.getOrNull)))
             : Effect.fail(agentError("TestInvokeHook is for tests only")),
       })
 
@@ -664,17 +669,28 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       }).pipe(Effect.forkScoped)
 
       // ---- shutdown ----
+      let closing = false
+      /** Close the session and let its last events reach the log. Runs once. */
+      const closeSession = (reason: Reason) =>
+        Effect.gen(function* () {
+          if (closing) return
+          closing = true
+          yield* Effect.logInfo(`shutting down: ${reason}`)
+          if (reason === "orphan") {
+            yield* session.end.pipe(Effect.timeoutOption(Duration.seconds(30)), Effect.ignore)
+          }
+          yield* Scope.close(sessionScope, Exit.void)
+          const drained = yield* Fiber.await(consumer).pipe(Effect.timeoutOption(Duration.seconds(5)))
+          yield* hookBridge.close
+          if (Option.isNone(drained)) yield* log.end(agentError("session closed"))
+          else if (log.ended() === null) yield* log.end(null)
+          yield* Deferred.succeed(sessionClosed, undefined)
+        })
+      // Interrupted (e.g. SIGTERM under `runMain`) rather than asked to stop: close the
+      // session the same way. Added last, so it runs before the consumer is interrupted.
+      yield* Effect.addFinalizer(() => closeSession("sigterm"))
       const reason = yield* Deferred.await(shutdown)
-      yield* Effect.logInfo(`shutting down: ${reason}`)
-      if (reason === "orphan") {
-        yield* session.end.pipe(Effect.timeoutOption(Duration.seconds(30)), Effect.ignore)
-      }
-      yield* Scope.close(sessionScope, Exit.void)
-      const drained = yield* Fiber.await(consumer).pipe(Effect.timeoutOption(Duration.seconds(5)))
-      yield* hookBridge.close
-      if (Option.isNone(drained)) yield* log.end(agentError("session closed"))
-      else if (log.ended() === null) yield* log.end(null)
-      yield* Deferred.succeed(sessionClosed, undefined)
+      yield* Effect.uninterruptible(closeSession(reason))
 
       // Linger so connected clients read the last events and replies; a
       // restarting client also gets a short window to reattach.

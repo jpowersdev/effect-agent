@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest"
-import { DateTime, Schema } from "effect"
+import { DateTime, Option, Schema } from "effect"
 import { AccountStatus, AgentEvent } from "../src/index.ts"
 import { CodexAgent, CodexAppServer, CodexEvents } from "../src/codex/index.ts"
 import type * as P from "../src/codex/protocol.ts"
@@ -204,6 +204,22 @@ describe("helpers", () => {
 
   it("parses the version from userAgent", () => {
     expect(CodexAppServer.parseUserAgentVersion("effect_agent/0.162.1 (NixOS 26.11.0; x86_64) unknown (effect_agent; 0.0.0)")).toBe("0.162.1")
+  })
+
+  it("decodes only JSON-RPC objects from app-server's output", () => {
+    // Anything else would have killed the reader (and hung the session) before.
+    for (const line of ["", "not json", "42", "null", "[1]", '{"id":{}}', '{"error":"boom","id":1}']) {
+      expect(Option.isNone(CodexAppServer.decodeMessage(line))).toBe(true)
+    }
+    expect(CodexAppServer.decodeMessage('{"id":1,"result":{"ok":true},"error":null}')).toEqual(
+      Option.some({ id: 1, result: { ok: true } }),
+    )
+    expect(CodexAppServer.decodeMessage('{"id":2,"error":{"code":-32600,"message":"no"}}')).toEqual(
+      Option.some({ id: 2, error: { code: -32600, message: "no" } }),
+    )
+    expect(CodexAppServer.decodeMessage('{"method":"turn/started","params":{"x":1}}')).toEqual(
+      Option.some({ method: "turn/started", params: { x: 1 } }),
+    )
   })
 
   it("builds thread overrides", () => {

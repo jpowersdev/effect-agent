@@ -652,7 +652,7 @@ export const classifyOutcome = (input: OutcomeInput): TurnOutcome => {
   if (result.subtype === "error_max_budget_usd") {
     return new SpendCapReached({
       message,
-      capUsd: input.capUsd ?? Number.NaN,
+      capUsd: input.capUsd,
       spentUsd: result.total_cost_usd,
       estimated: false,
     })

@@ -128,8 +128,10 @@ export interface Options {
   readonly args?: ReadonlyArray<string>
   /**
    * Tee every frame to this JSONL file (`{"dir":"out"|"in","msg":...}` per
-   * line). Each connection truncates the file. Needs a `FileSystem` in the
-   * layer's context (e.g. `NodeServices.layer`).
+   * line). A connection truncates the file and records until it closes; one
+   * that starts while another is recording isn't recorded (so a `status`
+   * call during a session leaves the session's recording alone). Needs a
+   * `FileSystem` in the layer's context (e.g. `NodeServices.layer`).
    */
   readonly record?: string
   /** How long to wait after SIGTERM before SIGKILL. Default 10 seconds. */
@@ -292,6 +294,37 @@ export const makeRpcCore = Effect.fnUntraced(function* (write: (msg: P.Message) 
   }
 })
 
+const RpcErrorBody = Schema.Struct({
+  code: Schema.Number,
+  message: Schema.String,
+  data: Schema.optionalKey(Schema.Unknown),
+})
+
+/**
+ * One JSON-RPC frame as app-server writes it. `error: null` (which some
+ * servers send alongside a result) counts as no error.
+ */
+const WireMessage = Schema.Struct({
+  id: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
+  method: Schema.optionalKey(Schema.String),
+  params: Schema.optionalKey(Schema.Unknown),
+  result: Schema.optionalKey(Schema.Unknown),
+  error: Schema.optionalKey(Schema.NullOr(RpcErrorBody)),
+  emittedAtMs: Schema.optionalKey(Schema.Number),
+})
+const decodeWireLine = Schema.decodeUnknownOption(Schema.fromJsonString(WireMessage))
+
+/**
+ * A line of app-server output as a `Message`; none for anything that isn't a JSON-RPC object.
+ *
+ * @internal
+ */
+export const decodeMessage = (line: string): Option.Option<P.Message> =>
+  Option.map(decodeWireLine(line), ({ error, ...rest }): P.Message => (error === null || error === undefined ? rest : { ...rest, error }))
+
+/** JSON-RPC "internal error": our handler for a server request failed unexpectedly. */
+const INTERNAL_ERROR = -32603
+
 /** Builds the env passed to the spawner: `extendEnv` semantics, `undefined` removes. */
 const childEnv = (env: Readonly<Record<string, string | undefined>> | undefined) => ({ ...env })
 
@@ -322,6 +355,9 @@ export const make = (options: Options = {}) =>
           : prepare
       })
 
+    /** Whether a connection is recording; another one that starts meanwhile isn't. */
+    let recording = false
+
     const version = yield* Effect.cached(
       spawner.string(ChildProcess.make(codexPath, ["--version"], { stderr: "ignore" })).pipe(
         Effect.map((out) => /(\d+\.\d+\.\d+\S*)/.exec(out)?.[1] ?? null),
@@ -334,13 +370,22 @@ export const make = (options: Options = {}) =>
         // Recording: frames are appended to an in-memory buffer synchronously (so
         // their order is exact) and flushed by a fiber and on scope close.
         let recordBuffer: Array<string> = []
-        const recordPath = options.record
+        const recordPath = options.record !== undefined && !recording ? options.record : undefined
         let flush: Effect.Effect<void> = Effect.void
         if (recordPath !== undefined) {
           if (Option.isNone(fs)) {
             return yield* agentError("CodexAppServer `record` needs a FileSystem service (e.g. NodeServices.layer)")
           }
           const fileSystem = fs.value
+          yield* Effect.acquireRelease(
+            Effect.sync(() => {
+              recording = true
+            }),
+            () =>
+              Effect.sync(() => {
+                recording = false
+              }),
+          )
           yield* fileSystem
             .writeFileString(recordPath, "")
             .pipe(Effect.mapError((cause) => agentError(`cannot write recording ${recordPath}`, cause)))
@@ -413,31 +458,39 @@ export const make = (options: Options = {}) =>
         )
 
         const onServerRequest = connectOptions.onServerRequest ?? defaultServerRequestHandler
+        // Always answer: app-server waits on a server request until it gets one.
         const answer = (req: P.ServerRequest) =>
-          onServerRequest(req).pipe(
-            Effect.matchEffect({
-              onFailure: (e) => write({ id: req.id, error: { code: e.code, message: e.message } }),
+          Effect.suspend(() => onServerRequest(req)).pipe(
+            Effect.matchCauseEffect({
+              onFailure: (cause) => {
+                const error = Cause.findErrorOption(cause)
+                return write({
+                  id: req.id,
+                  error: Option.isSome(error)
+                    ? { code: error.value.code, message: error.value.message }
+                    : { code: INTERNAL_ERROR, message: `effect-agent failed to handle ${req.method}` },
+                })
+              },
               onSuccess: (result) => write({ id: req.id, result }),
             }),
           )
 
         const reader = yield* Stream.decodeText(handle.stdout).pipe(
           Stream.splitLines,
-          Stream.runForEach((line) => {
-            if (line.trim() === "") return Effect.void
-            let msg: P.Message
-            try {
-              msg = JSON.parse(line)
-            } catch {
-              return Effect.void
-            }
-            record("in", msg)
-            return core.dispatch(msg).pipe(
-              Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: (req) => Effect.forkScoped(answer(req)) })),
-              Effect.asVoid,
-            )
-          }),
-          Effect.ignore,
+          Stream.runForEach((line) =>
+            Option.match(decodeMessage(line), {
+              // Not JSON-RPC (a blank line, a log line): nothing to route.
+              onNone: () => Effect.void,
+              onSome: (msg) => {
+                record("in", msg)
+                return core.dispatch(msg).pipe(
+                  Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: (req) => Effect.forkScoped(answer(req)) })),
+                  Effect.asVoid,
+                )
+              },
+            }),
+          ),
+          Effect.catchCause((cause) => Effect.logError("codex app-server reader failed", cause)),
           Effect.forkScoped,
         )
 
@@ -448,10 +501,7 @@ export const make = (options: Options = {}) =>
             const info: ProcessExit = Exit.isSuccess(exit)
               ? { exitCode: exit.value, signal: null }
               : { exitCode: null, signal: signalOf(Cause.squash(exit.cause)) }
-            return Effect.gen(function* () {
-              // Whatever still carries the marker is an orphan of a dead app-server.
-              yield* ProcessTree.kill(marker, { grace: Duration.seconds(2) }).pipe(Effect.forkScoped)
-              yield* Fiber.join(reader).pipe(Effect.timeoutOption(Duration.seconds(2)))
+            const ended = Effect.gen(function* () {
               yield* core.failPending(
                 `codex app-server exited (${info.signal ?? `code ${info.exitCode}`})${
                   stderrTail.length > 0 ? `: ${stderrTail.slice(-3).join(" | ")}` : ""
@@ -460,6 +510,12 @@ export const make = (options: Options = {}) =>
               yield* core.endIncoming
               yield* Deferred.succeed(core.exitSignal, info)
             })
+            return Effect.gen(function* () {
+              // Whatever still carries the marker is an orphan of a dead app-server.
+              yield* ProcessTree.kill(marker, { grace: Duration.seconds(2) }).pipe(Effect.forkScoped)
+              // Let the reader drain what's left; however it ends, the connection ends with it.
+              yield* Fiber.await(reader).pipe(Effect.timeoutOption(Duration.seconds(2)))
+            }).pipe(Effect.ensuring(ended))
           }),
           Effect.forkScoped,
         )

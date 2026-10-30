@@ -7,7 +7,7 @@
 import { NodeServices } from "@effect/platform-node"
 import { afterAll, describe, expect, it } from "@effect/vitest"
 import { Cause, DateTime, Duration, Effect, Exit, Fiber, Layer, Option, Stream } from "effect"
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Agent, AgentError, MessageId, SessionId, SessionNotFound, type TurnId, UsageLimited } from "../src/index.ts"
@@ -326,6 +326,9 @@ for (const p of providers) {
           process.kill(hostPid, "SIGTERM")
           yield* waitUntil(() => !isAlive(hostPid), "the host to exit")
           expect(hostFilesGone(sessionId)).toBe(true)
+          // The session was closed, not cut off: the events file says how it ended.
+          const lines = readFileSync(HostSpec.eventsPath(dir, sessionId), "utf8").trim().split("\n")
+          expect(lines.at(-1)).toMatch(/^\{"ended":/)
         }),
       timeout,
     )
