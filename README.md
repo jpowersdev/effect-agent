@@ -119,9 +119,20 @@ yield* session.subscribeFrom(lastPersistedSeq + 1).pipe(Stream.runForEach(persis
 const result = yield* session.awaitMessage(messageId)         // even if the turn ended while nobody was attached
 ```
 
-A `RemoteSession` is an `AgentSession` plus `subscribeFrom(seq)` (a stream of `{ seq, event }` that fails with `EventsTrimmed` if `seq` is older than the host keeps, `maxEvents`, default 50 000), `lastSeq`, `awaitTurn` / `awaitMessage` (by turn id, or by the `MessageId` that `send` returned), `detach` and `stop`. `subscribe`/`events` are live from now, as for a local session. `onScopeClose` is `"stop"` by default (closing the scope ends the session, as locally); set `"detach"` to leave it running. `AgentHosts.list` lists live hosts. `status` and `history` run locally. Hooks are refused: functions can't cross processes.
+A `RemoteSession` is an `AgentSession` plus `subscribeFrom(seq)` (a stream of `{ seq, event }` from any seq, then live), `lastSeq`, `awaitTurn` / `awaitMessage` (by turn id, or by the `MessageId` that `send` returned), `detach` and `stop`. `subscribe`/`events` are live from now, as for a local session. `onScopeClose` is `"stop"` by default (closing the scope ends the session, as locally); set `"detach"` to leave it running. `AgentHosts.list` lists live hosts. `status` and `history` run locally. Hooks are refused: functions can't cross processes.
 
-Each host serves one session over effect/rpc on a unix socket in `dir` (default `$XDG_RUNTIME_DIR/effect-agent`), next to a manifest `<sessionId>.json` and a log `<sessionId>.log`. It exits when the session ends (`end`, `stop`, the agent dying, SIGTERM), lingering a few seconds so clients get the last events, and when no client has been attached to an idle session for `orphanTimeout` (default 30 minutes). Stale manifests (dead pid) are removed by `list` and `attach`.
+Each host serves one session over effect/rpc on a unix socket in `dir` (default `$XDG_RUNTIME_DIR/effect-agent`, kept at mode 0700), next to a manifest `<sessionId>.json`, a log `<sessionId>.log` and the events file `<sessionId>.events.jsonl`. It exits when the session ends (`end`, `stop`, the agent dying, SIGTERM), lingering a few seconds so clients get the last events, and when no client has been attached to an idle session for `orphanTimeout` (default 30 minutes). Stale manifests (dead pid) are removed by `list` and `attach`.
+
+**The event log.** The host appends every `{ seq, event }` to `<sessionId>.events.jsonl` (mode 0600; one Schema-encoded JSON line each, seq 0, 1, 2, ...) before any subscriber sees it. The last `maxEvents` (default 50 000) are also kept in memory as a cache: `subscribeFrom(seq)` older than the cache reads the missing range from the file, then carries on from the cache and live events with no gap or duplicate. `awaitTurn`/`awaitMessage` don't depend on either, so they answer for any turn of the session. `subscribeFrom` fails with `EventsTrimmed` only when `seq` is older than the cache and the file can't serve it: `persistEvents: false`, or the file is missing or unreadable. A resumed session (`resume`) numbers on from the file its earlier host left.
+
+When the host exits, the socket and manifest go, but the events file is kept for `retainEvents` (default 24 hours, counted from when the host exited). `AgentHosts.events(sessionId, fromSeq?)` reads it whether or not the host is still running: from a live host it follows live events until the session ends; otherwise it reads the file to the end and completes. It fails with `SessionNotFound` if there's neither. Expired files are pruned by `list`, `attach`, `events` and host startup.
+
+```ts
+// after the runner restarts, even if the session ended meanwhile
+yield* (yield* AgentHosts).events(sessionId, lastPersistedSeq + 1).pipe(Stream.runForEach(persist))
+```
+
+**Reconnecting.** When the connection to a host drops (other than by `detach`/`stop` or the session ending), the client re-dials it on `reconnect`, by default an exponential backoff from 100 ms, capped at 2 s between attempts, giving up after 30 s (`RemoteAgent.defaultReconnect`). It's transparent: subscriptions resume from the last seq they delivered, and calls in flight are retried. `send`, `steer` and `turn` carry a client-generated request id. The host remembers the last 1 000 results by id and answers a repeat with the original result, so a retried `send` lands once and a retried `turn` waits on the original turn. Calls fail with `AgentError` when the schedule gives up, or at once if the host is gone (manifest removed or pid dead). `reconnect: false` fails on the first drop.
 
 **Process supervisors:** hosts are started detached, so they outlive the process that opened them, but whatever supervises that process may still stop them. The `Launcher` applies to the host command (so the host and the agent it runs share whatever it sets up); use it to place hosts outside the supervisor's reach. For example:
 
@@ -131,7 +142,7 @@ Each host serves one session over effect/rpc on a unix socket in `dir` (default 
 
 A host killed with SIGKILL can't stop its agent either (Node has no parent-death signal); a cgroup launcher such as a systemd scope covers that.
 
-`node scripts/live-reattach.ts` checks this end to end with the real CLIs: process A starts a slow turn and exits mid-turn; process B attaches, catches up, gets the turn's result, runs another turn and ends the session.
+`node scripts/live-reattach.ts` checks this end to end with the real CLIs: process A starts a slow turn and exits mid-turn; process B attaches, catches up, and drops its connection mid-turn twice: once while A's turn runs, once during a `turn()` call. Both turns' results still arrive, the subscription sees every event exactly once, and it matches the events file read back with `AgentHosts.events` after the host has exited.
 
 ## Testing
 

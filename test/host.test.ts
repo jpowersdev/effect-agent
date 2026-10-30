@@ -200,7 +200,7 @@ for (const p of providers) {
     )
 
     it.live(
-      "subscribeFrom an event the host no longer keeps fails EventsTrimmed",
+      "persistEvents: false: subscribeFrom an event the host no longer keeps fails EventsTrimmed",
       () =>
         Effect.gen(function* () {
           const session = yield* (yield* AgentHosts).open({ cwd: p.cwd })
@@ -213,7 +213,8 @@ for (const p of providers) {
           expect(failure).toMatchObject({ requested: 0, oldest: info.oldestSeq })
           const kept = yield* session.subscribeFrom(info.oldestSeq).pipe(Stream.take(3), Stream.runCollect)
           expect(kept.map((e) => e.seq)).toEqual([info.lastSeq - 2, info.lastSeq - 1, info.lastSeq])
-        }).pipe(Effect.scoped, Effect.provide(layer(p.simple, { maxEvents: 3 }))),
+          expect(existsSync(HostSpec.eventsPath(join(dir, "unpersisted"), session.sessionId))).toBe(false)
+        }).pipe(Effect.scoped, Effect.provide(layer(p.simple, { maxEvents: 3, persistEvents: false, dir: join(dir, "unpersisted") }))),
       timeout,
     )
 

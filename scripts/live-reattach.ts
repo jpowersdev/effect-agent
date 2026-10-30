@@ -10,15 +10,21 @@
  *      survived`, prints the session and turn ids once the command is running,
  *      and exits mid-turn.
  *   2. This process (B) attaches by id, catches up with `subscribeFrom(0)`,
- *      `awaitTurn`s the result (it must contain "survived"), runs one more
- *      short turn, and `end`s the session.
- *   3. It checks the host and agent processes are gone.
+ *      then drops its connection mid-turn (the host's internal SIGUSR2 test
+ *      trigger) while the command runs; the client reconnects on its own.
+ *      `awaitTurn` gets the result (it must contain "survived").
+ *   3. B runs a second command turn with `turn()` and drops the connection
+ *      again mid-turn: the call still returns that turn's result.
+ *   4. B `end`s the session, checks its subscription saw every seq exactly
+ *      once across both drops, and that the host's events file (read with
+ *      `AgentHosts.events` after the host exited) matches it event for event.
+ *   5. It checks the host and agent processes are gone.
  *
  * Runs in /tmp/effect-agent-live/reattach/ (Claude `claude-haiku-5-5`, Codex at
- * effort `low`); each provider costs one short command turn and one tiny turn.
+ * effort `low`); each provider costs two short command turns.
  */
 import { spawn } from "node:child_process"
-import { existsSync, mkdirSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Duration, Effect, Fiber, Option, Stream } from "effect"
@@ -61,7 +67,26 @@ const run = (provider: Provider): RunOptions => {
   }
 }
 
-const prompt = "Run this exact shell command and wait for it to finish: sleep 8 && echo survived\nThen reply with only its output."
+const command = (cmd: string) => `Run this exact shell command and wait for it to finish: ${cmd}\nThen reply with only its output.`
+const prompt = command("sleep 8 && echo survived")
+
+/** The host's internal test trigger: drop every client connection, keep running. */
+const dropConnections = (hostPid: number) => process.kill(hostPid, "SIGUSR2")
+const dropsLogged = (sessionId: string) => {
+  try {
+    return readFileSync(HostSpec.logPath(dir, sessionId), "utf8").split("\n").filter((l) => l.includes("dropping")).length
+  } catch {
+    return 0
+  }
+}
+const waitFor = (cond: () => boolean, what: string, ms = 60_000) =>
+  Effect.gen(function* () {
+    const deadline = Date.now() + ms
+    while (!cond()) {
+      if (Date.now() > deadline) return yield* Effect.fail(new Error(`timed out waiting for ${what}`))
+      yield* Effect.sleep(Duration.millis(50))
+    }
+  })
 
 // ---------------------------------------------------------------------------
 // Process A: open, start the turn, exit while the command runs
@@ -124,7 +149,7 @@ const processB = (provider: Provider) =>
     if (a.agentPid !== null) check(isAlive(a.agentPid), "the agent process is still running")
 
     const hosts = yield* AgentHosts
-    yield* Effect.gen(function* () {
+    const seen = yield* Effect.gen(function* () {
       const session = yield* hosts.attach(SessionId.make(a.sessionId))
       check(session.hostPid === a.hostPid, "attached to the same host")
       const seqAtAttach = yield* session.lastSeq
@@ -134,17 +159,35 @@ const processB = (provider: Provider) =>
         Effect.forkScoped,
       )
 
-      const result = yield* session.awaitTurn(TurnId.make(a.turnId)).pipe(Effect.timeout(Duration.seconds(120)))
+      // Drop the connection while the command is still running.
+      const awaiting = yield* session.awaitTurn(TurnId.make(a.turnId)).pipe(Effect.timeout(Duration.seconds(120)), Effect.forkScoped)
+      yield* Effect.sleep(Duration.millis(500))
+      const commandRunning = !caughtUp.some((e) => e.event._tag === "ToolResult" && e.event.turnId === a.turnId)
+      dropConnections(a.hostPid)
+      yield* waitFor(() => dropsLogged(a.sessionId) === 1, "the host to drop the connection")
+      check(commandRunning, "dropped the connection while the command was still running")
+      const result = yield* Fiber.join(awaiting)
       console.log(`  turn ended after ${Date.now() - t0} ms: ${JSON.stringify(result.finalText)}`)
-      check(result.finalText.toLowerCase().includes("survived"), "the turn started by process A finished with its output")
+      check(result.finalText.toLowerCase().includes("survived"), "the turn started by process A finished with its output, across the drop")
 
-      const next = yield* session.turn("Reply with just the word: pong").pipe(Effect.timeout(Duration.seconds(90)))
-      check(next.finalText.toLowerCase().includes("pong"), `still controllable: ${JSON.stringify(next.finalText)}`)
+      // A `turn()` call spanning a drop.
+      const before = caughtUp.length
+      const second = yield* session.turn(command("sleep 4 && echo again")).pipe(Effect.timeout(Duration.seconds(120)), Effect.forkScoped)
+      yield* waitFor(() => caughtUp.slice(before).some((e) => e.event._tag === "ToolCall"), "the second turn's command")
+      dropConnections(a.hostPid)
+      yield* waitFor(() => dropsLogged(a.sessionId) === 2, "the host to drop the connection again")
+      const next = yield* Fiber.join(second)
+      check(next.finalText.toLowerCase().includes("again"), `turn() returned its turn's result across a drop: ${JSON.stringify(next.finalText)}`)
 
       yield* session.end
       yield* Fiber.join(reader).pipe(Effect.timeout(Duration.seconds(15)))
       const seqs = caughtUp.map((e) => e.seq)
-      check(seqs.every((s, i) => s === i), `caught up on ${seqs.length} events, seq 0..${seqs.length - 1} with no gaps`)
+      check(seqs.every((s, i) => s === i), `caught up on ${seqs.length} events, seq 0..${seqs.length - 1}, each once, across both drops`)
+      check(
+        caughtUp.filter((e) => e.event._tag === "TurnStarted").length === 2 &&
+          caughtUp.filter((e) => e.event._tag === "MessageLanded").length === 2,
+        "two turns, two landed messages: nothing was sent twice",
+      )
       check(caughtUp[0]?.event._tag === "SessionStarted", "the catch-up starts with SessionStarted")
       const tags = caughtUp.map((e) => e.event)
       const toolResult = caughtUp.find((e) => e.event._tag === "ToolResult" && e.event.output.includes("survived"))
@@ -154,6 +197,7 @@ const processB = (provider: Provider) =>
         `that result (seq ${toolResult?.seq}) came after process A was gone (last seq at attach: ${seqAtAttach})`,
       )
       check(tags.filter((e) => e._tag === "TurnEnded").length === 2, "both turns ended in the log")
+      return caughtUp
     }).pipe(Effect.scoped)
 
     const deadline = Date.now() + 15_000
@@ -167,6 +211,13 @@ const processB = (provider: Provider) =>
       !existsSync(HostSpec.socketPath(dir, a.sessionId)) && !existsSync(HostSpec.manifestPath(dir, a.sessionId)),
       "its socket and manifest are removed",
     )
+    const logged = yield* hosts.events(SessionId.make(a.sessionId)).pipe(Stream.runCollect)
+    check(
+      JSON.stringify(logged.map((e) => [e.seq, e.event._tag])) === JSON.stringify(seen.map((e) => [e.seq, e.event._tag])),
+      `the retained events file has the same ${logged.length} events the subscription saw`,
+    )
+    rmSync(HostSpec.eventsPath(dir, a.sessionId), { force: true })
+    rmSync(HostSpec.logPath(dir, a.sessionId), { force: true })
     console.log(`  ${provider} passed in ${Date.now() - t0} ms`)
   }).pipe(Effect.provide(RemoteAgent.layer(options(provider))))
 

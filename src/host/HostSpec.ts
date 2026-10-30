@@ -8,7 +8,7 @@
  */
 import { NodeServices } from "@effect/platform-node"
 import { Duration, Layer, Option, Schema } from "effect"
-import { mkdirSync, readFileSync } from "node:fs"
+import { chmodSync, mkdirSync, readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Agent, Effort, type RunOptions } from "../Agent.ts"
@@ -109,8 +109,21 @@ export const HostSpec = Schema.Struct({
   run: RunSpec,
   /** Where the socket, manifest and log go. */
   dir: Schema.String,
-  /** Events kept for `subscribeFrom` (a ring buffer). Default 50 000. */
+  /**
+   * Events kept in memory for `subscribeFrom` (a ring buffer). With
+   * `persistEvents` this is only a cache in front of the events file.
+   * Default 50 000.
+   */
   maxEvents: Schema.optionalKey(Schema.Int.pipe(Schema.check(Schema.isGreaterThanOrEqualTo(1)))),
+  /** Append every event to `<dir>/<sessionId>.events.jsonl`. Default true. */
+  persistEvents: Schema.optionalKey(Schema.Boolean),
+  /** How long events files are kept after their host exits (for pruning at startup). Default 24 hours. */
+  retainEvents: Schema.optionalKey(DurationSpec),
+  /**
+   * Internal, tests only: drop every client connection right before replying
+   * to the first call of each of these RPCs (after the host has acted on it).
+   */
+  testDropBeforeReply: Schema.optionalKey(Schema.Array(Schema.String)),
   /** End an idle session no client has been attached to for this long. Default 30 minutes. */
   orphanTimeout: Schema.optionalKey(DurationSpec),
   /** How long to keep serving after the session ends, for clients to read the last events. Default 5 seconds. */
@@ -129,13 +142,16 @@ export const defaultDir = (): string => {
   return join(tmpdir(), `effect-agent-${process.getuid?.() ?? "user"}`)
 }
 
+/** Create `dir` (mode 0700), or make an existing one 0700: it holds sockets and full transcripts. */
 export const ensureDir = (dir: string): void => {
   mkdirSync(dir, { recursive: true, mode: 0o700 })
+  if ((statSync(dir).mode & 0o077) !== 0) chmodSync(dir, 0o700)
 }
 
 export const socketPath = (dir: string, sessionId: string) => join(dir, `${sessionId}.sock`)
 export const manifestPath = (dir: string, sessionId: string) => join(dir, `${sessionId}.json`)
 export const logPath = (dir: string, sessionId: string) => join(dir, `${sessionId}.log`)
+export const eventsPath = (dir: string, sessionId: string) => join(dir, `${sessionId}.events.jsonl`)
 
 export const Manifest = Schema.Struct({
   sessionId: SessionId,

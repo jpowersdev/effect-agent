@@ -1,22 +1,29 @@
 /**
  * The host: runs ONE session with the real provider layers and serves it
- * over effect/rpc on a unix socket, keeping its events in a numbered ring
- * buffer so a client that reattaches can catch up. `main.ts` is the process
- * entry point; this module is the program.
+ * over effect/rpc on a unix socket, numbering its events and appending them
+ * to the session's events file (`EventFile.ts`), with the latest in a ring
+ * buffer, so a client that reattaches (or reconnects) can catch up from any
+ * seq. `Send` / `Steer` / `Turn` are answered once per client request id, so
+ * a client may retry them after a reconnect. `main.ts` is the process entry
+ * point; this module is the program.
  *
  * Lifecycle: the host exits after its session ends (`End`, `Stop`, the agent
  * dying, the orphan timeout, SIGTERM), lingering briefly on `End`/`Stop`/agent
  * death so connected clients get the last events. It removes its socket and
- * manifest on the way out.
+ * manifest on the way out; the events file stays for `retainEvents`.
  */
-import { NodeSocketServer } from "@effect/platform-node"
+import { NodeSocket, NodeSocketServer } from "@effect/platform-node"
 import { Cause, Context, DateTime, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, PubSub, Schema, Scope, Stream } from "effect"
 import { RpcSerialization, RpcServer } from "effect/rpc"
+import { SocketServer } from "effect/socket"
+import type { Socket as NetSocket } from "node:net"
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { Agent, type AgentSession } from "../Agent.ts"
 import { AgentError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnOutcome, TurnSucceeded } from "../AgentEvent.ts"
+import * as EventFile from "./EventFile.ts"
 import {
+  eventsPath,
   type HostSpec,
   Manifest,
   manifestPath,
@@ -32,7 +39,40 @@ export const defaults = {
   maxEvents: 50_000,
   orphanTimeout: Duration.minutes(30),
   linger: Duration.seconds(5),
+  retainEvents: Duration.hours(24),
+  /** Results of `Send` / `Steer` / `Turn` remembered by `requestId`. */
+  requestResults: 1_000,
 } as const
+
+/** Prune expired events files in `dir` (those of live hosts are kept). */
+export const pruneEvents = (dir: string, retainEvents: Duration.Duration): void =>
+  EventFile.prune(dir, Duration.toMillis(retainEvents), (sessionId) => {
+    const manifest = readManifest(manifestPath(dir, sessionId))
+    return manifest !== undefined && isLive(manifest)
+  })
+
+/**
+ * Run `effect` once per `requestId`: a repeated id (a client retrying after a
+ * reconnect) waits for, and gets, the first run's result. The effect runs in
+ * `scope`, not in the request, so a client that disconnects doesn't cut it
+ * short. The last `limit` ids are remembered.
+ */
+export const makeOnce = (scope: Scope.Scope, limit: number) => {
+  const results = new Map<string, Deferred.Deferred<unknown, unknown>>()
+  return <A, E>(requestId: string, effect: Effect.Effect<A, E>): Effect.Effect<A, E> =>
+    Effect.suspend(() => {
+      const existing = results.get(requestId) as Deferred.Deferred<A, E> | undefined
+      if (existing !== undefined) return Deferred.await(existing)
+      const result = Deferred.makeUnsafe<A, E>()
+      results.set(requestId, result as Deferred.Deferred<unknown, unknown>)
+      if (results.size > limit) results.delete(results.keys().next().value!)
+      return effect.pipe(
+        Effect.onExit((exit) => Deferred.done(result, exit)),
+        Effect.forkIn(scope),
+        Effect.andThen(Deferred.await(result)),
+      )
+    })
+}
 
 export interface HostIO {
   /** Report readiness (or the open failure) to whoever started the host. Called once. */
@@ -69,7 +109,18 @@ export const isLive = (manifest: Manifest): boolean => isAlive(manifest.pid)
 
 const End = null
 
-export const makeLog = (max: number, provider: string) =>
+/**
+ * The session's numbered events: the last `max` in memory (a ring buffer),
+ * and, with `persist`, every one in the events file, written before it is
+ * published. A subscription older than the ring reads the missing range from
+ * the file, then continues from the ring and live events.
+ */
+export const makeLog = (
+  max: number,
+  provider: string,
+  /** `resumed`: continue the file an earlier host of this session left, rather than starting it afresh. */
+  persist: { readonly path: string; readonly resumed: boolean } | null = null,
+) =>
   Effect.gen(function* () {
     const buffer: Array<SeqEvent | undefined> = []
     let next = 0
@@ -87,47 +138,91 @@ export const makeLog = (max: number, provider: string) =>
     const droppedMessages = new Map<string, string>()
     const messageWaiters = new Map<string, Deferred.Deferred<string, AgentError>>()
 
-    const oldest = () => Math.max(0, next - max)
+    const droppedError = (messageId: string, reason: string) =>
+      new AgentError({ message: `message ${messageId} was ${reason} before it reached a turn`, provider })
+    const neverLanded = (messageId: string) =>
+      new AgentError({ message: `the session ended before message ${messageId} reached a turn`, provider })
+
+    /** Keep the maps that `awaitTurn` / `awaitMessage` read up to date. */
+    const index = (event: AgentEvent) => {
+      switch (event._tag) {
+        case "TurnStarted":
+          running = event.turnId
+          unlanded.delete(event.turnId)
+          break
+        case "MessageLanded": {
+          unlanded.delete(event.messageId)
+          landedIn.set(event.messageId, event.turnId)
+          const waiter = messageWaiters.get(event.messageId)
+          messageWaiters.delete(event.messageId)
+          if (waiter !== undefined) Deferred.doneUnsafe(waiter, Exit.succeed(event.turnId))
+          break
+        }
+        case "MessageDropped": {
+          unlanded.delete(event.messageId)
+          droppedMessages.set(event.messageId, event.reason)
+          const waiter = messageWaiters.get(event.messageId)
+          messageWaiters.delete(event.messageId)
+          if (waiter !== undefined) Deferred.doneUnsafe(waiter, Exit.fail(droppedError(event.messageId, event.reason)))
+          break
+        }
+        case "TurnEnded": {
+          if (running === event.turnId) running = null
+          outcomes.set(event.turnId, event.outcome)
+          const waiter = waiters.get(event.turnId)
+          waiters.delete(event.turnId)
+          if (waiter !== undefined) Deferred.doneUnsafe(waiter, Exit.succeed(event.outcome))
+          break
+        }
+      }
+    }
+
+    // A resumed session's earlier hosts may have left events: number on from them.
+    let file: EventFile.Writer | null = null
+    if (persist !== null) {
+      file = EventFile.openWriter(persist.path, persist.resumed ? (entry) => index(entry.event) : null)
+      next = file.next
+      // Those hosts are gone: nothing of theirs is still running.
+      running = null
+    }
+    /** The first seq this host logged; the ring never holds anything older. */
+    const firstOwn = next
+
+    const cacheOldest = () => Math.max(firstOwn, next - max)
+    const oldest = () => (file !== null ? 0 : cacheOldest())
+
+    const fileFailed = (error: unknown) =>
+      Effect.suspend(() => {
+        if (file === null) return Effect.void
+        const path = file.path
+        try {
+          file.close()
+        } catch {
+          // Already broken.
+        }
+        // A file with a hole in it would pass for the whole log after the host exits.
+        rmSync(path, { force: true })
+        file = null
+        return Effect.logError(`cannot write ${path}; events are no longer persisted`, error)
+      })
 
     const append = (event: AgentEvent) =>
       Effect.suspend(() => {
         const entry: SeqEvent = { seq: next++, event }
-        buffer[entry.seq % max] = entry
-        lastActivity = Date.now()
-        switch (event._tag) {
-          case "SessionStarted":
-            if (sessionStarted === null) sessionStarted = entry
-            break
-          case "TurnStarted":
-            running = event.turnId
-            unlanded.delete(event.turnId)
-            break
-          case "MessageLanded": {
-            unlanded.delete(event.messageId)
-            landedIn.set(event.messageId, event.turnId)
-            const waiter = messageWaiters.get(event.messageId)
-            messageWaiters.delete(event.messageId)
-            if (waiter !== undefined) Deferred.doneUnsafe(waiter, Exit.succeed(event.turnId))
-            break
-          }
-          case "MessageDropped": {
-            unlanded.delete(event.messageId)
-            droppedMessages.set(event.messageId, event.reason)
-            const waiter = messageWaiters.get(event.messageId)
-            messageWaiters.delete(event.messageId)
-            if (waiter !== undefined) Deferred.doneUnsafe(waiter, Exit.fail(droppedError(event.messageId, event.reason)))
-            break
-          }
-          case "TurnEnded": {
-            if (running === event.turnId) running = null
-            outcomes.set(event.turnId, event.outcome)
-            const waiter = waiters.get(event.turnId)
-            waiters.delete(event.turnId)
-            if (waiter !== undefined) Deferred.doneUnsafe(waiter, Exit.succeed(event.outcome))
-            break
+        let failure: { readonly error: unknown } | null = null
+        if (file !== null) {
+          try {
+            file.append(entry)
+          } catch (error) {
+            failure = { error }
           }
         }
-        return PubSub.publish(pubsub, entry)
+        buffer[entry.seq % max] = entry
+        lastActivity = Date.now()
+        if (event._tag === "SessionStarted" && sessionStarted === null) sessionStarted = entry
+        index(event)
+        const publish = PubSub.publish(pubsub, entry)
+        return failure !== null ? Effect.andThen(fileFailed(failure.error), publish) : publish
       })
 
     const end = (error: AgentError | null) =>
@@ -155,27 +250,31 @@ export const makeLog = (max: number, provider: string) =>
       Stream.unwrap(
         Effect.gen(function* (): Effect.fn.Return<Stream.Stream<SeqEvent, EventsTrimmed | AgentError>, never, Scope.Scope> {
           const from = Math.max(0, Math.floor(fromSeq))
-          if (from < oldest()) {
-            return Stream.fail(
-              new EventsTrimmed({
-                message: `events before ${oldest()} are no longer kept (asked for ${from})`,
-                requested: from,
-                oldest: oldest(),
-              }),
-            )
-          }
+          // Everything from here is decided synchronously, so no event can slip between the parts.
+          const boundary = cacheOldest()
+          const trimmed = (why: string) =>
+            new EventsTrimmed({ message: `events before ${boundary} ${why} (asked for ${from})`, requested: from, oldest: boundary })
+          if (from < boundary && file === null) return Stream.fail(trimmed("are no longer kept"))
           const subscription = ended === null ? yield* PubSub.subscribe(pubsub) : null
           const last = next - 1
           const snapshot: Array<SeqEvent> = []
-          for (let seq = from; seq <= last; seq++) snapshot.push(buffer[seq % max]!)
+          for (let seq = Math.max(from, boundary); seq <= last; seq++) snapshot.push(buffer[seq % max]!)
+          // [from, boundary) from the file; it has every seq up to `last` already.
+          const fromFile =
+            from < boundary && file !== null
+              ? EventFile.read(file.path, from, { until: boundary, startOffset: file.offsetFor(from) }).pipe(
+                  Stream.mapError((e) => trimmed(`could not be read from the events file: ${e.message}`)),
+                )
+              : Stream.empty
           const prefix = live && sessionStarted !== null && sessionStarted.seq < from ? [sessionStarted] : []
-          if (subscription === null) return Stream.concat(Stream.fromIterable([...prefix, ...snapshot]), tail)
+          const kept = Stream.concat(Stream.fromIterable(prefix), fromFile).pipe(Stream.concat(Stream.fromIterable(snapshot)))
+          if (subscription === null) return Stream.concat(kept, tail)
           const rest = Stream.fromSubscription(subscription).pipe(
             Stream.takeWhile((item): item is SeqEvent => item !== End),
             // Appended between subscribing and taking the snapshot: already in it.
             Stream.filter((entry) => entry.seq > last && entry.seq >= from),
           )
-          return Stream.concat(Stream.fromIterable([...prefix, ...snapshot]), rest).pipe(Stream.concat(tail))
+          return Stream.concat(kept, rest).pipe(Stream.concat(tail))
         }),
       )
 
@@ -213,15 +312,18 @@ export const makeLog = (max: number, provider: string) =>
         return Deferred.await(waiter).pipe(Effect.flatMap(awaitTurn))
       })
 
-    const droppedError = (messageId: string, reason: string) =>
-      new AgentError({ message: `message ${messageId} was ${reason} before it reached a turn`, provider })
-    const neverLanded = (messageId: string) =>
-      new AgentError({ message: `the session ended before message ${messageId} reached a turn`, provider })
-
     return {
       append,
       end,
       subscribe,
+      /** Stamp and close the events file (it stays, for `retainEvents`). */
+      closeFile: () => {
+        try {
+          file?.close()
+        } catch {
+          // Best effort.
+        }
+      },
       awaitTurn,
       awaitMessage,
       lastSeq: () => next - 1,
@@ -264,6 +366,8 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       const maxEvents = spec.maxEvents ?? defaults.maxEvents
       const orphanTimeout = Duration.toMillis(spec.orphanTimeout !== undefined ? toDuration(spec.orphanTimeout) : defaults.orphanTimeout)
       const linger = Duration.toMillis(spec.linger !== undefined ? toDuration(spec.linger) : defaults.linger)
+      const persist = spec.persistEvents ?? true
+      pruneEvents(spec.dir, spec.retainEvents !== undefined ? toDuration(spec.retainEvents) : defaults.retainEvents)
       const agentError = (message: string, cause?: unknown) =>
         new AgentError({ message, provider, ...(cause !== undefined && { cause }) })
 
@@ -288,8 +392,30 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       io.opened(sessionId)
       yield* Effect.logInfo(`session ${sessionId} opened (${provider}, cwd ${spec.run.cwd})`)
 
+      // ---- files ----
+      const socket = socketPath(spec.dir, sessionId)
+      const manifestFile = manifestPath(spec.dir, sessionId)
+      const existing = readManifest(manifestFile)
+      if (existing !== undefined && existing.pid !== process.pid && isLive(existing)) {
+        const error = agentError(`session ${sessionId} is already hosted by pid ${existing.pid}; attach to it instead`)
+        io.ready({ _tag: "Failed", error })
+        yield* Scope.close(sessionScope, Exit.void)
+        return 1
+      }
+
       // ---- event log: subscribe before anything can be sent ----
-      const log = yield* makeLog(maxEvents, provider)
+      const madeLog = yield* makeLog(
+        maxEvents,
+        provider,
+        persist ? { path: eventsPath(spec.dir, sessionId), resumed: spec.run.resume !== undefined } : null,
+      ).pipe(Effect.exit)
+      if (Exit.isFailure(madeLog)) {
+        const error = agentError(`cannot open the events file: ${describe(madeLog.cause)}`)
+        io.ready({ _tag: "Failed", error })
+        yield* Scope.close(sessionScope, Exit.void)
+        return 1
+      }
+      const log = madeLog.value
       const events = yield* session.subscribe
       const consumer = yield* events.pipe(
         Stream.runForEach(log.append),
@@ -306,16 +432,6 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
         Effect.forkScoped,
       )
 
-      // ---- files ----
-      const socket = socketPath(spec.dir, sessionId)
-      const manifestFile = manifestPath(spec.dir, sessionId)
-      const existing = readManifest(manifestFile)
-      if (existing !== undefined && existing.pid !== process.pid && isLive(existing)) {
-        const error = agentError(`session ${sessionId} is already hosted by pid ${existing.pid}; attach to it instead`)
-        io.ready({ _tag: "Failed", error })
-        yield* Scope.close(sessionScope, Exit.void)
-        return 1
-      }
       if (Buffer.byteLength(socket) > 107) {
         const error = agentError(`socket path ${socket} is too long for a unix socket; use a shorter dir`)
         io.ready({ _tag: "Failed", error })
@@ -324,6 +440,8 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       }
       rmSync(socket, { force: true })
       const cleanup = () => {
+        // The events file stays, for `retainEvents`.
+        log.closeFile()
         const current = readManifest(manifestFile)
         if (current === undefined || current.pid === process.pid) {
           rmSync(manifestFile, { force: true })
@@ -333,8 +451,31 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       process.once("exit", cleanup)
       yield* Effect.addFinalizer(() => Effect.sync(cleanup))
 
+      // ---- connections ----
+      const connections = new Set<NetSocket>()
+      const services = yield* Effect.context<never>()
+      const dropConnections = () => {
+        Effect.runForkWith(services)(Effect.logInfo(`dropping ${connections.size} client connection(s)`))
+        for (const connection of connections) connection.destroy()
+      }
+      // Internal, tests only: SIGUSR2 drops every client connection (the host keeps running).
+      const onUsr2 = () => dropConnections()
+      yield* Effect.acquireRelease(
+        Effect.sync(() => process.on("SIGUSR2", onUsr2)),
+        () => Effect.sync(() => process.off("SIGUSR2", onUsr2)),
+      )
+      // Internal, tests only: drop them right before replying to the first call of each of these.
+      const dropBeforeReply = new Set(spec.testDropBeforeReply ?? [])
+      const replyOrDrop = (rpc: string) =>
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (dropBeforeReply.delete(rpc)) dropConnections()
+          }),
+        )
+
       // ---- server ----
       const sessionClosed = yield* Deferred.make<void>()
+      const once = makeOnce(yield* Effect.scope, defaults.requestResults)
       const handlers = HostRpcs.toLayer({
         Info: () =>
           Effect.gen(function* () {
@@ -353,17 +494,21 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
             }
           }),
         Subscribe: ({ fromSeq, live }) => log.subscribe(fromSeq, live),
-        // Uninterruptible: a client that disconnects mid-call must not cut a provider
-        // call in half; the turn goes on either way (as when a local `turn` is interrupted).
-        Send: ({ input }) => session.send(input).pipe(Effect.tap((id) => Effect.sync(() => log.sent(id))), Effect.uninterruptible),
-        Steer: ({ input }) =>
-          session.steer(input).pipe(Effect.tap((o) => Effect.sync(() => log.sent(o.messageId))), Effect.uninterruptible),
+        // `once`: a client that disconnects mid-call doesn't cut a provider call in half,
+        // and one that retries it after reconnecting gets the first call's result.
+        Send: ({ input, requestId }) =>
+          once(requestId, session.send(input).pipe(Effect.tap((id) => Effect.sync(() => log.sent(id))))).pipe(replyOrDrop("Send")),
+        Steer: ({ input, requestId }) =>
+          once(requestId, session.steer(input).pipe(Effect.tap((o) => Effect.sync(() => log.sent(o.messageId))))).pipe(
+            replyOrDrop("Steer"),
+          ),
         Interrupt: () => session.interrupt,
         End: () => session.end,
         Stop: () => Deferred.succeed(shutdown, "stop").pipe(Effect.andThen(Deferred.await(sessionClosed))),
-        Turn: ({ input }) => Effect.uninterruptible(session.turn(input)),
-        AwaitTurn: ({ turnId }) => log.awaitTurn(turnId).pipe(Effect.flatMap(settle)),
-        AwaitMessage: ({ messageId }) => log.awaitMessage(messageId).pipe(Effect.flatMap(settle)),
+        // A retried `Turn` waits on the original turn.
+        Turn: ({ input, requestId }) => once(requestId, session.turn(input)).pipe(replyOrDrop("Turn")),
+        AwaitTurn: ({ turnId }) => log.awaitTurn(turnId).pipe(Effect.flatMap(settle), replyOrDrop("AwaitTurn")),
+        AwaitMessage: ({ messageId }) => log.awaitMessage(messageId).pipe(Effect.flatMap(settle), replyOrDrop("AwaitMessage")),
       })
 
       const serverContext = yield* Layer.build(NodeSocketServer.layer({ path: socket })).pipe(Effect.exit)
@@ -373,8 +518,21 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
         yield* Scope.close(sessionScope, Exit.void)
         return 1
       }
+      // Track each connection's net.Socket, so they can be dropped.
+      const server = Context.get(serverContext.value, SocketServer.SocketServer)
+      const tracked = SocketServer.SocketServer.of({
+        ...server,
+        run: (handler) =>
+          server.run((socket) =>
+            Effect.flatMap(Effect.serviceOption(NodeSocket.NetSocket), (connection) => {
+              if (Option.isNone(connection)) return handler(socket)
+              connections.add(connection.value)
+              return handler(socket).pipe(Effect.ensuring(Effect.sync(() => connections.delete(connection.value))))
+            }),
+          ),
+      })
       const protocol = yield* RpcServer.makeProtocolSocketServer.pipe(
-        Effect.provideContext(serverContext.value),
+        Effect.provideService(SocketServer.SocketServer, tracked),
         Effect.provide(RpcSerialization.layerNdjson),
       )
       yield* RpcServer.make(HostRpcs, { concurrency: "unbounded", disableTracing: true }).pipe(
