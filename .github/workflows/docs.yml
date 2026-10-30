@@ -1,21 +1,11 @@
 name: Docs
 
+# Always triggered, so the "Docs passed" check always reports (main requires it);
+# the build is skipped when nothing the site is built from changed.
 on:
   push:
     branches: [main]
-    paths: &docs
-      # The guides, the site, and the API reference's sources
-      - site/**
-      - src/**
-      - docgen.json
-      - tsconfig.json
-      - package.json
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - .github/actions/setup/**
-      - .github/workflows/docs.yml
   pull_request:
-    paths: *docs
   workflow_dispatch:
 
 concurrency:
@@ -25,8 +15,39 @@ concurrency:
 permissions: {}
 
 jobs:
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          # The guides, the site, and the API reference's sources
+          filters: |
+            docs:
+              - site/**
+              - src/**
+              - docgen.json
+              - tsconfig.json
+              - package.json
+              - pnpm-lock.yaml
+              - pnpm-workspace.yaml
+              - .github/actions/setup/**
+              - .github/workflows/docs.yml
+
   build:
     name: Build the docs site
+    needs: changes
+    if: needs.changes.outputs.docs == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -58,3 +79,14 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  passed:
+    name: Docs passed
+    if: always()
+    needs: [changes, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # A skipped build is fine; a failed or cancelled one is not
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

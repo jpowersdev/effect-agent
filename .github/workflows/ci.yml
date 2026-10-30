@@ -1,16 +1,11 @@
 name: CI
 
+# Always triggered, so the "CI passed" check always reports (main requires it);
+# the jobs are skipped when only the docs site or prose changed.
 on:
   push:
     branches: [main]
-    paths-ignore: &prose
-      # The docs site and prose; docs.yml builds the site
-      - site/**
-      - assets/**
-      - "**/*.md"
-      - .github/workflows/docs.yml
   pull_request:
-    paths-ignore: *prose
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -19,8 +14,36 @@ concurrency:
 permissions: {}
 
 jobs:
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: filter
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          # Anything but the docs site and prose (docs.yml builds the site)
+          predicate-quantifier: every
+          filters: |
+            code:
+              - "**"
+              - "!site/**"
+              - "!assets/**"
+              - "!**/*.md"
+              - "!.github/workflows/docs.yml"
+
   node:
     name: Typecheck, test, build
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -37,6 +60,8 @@ jobs:
 
   bun:
     name: Session hosts on Bun
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -52,3 +77,14 @@ jobs:
       - run: pnpm test test/host.test.ts test/host-durability.test.ts test/host-hooks.test.ts test/conformance.test.ts
         env:
           EFFECT_AGENT_TEST_HOST: bun
+
+  passed:
+    name: CI passed
+    if: always()
+    needs: [changes, node, bun]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # A skipped job is fine; a failed or cancelled one is not
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
