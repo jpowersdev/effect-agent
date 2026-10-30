@@ -67,7 +67,7 @@ describe("CodexAgent over replays", () => {
       expect(events.some(is("LimitsUpdated"))).toBe(true)
       // every event keeps its frame
       expect(events.every((e) => e.raw !== undefined)).toBe(true)
-      expect(yield* session.send("again").pipe(Effect.flip)).toMatchObject({ _tag: "AgentError" })
+      expect(yield* session.send("again").pipe(Effect.flip)).toMatchObject({ _tag: "SessionClosed" })
     }).pipe(Effect.provide(agent("simple"))),
   )
 
@@ -208,8 +208,8 @@ describe("CodexAgent over replays", () => {
       expect(events.find(is("TurnEnded"))?.outcome).toBe(failure)
       const streamExit = yield* Fiber.await(fiber)
       expect(Exit.isFailure(streamExit)).toBe(true)
-      expect(yield* session.send("again").pipe(Effect.flip)).toMatchObject({ _tag: "AgentError" })
-      expect(yield* session.interrupt.pipe(Effect.flip)).toMatchObject({ _tag: "AgentError" })
+      expect(yield* session.send("again").pipe(Effect.flip)).toMatchObject({ _tag: "SessionClosed" })
+      expect(yield* session.interrupt.pipe(Effect.flip)).toMatchObject({ _tag: "SessionClosed" })
     }).pipe(Effect.provide(agent("process-killed"))),
   )
 
@@ -303,8 +303,8 @@ describe("CodexAgent over replays", () => {
       expect(events.filter(is("TurnEnded")).map((e) => e.outcome)).toEqual([failure])
       // like a process death afterwards
       expect(Exit.isFailure(yield* Fiber.await(fiber))).toBe(true)
-      expect(yield* session.send("again").pipe(Effect.flip)).toMatchObject({ _tag: "AgentError", message: expect.stringMatching(/gone/) })
-      expect(yield* session.interrupt.pipe(Effect.flip)).toMatchObject({ _tag: "AgentError" })
+      expect(yield* session.send("again").pipe(Effect.flip)).toMatchObject({ _tag: "SessionClosed", message: expect.stringMatching(/gone/) })
+      expect(yield* session.interrupt.pipe(Effect.flip)).toMatchObject({ _tag: "SessionClosed" })
     }).pipe(Effect.provide(agent("stall-killed", { stallGrace: "100 millis" }))),
   )
 

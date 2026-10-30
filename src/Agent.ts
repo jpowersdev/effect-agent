@@ -11,10 +11,10 @@
  *
  * @since 0.1.0
  */
-import { Context, type Duration, Effect, Option, Schema, Scope, Stream } from "effect"
-import type { AgentError, SessionNotFound, TurnFailure } from "./AgentError.ts"
+import { Context, Effect, Option, Schema, Scope, Stream } from "effect"
+import type { AgentError, SessionError, SessionNotFound, TurnFailure } from "./AgentError.ts"
 import type { AgentEvent, TurnSucceeded } from "./AgentEvent.ts"
-import { LimitWindowStatus, MessageId, type SessionId, TurnId } from "./Domain.ts"
+import { DurationInput, EnvOverrides, LimitWindowStatus, MessageId, SessionId, TurnId } from "./Domain.ts"
 
 /**
  * Reasoning effort for a turn.
@@ -30,35 +30,39 @@ export const Effort = Schema.Literals(["minimal", "low", "medium", "high", "xhig
 export type Effort = typeof Effort.Type
 
 /**
- * Options for `Agent.open`.
+ * Everything in `RunOptions` but `hooks`, as a Schema: plain data that can
+ * be stored or sent to another process (`RemoteAgent` sends it to its host).
+ * Durations encode as millis; an `env` value of `undefined` as `null`.
  *
- * @since 0.1.0
+ * @since 0.2.0
  * @category models
  */
-export interface RunOptions {
-  readonly cwd: string
+export const RunSettings = Schema.Struct({
+  cwd: Schema.String,
   /**
    * Applied over the host environment. `undefined` removes a variable.
    * Host markers that make an agent think it is nested (e.g. `CLAUDECODE`)
    * are always removed.
    */
-  readonly env?: Readonly<Record<string, string | undefined>>
-  readonly model?: string
-  readonly effort?: Effort
+  env: Schema.optionalKey(EnvOverrides),
+  model: Schema.optionalKey(Schema.String),
+  effort: Schema.optionalKey(Effort),
   /** Added to the provider's default system prompt; never replaces it. */
-  readonly appendSystemPrompt?: string
-  readonly disable?: {
-    /** The agent's ask-the-user tool (Claude `AskUserQuestion`). */
-    readonly askUser?: boolean
-    /** Subagent tools (Claude `Agent`/`Task`, Codex multi-agent). */
-    readonly subagents?: boolean
-    /** Provider-native tool names. */
-    readonly tools?: ReadonlyArray<string>
-  }
+  appendSystemPrompt: Schema.optionalKey(Schema.String),
+  disable: Schema.optionalKey(
+    Schema.Struct({
+      /** The agent's ask-the-user tool (Claude `AskUserQuestion`). */
+      askUser: Schema.optionalKey(Schema.Boolean),
+      /** Subagent tools (Claude `Agent`/`Task`, Codex multi-agent). */
+      subagents: Schema.optionalKey(Schema.Boolean),
+      /** Provider-native tool names. */
+      tools: Schema.optionalKey(Schema.Array(Schema.String)),
+    }),
+  ),
   /** Spend cap in USD. Native for Claude; estimated from tokens for Codex. */
-  readonly spendCapUsd?: number
+  spendCapUsd: Schema.optionalKey(Schema.Number),
   /** Resume an existing session; fails with `SessionNotFound` if the provider has no record of it. */
-  readonly resume?: SessionId
+  resume: Schema.optionalKey(SessionId),
   /**
    * End a running turn `Stalled` after this long with no events. `Heartbeat`
    * events count, so a model that is thinking is not idle. While a tool call
@@ -67,14 +71,38 @@ export interface RunOptions {
    * ended after `grace` (default 10 seconds) the agent process is killed,
    * which ends the session.
    */
-  readonly watchdog?: {
-    readonly idle: Duration.Input
-    readonly toolIdle?: Duration.Input
-    readonly grace?: Duration.Input
-  }
+  watchdog: Schema.optionalKey(
+    Schema.Struct({
+      idle: DurationInput,
+      toolIdle: Schema.optionalKey(DurationInput),
+      grace: Schema.optionalKey(DurationInput),
+    }),
+  ),
+})
+/**
+ * @since 0.2.0
+ * @category models
+ */
+export type RunSettings = typeof RunSettings.Type
+
+/**
+ * Options for `Agent.open`: `RunSettings`, plus hooks.
+ *
+ * @since 0.1.0
+ * @category models
+ */
+export interface RunOptions extends RunSettings {
   /** Callbacks that can add context to the turn. Only where `capabilities.hooks` is true. */
   readonly hooks?: Hooks
 }
+
+/**
+ * `RunOptions` without its hooks (functions can't leave the process).
+ *
+ * @since 0.2.0
+ * @category utils
+ */
+export const settingsOf = ({ hooks: _, ...settings }: RunOptions): RunSettings => settings
 
 /**
  * The tool call passed to `Hooks.beforeTool` and `Hooks.afterTool`.
@@ -243,7 +271,9 @@ export const SteerOutcome = Schema.Union([
 export type SteerOutcome = typeof SteerOutcome.Type
 
 /**
- * An open session, from `Agent.open`.
+ * An open session, from `Agent.open`. Calls fail with `SessionClosed` once
+ * the session has ended, with `ConnectionLost` when a remote session's host
+ * can't be reached, and with `AgentError` for anything else.
  *
  * @since 0.1.0
  * @category models
@@ -260,19 +290,23 @@ export interface AgentSession {
    * starting with the session's `SessionStarted` once it is known. Use this
    * (then fork the stream) when you must not miss events after a `send`.
    */
-  readonly subscribe: Effect.Effect<Stream.Stream<AgentEvent, AgentError>, never, Scope.Scope>
+  readonly subscribe: Effect.Effect<Stream.Stream<AgentEvent, SessionError>, never, Scope.Scope>
   /** `subscribe`, deferred until the stream runs. Events sent before it runs are missed. */
-  readonly events: Stream.Stream<AgentEvent, AgentError>
+  readonly events: Stream.Stream<AgentEvent, SessionError>
   /** Start a turn now if idle, otherwise after the running turn. */
-  readonly send: (input: Input) => Effect.Effect<MessageId, AgentError>
+  readonly send: (input: Input) => Effect.Effect<MessageId, SessionError>
   /** `send`, then wait for that message's turn to end. */
-  readonly turn: (input: Input) => Effect.Effect<TurnSucceeded, TurnFailure | AgentError>
+  readonly turn: (input: Input) => Effect.Effect<TurnSucceeded, TurnFailure | SessionError>
   /** Deliver into the running turn at its next tool boundary; starts a new turn if none is running. */
-  readonly steer: (input: Input) => Effect.Effect<SteerOutcome, AgentError>
+  readonly steer: (input: Input) => Effect.Effect<SteerOutcome, SessionError>
   /** Stop the running turn (it ends `Interrupted`); the session stays usable. */
-  readonly interrupt: Effect.Effect<void, AgentError>
-  /** No more input: let queued work finish, then end the session. */
-  readonly end: Effect.Effect<void, AgentError>
+  readonly interrupt: Effect.Effect<void, SessionError>
+  /**
+   * No more input: let queued work finish, then end the session. On a
+   * session that already ended, succeeds if it ended cleanly and fails with
+   * what ended it otherwise.
+   */
+  readonly end: Effect.Effect<void, SessionError>
 }
 
 /**

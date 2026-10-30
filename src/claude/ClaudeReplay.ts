@@ -33,7 +33,7 @@
  * @since 0.1.0
  */
 import type { HookEvent, HookInput } from "@anthropic-ai/claude-agent-sdk"
-import { Cause, Effect, Layer, Option, Queue, Semaphore, Stream } from "effect"
+import { Cause, Effect, Layer, Option, Queue, Schema, Semaphore, Stream } from "effect"
 import { readFileSync } from "node:fs"
 import * as ClaudeSdk from "./ClaudeSdk.ts"
 
@@ -45,17 +45,23 @@ import * as ClaudeSdk from "./ClaudeSdk.ts"
  */
 export type Recording = ReadonlyArray<ClaudeSdk.RecordLine>
 
+const parseJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
+const isRecordLine = Schema.is(Schema.Struct({ dir: Schema.Literals(["out", "in", "ctl", "hook", "status", "history", "error"]) }))
+
 /**
- * Parse a JSONL recording; blank lines are skipped.
+ * Parse a JSONL recording; blank lines are skipped. Throws on a line that isn't a `RecordLine`.
  *
  * @since 0.1.0
  * @category parsing
  */
 export const parse = (text: string): Recording =>
-  text
-    .split("\n")
-    .filter((line) => line.trim() !== "")
-    .map((line) => JSON.parse(line) as ClaudeSdk.RecordLine)
+  text.split("\n").flatMap((line, i) => {
+    if (line.trim() === "") return []
+    const value = Option.getOrUndefined(parseJson(line))
+    if (!isRecordLine(value)) throw new Error(`line ${i + 1} of the recording is not a recording line: ${line.slice(0, 200)}`)
+    // The SDK frames inside are the SDK's types; only the line's own shape is checked.
+    return [value as ClaudeSdk.RecordLine]
+  })
 
 /**
  * Read and parse a JSONL recording file.

@@ -18,9 +18,9 @@
  *
  * @since 0.1.0
  */
-import { Deferred, Effect, Layer, Option } from "effect"
+import { Deferred, Effect, Layer, Option, Schema } from "effect"
 import { AgentError } from "../AgentError.ts"
-import { CodexAppServer, type Connection, makeRpcCore, parseUserAgentVersion, type ProcessExit } from "./CodexAppServer.ts"
+import { CodexAppServer, type Connection, decodeMessageValue, makeRpcCore, parseUserAgentVersion, type ProcessExit } from "./CodexAppServer.ts"
 import * as P from "./protocol.ts"
 
 /**
@@ -33,17 +33,28 @@ export type Frame =
   | { readonly dir: "out" | "in"; readonly msg: P.Message }
   | { readonly dir: "exit"; readonly exitCode: number | null; readonly signal: string | null }
 
+const RecordingLine = Schema.Union([
+  Schema.Struct({ dir: Schema.Literals(["out", "in"]), msg: Schema.Unknown }),
+  Schema.Struct({ dir: Schema.Literal("exit"), exitCode: Schema.NullOr(Schema.Number), signal: Schema.NullOr(Schema.String) }),
+])
+const decodeLine = Schema.decodeUnknownOption(Schema.fromJsonString(RecordingLine))
+
 /**
- * Parses JSONL recording text into frames.
+ * Parses JSONL recording text into frames. Throws on a line that isn't one.
  *
  * @since 0.1.0
  * @category testing
  */
 export const parseRecording = (jsonl: string): ReadonlyArray<Frame> =>
-  jsonl
-    .split("\n")
-    .filter((line) => line.trim() !== "")
-    .map((line) => JSON.parse(line) as Frame)
+  jsonl.split("\n").flatMap((line, i): Array<Frame> => {
+    if (line.trim() === "") return []
+    const fail = () => {
+      throw new Error(`line ${i + 1} of the recording is not a recording line: ${line.slice(0, 200)}`)
+    }
+    const decoded = Option.getOrElse(decodeLine(line), fail)
+    if (decoded.dir === "exit") return [decoded]
+    return [{ dir: decoded.dir, msg: Option.getOrElse(decodeMessageValue(decoded.msg), fail) }]
+  })
 
 const agentError = (message: string) => new AgentError({ message, provider: "codex" })
 

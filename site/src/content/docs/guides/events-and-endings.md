@@ -114,3 +114,7 @@ const outcomes = events.pipe(
 
 Outside of turns, `open` and `history` fail with `SessionNotFound` for an unknown
 session. Infrastructure failures, such as a process that won't start, are `AgentError`.
+
+Once a session has ended (`end`, its scope closed, or its agent process died), its calls
+fail with `SessionClosed`. `end` itself succeeds if the session ended cleanly, and fails
+with what ended it otherwise.

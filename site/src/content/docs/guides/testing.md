@@ -15,7 +15,9 @@ const Recording = ClaudeAgent.layer().pipe(
 )
 ```
 
-For Codex, `CodexAppServer.layer({ record })` does the same, and needs a `FileSystem`.
+For Codex, `CodexAppServer.layer({ record })` does the same. Each connection starts the
+file afresh, except one that opens while another is recording (a `status` call during
+a session, say): that one isn't recorded.
 
 ## Replay it in a test
 

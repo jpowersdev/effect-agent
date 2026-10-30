@@ -21,7 +21,7 @@ import {
 } from "../AgentError.ts"
 import type { AgentEvent, TurnOutcome } from "../AgentEvent.ts"
 import { type LimitWindow, type LimitWindowStatus, MessageId, type TokenUsage, TurnId } from "../Domain.ts"
-import type * as P from "./protocol.ts"
+import * as P from "./protocol.ts"
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -295,37 +295,35 @@ export interface ToolCallInfo {
  * @category mapping
  */
 export const toolCallOf = (item: P.ThreadItem): ToolCallInfo | null => {
-  const i = item as any
-  switch (item.type) {
-    case "commandExecution": {
-      const actions: ReadonlyArray<P.CommandAction> = i.commandActions ?? []
-      // `command` is wrapped in the login shell (`zsh -lc '...'`); the parsed actions are what the model wrote.
-      const summary = actions.length > 0 ? actions.map((a) => a.command).join(" | ") : i.command
-      return { name: "shell", summary, input: { command: i.command, cwd: i.cwd } }
-    }
-    case "fileChange": {
-      const changes: ReadonlyArray<{ path: string; kind: unknown }> = i.changes ?? []
-      return { name: "apply_patch", summary: changes.map((c) => c.path).join(", "), input: { changes: i.changes } }
-    }
-    case "mcpToolCall":
-      return { name: `mcp__${i.server}__${i.tool}`, summary: `${i.server}.${i.tool}`, input: i.arguments }
-    case "dynamicToolCall": {
-      const name = i.namespace ? `${i.namespace}.${i.tool}` : i.tool
-      return { name, summary: name, input: i.arguments }
-    }
-    case "webSearch":
-      return { name: "web_search", summary: i.query ?? "", input: { query: i.query, action: i.action } }
-    case "collabAgentToolCall":
-      return { name: `collab.${i.tool}`, summary: i.prompt ?? i.tool, input: { prompt: i.prompt } }
-    default:
-      return null
+  // Fields are read defensively (`??`): servers may leave out ones the protocol marks required.
+  if (P.isItem(item, "commandExecution")) {
+    const actions = item.commandActions ?? []
+    // `command` is wrapped in the login shell (`zsh -lc '...'`); the parsed actions are what the model wrote.
+    const summary = actions.length > 0 ? actions.map((a) => a.command).join(" | ") : item.command
+    return { name: "shell", summary, input: { command: item.command, cwd: item.cwd } }
   }
+  if (P.isItem(item, "fileChange")) {
+    return { name: "apply_patch", summary: (item.changes ?? []).map((c) => c.path).join(", "), input: { changes: item.changes } }
+  }
+  if (P.isItem(item, "mcpToolCall")) {
+    return { name: `mcp__${item.server}__${item.tool}`, summary: `${item.server}.${item.tool}`, input: item.arguments }
+  }
+  if (P.isItem(item, "dynamicToolCall")) {
+    const name = item.namespace ? `${item.namespace}.${item.tool}` : item.tool
+    return { name, summary: name, input: item.arguments }
+  }
+  if (P.isItem(item, "webSearch")) return { name: "web_search", summary: item.query ?? "", input: { query: item.query, action: item.action } }
+  if (P.isItem(item, "collabAgentToolCall")) {
+    return { name: `collab.${item.tool}`, summary: item.prompt ?? item.tool, input: { prompt: item.prompt } }
+  }
+  return null
 }
 
+const textOf = (c: unknown): string | undefined =>
+  typeof c === "object" && c !== null && typeof (c as { text?: unknown }).text === "string" ? (c as { text: string }).text : undefined
+
 const textOfContent = (content: ReadonlyArray<unknown> | null | undefined): string =>
-  (content ?? [])
-    .map((c: any) => (typeof c?.text === "string" ? c.text : JSON.stringify(c)))
-    .join("\n")
+  (content ?? []).map((c) => textOf(c) ?? JSON.stringify(c)).join("\n")
 
 /**
  * The result of a tool-call item, or null if it isn't a tool call.
@@ -334,35 +332,30 @@ const textOfContent = (content: ReadonlyArray<unknown> | null | undefined): stri
  * @category mapping
  */
 export const toolResultOf = (item: P.ThreadItem): { readonly isError: boolean; readonly output: string } | null => {
-  const i = item as any
-  switch (item.type) {
-    case "commandExecution":
-      return {
-        isError: i.status === "failed" || i.status === "declined" || (i.exitCode !== null && i.exitCode !== 0),
-        output: i.aggregatedOutput ?? "",
-      }
-    case "fileChange":
-      return {
-        isError: i.status === "failed" || i.status === "declined",
-        output: (i.changes ?? []).map((c: any) => c.diff ?? c.path).join("\n"),
-      }
-    case "mcpToolCall":
-      return {
-        isError: i.status === "failed" || (i.error !== null && i.error !== undefined),
-        output: i.error?.message ?? textOfContent(i.result?.content),
-      }
-    case "dynamicToolCall":
-      return {
-        isError: i.status === "failed" || i.success === false,
-        output: textOfContent(i.contentItems),
-      }
-    case "webSearch":
-      return { isError: false, output: i.results ? JSON.stringify(i.results) : "" }
-    case "collabAgentToolCall":
-      return { isError: i.status === "failed", output: i.status ?? "" }
-    default:
-      return null
+  if (P.isItem(item, "commandExecution")) {
+    return {
+      isError: item.status === "failed" || item.status === "declined" || (item.exitCode !== null && item.exitCode !== undefined && item.exitCode !== 0),
+      output: item.aggregatedOutput ?? "",
+    }
   }
+  if (P.isItem(item, "fileChange")) {
+    return {
+      isError: item.status === "failed" || item.status === "declined",
+      output: (item.changes ?? []).map((c) => c.diff ?? c.path).join("\n"),
+    }
+  }
+  if (P.isItem(item, "mcpToolCall")) {
+    return {
+      isError: item.status === "failed" || (item.error !== null && item.error !== undefined),
+      output: item.error?.message ?? textOfContent(item.result?.content),
+    }
+  }
+  if (P.isItem(item, "dynamicToolCall")) {
+    return { isError: item.status === "failed" || item.success === false, output: textOfContent(item.contentItems) }
+  }
+  if (P.isItem(item, "webSearch")) return { isError: false, output: item.results ? JSON.stringify(item.results) : "" }
+  if (P.isItem(item, "collabAgentToolCall")) return { isError: item.status === "failed", output: item.status ?? "" }
+  return null
 }
 
 // ---------------------------------------------------------------------------
@@ -420,8 +413,9 @@ const heartbeatMethods: ReadonlySet<string> = new Set<P.NotificationMethod>([
  */
 export const mapNotification = (msg: P.Incoming, state: MapState, nowMs: number): Array<AgentEvent> => {
   const raw = msg
-  const params: any = msg.params ?? {}
-  const turnId = typeof params.turnId === "string" && params.turnId !== "" ? TurnId.make(params.turnId) : null
+  const params: unknown = msg.params
+  const scoped = (typeof params === "object" && params !== null ? params : {}) as { readonly turnId?: unknown }
+  const turnId = typeof scoped.turnId === "string" && scoped.turnId !== "" ? TurnId.make(scoped.turnId) : null
 
   const heartbeat = (): Array<AgentEvent> => {
     if (nowMs - state.lastHeartbeatMs < HEARTBEAT_INTERVAL_MS) return []
@@ -440,14 +434,14 @@ export const mapNotification = (msg: P.Incoming, state: MapState, nowMs: number)
   // Typed so each case must be a method protocol.ts names.
   switch (msg.method as P.NotificationMethod) {
     case "item/started": {
-      const item: P.ThreadItem = params.item
+      const item = (params as P.ItemNotification).item
       if (item.type === "reasoning" || item.type === "agentMessage") return heartbeat()
       const events = call(item)
       return events.length > 0 ? events : [{ _tag: "Other", raw }]
     }
     case "item/completed": {
-      const item: P.ThreadItem = params.item
-      if (item.type === "agentMessage") return [{ _tag: "Text", turnId, text: (item as any).text ?? "", raw }]
+      const item = (params as P.ItemNotification).item
+      if (P.isItem(item, "agentMessage")) return [{ _tag: "Text", turnId, text: item.text ?? "", raw }]
       if (item.type === "contextCompaction") return [{ _tag: "Compacted", turnId, trigger: null, raw }]
       if (item.type === "reasoning") return heartbeat()
       const result = toolResultOf(item)
@@ -455,7 +449,7 @@ export const mapNotification = (msg: P.Incoming, state: MapState, nowMs: number)
       return [...call(item), { _tag: "ToolResult", turnId, callId: item.id, ...result, raw }]
     }
     case "account/rateLimits/updated": {
-      state.rateLimits = mergeRateLimits(state.rateLimits, params.rateLimits)
+      state.rateLimits = mergeRateLimits(state.rateLimits, (params as P.RateLimitsUpdatedNotification).rateLimits)
       return [{ _tag: "LimitsUpdated", windows: limitWindows(state.rateLimits), raw }]
     }
     case "error": {
@@ -544,7 +538,10 @@ export const accountStatus = (
 
 const userText = (content: ReadonlyArray<unknown>): string =>
   content
-    .flatMap((c: any) => (c?.type === "text" && typeof c.text === "string" ? [c.text] : []))
+    .flatMap((c) => {
+      const text = textOf(c)
+      return typeof c === "object" && c !== null && (c as { type?: unknown }).type === "text" && text !== undefined ? [text] : []
+    })
     .join("\n")
 
 /**
@@ -565,30 +562,30 @@ export const historyEvents = (turns: ReadonlyArray<P.Turn>): Array<AgentEvent> =
     out.push({ _tag: "TurnStarted", turnId, raw: turnRaw })
     const messages: Array<{ text: string; phase: string | null }> = []
     for (const item of items) {
-      const i = item as any
-      switch (item.type) {
-        case "userMessage":
-          out.push({
-            _tag: "UserMessage",
-            turnId,
-            messageId: typeof i.clientId === "string" ? MessageId.make(i.clientId) : null,
-            text: userText(i.content ?? []),
-            raw: item,
-          })
-          continue
-        case "agentMessage":
-          messages.push({ text: i.text ?? "", phase: i.phase ?? null })
-          out.push({ _tag: "Text", turnId, text: i.text ?? "", raw: item })
-          continue
-        case "contextCompaction":
-          out.push({ _tag: "Compacted", turnId, trigger: null, raw: item })
-          continue
+      if (P.isItem(item, "userMessage")) {
+        out.push({
+          _tag: "UserMessage",
+          turnId,
+          messageId: typeof item.clientId === "string" ? MessageId.make(item.clientId) : null,
+          text: userText(item.content ?? []),
+          raw: item,
+        })
+        continue
+      }
+      if (P.isItem(item, "agentMessage")) {
+        messages.push({ text: item.text ?? "", phase: item.phase ?? null })
+        out.push({ _tag: "Text", turnId, text: item.text ?? "", raw: item })
+        continue
+      }
+      if (P.isItem(item, "contextCompaction")) {
+        out.push({ _tag: "Compacted", turnId, trigger: null, raw: item })
+        continue
       }
       const call = toolCallOf(item)
       if (call === null) continue
       out.push({ _tag: "ToolCall", turnId, callId: item.id, ...call, raw: item })
       const result = toolResultOf(item)
-      if (result !== null && i.status !== "inProgress") {
+      if (result !== null && (item as { readonly status?: unknown }).status !== "inProgress") {
         out.push({ _tag: "ToolResult", turnId, callId: item.id, ...result, raw: item })
       }
     }

@@ -9,7 +9,8 @@
     "src/codex/CodexEvents.ts",
     "src/host/EventFile.ts",
     "src/host/HookBridge.ts",
-    "src/host/Host.ts"
+    "src/host/Host.ts",
+    "src/internal/**/*.ts"
   ],
   "parseCompilerOptions": "tsconfig.json",
   "examplesCompilerOptions": {

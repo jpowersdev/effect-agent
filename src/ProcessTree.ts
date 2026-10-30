@@ -15,7 +15,7 @@
  */
 import { randomUUID } from "node:crypto"
 import { readdirSync, readFileSync } from "node:fs"
-import { Duration, Effect } from "effect"
+import { Duration, Effect, Schedule } from "effect"
 
 /**
  * The environment variable that marks an agent process and everything it starts.
@@ -33,8 +33,13 @@ export const markerVariable = "EFFECT_AGENT_PROCESS"
  */
 export const newMarker = (): string => randomUUID()
 
-/** Send a signal to a process (or, with a negative id, a process group). False when it is gone. */
-const signal = (pid: number, sig: NodeJS.Signals | 0): boolean => {
+/**
+ * Send a signal to a process (or, with a negative id, a process group). False when it is gone.
+ *
+ * @since 0.2.0
+ * @category utils
+ */
+export const signal = (pid: number, sig: NodeJS.Signals | 0): boolean => {
   try {
     process.kill(pid, sig)
     return true
@@ -43,6 +48,14 @@ const signal = (pid: number, sig: NodeJS.Signals | 0): boolean => {
     return (e as NodeJS.ErrnoException).code === "EPERM"
   }
 }
+
+/**
+ * Whether a process is running (ours or not).
+ *
+ * @since 0.2.0
+ * @category predicates
+ */
+export const isAlive = (pid: number): boolean => signal(pid, 0)
 
 /**
  * Live processes whose environment carries `EFFECT_AGENT_PROCESS=<marker>` (Linux; elsewhere none).
@@ -71,10 +84,23 @@ export const markedProcesses = (marker: string): Array<number> => {
   return found
 }
 
+/** A process's group id (Linux, from /proc); undefined if it is gone or unknown. */
+const processGroupOf = (pid: number): number | undefined => {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "latin1")
+    // `pid (comm) state ppid pgrp ...`; comm may hold spaces and parentheses.
+    const pgrp = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2])
+    return Number.isInteger(pgrp) ? pgrp : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * SIGTERM the process group of `pid` (when given) and every process carrying
- * `marker`, then SIGKILL whatever is left after `grace`. A no-op once they are
- * all gone.
+ * `marker` (each process gets one SIGTERM), then SIGKILL whatever is left
+ * after `grace`. Processes they start while stopping (carrying the marker)
+ * are found and stopped too. A no-op once they are all gone.
  *
  * @since 0.1.0
  * @category utils
@@ -84,18 +110,43 @@ export const kill = (
   options: { readonly pid?: number | undefined; readonly grace?: Duration.Input } = {},
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const send = (sig: NodeJS.Signals | 0) => {
-      let alive = options.pid !== undefined ? signal(-options.pid, sig) : false
-      for (const p of markedProcesses(marker)) alive = signal(p, sig) || alive
+    const group = options.pid !== undefined ? -options.pid : undefined
+    /** Marked processes found so far; each is sent SIGTERM once, when found. */
+    const known = new Set<number>()
+    const signalAll = (pids: Iterable<number>, sig: NodeJS.Signals | 0) => {
+      let alive = false
+      for (const p of pids) alive = signal(p, sig) || alive
       return alive
     }
-    if (!send("SIGTERM")) return
-    const deadline = Date.now() + Duration.toMillis(Duration.fromInputUnsafe(options.grace ?? Duration.seconds(3)))
-    while (Date.now() < deadline) {
-      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 50)))
-      if (!send(0)) return
+    /** Sweep /proc for marked processes not seen yet, and SIGTERM them (but not `skip`). Whether any is alive. */
+    const terminateNew = (skip: ReadonlySet<number> = new Set()) => {
+      const found = markedProcesses(marker).filter((p) => !known.has(p))
+      for (const p of found) known.add(p)
+      return signalAll(found.filter((p) => !skip.has(p)), "SIGTERM") || found.some(isAlive)
     }
-    send("SIGKILL")
+    // Sweep before signalling the group, so the members found now are exactly those the
+    // group signal reaches: they aren't signalled twice. Anything found later is.
+    const before = markedProcesses(marker)
+    const inGroup = new Set(options.pid !== undefined ? before.filter((p) => processGroupOf(p) === options.pid) : [])
+    const groupAlive = group !== undefined && signal(group, "SIGTERM")
+    if (!terminateNew(inGroup) && !groupAlive) return
+    // Until all are gone, sweeping /proc again for any they start (with the marker) while
+    // stopping: every fourth check while some are alive (a sweep reads every process's
+    // environ), and every time the known ones have gone (the group may live on through one).
+    let checks = 0
+    const done = yield* Effect.sync(() => {
+      const knownAlive = signalAll(known, 0)
+      const swept = (!knownAlive || ++checks % 4 === 0) && terminateNew()
+      if (knownAlive || swept) return false
+      return !(group !== undefined && signal(group, 0))
+    }).pipe(
+      Effect.repeat({ schedule: Schedule.spaced("50 millis"), until: (gone) => gone }),
+      Effect.timeoutOption(options.grace ?? Duration.seconds(3)),
+    )
+    if (done._tag === "Some") return
+    for (const p of markedProcesses(marker)) known.add(p)
+    if (group !== undefined) signal(group, "SIGKILL")
+    signalAll(known, "SIGKILL")
   })
 
 /**

@@ -51,10 +51,11 @@ import {
 } from "@anthropic-ai/claude-agent-sdk"
 import { Cause, Context, Duration, Effect, Exit, Fiber, Layer, Option, Queue, Schema, Scope, Stream } from "effect"
 import { type ChildProcess, spawn as nodeSpawn } from "node:child_process"
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import * as Recorder from "../internal/recorder.ts"
 import type * as Launcher from "../Launcher.ts"
 import * as ProcessTree from "../ProcessTree.ts"
 
@@ -77,18 +78,23 @@ export type LifecycleState = typeof LifecycleState.Type
 
 /**
  * `command_lifecycle` frames (capability `msg_lifecycle_v1`). Not part of the
- * SDK's `SDKMessage` union, so they are decoded defensively with `decodeLifecycle`.
+ * SDK's `SDKMessage` union, so frames are checked against this with `decodeLifecycle`.
  *
  * @since 0.1.0
  * @category models
  */
-export interface CommandLifecycle {
-  readonly type: "command_lifecycle"
-  readonly command_uuid: string
-  readonly state: LifecycleState
-  readonly uuid?: string
-  readonly session_id?: string
-}
+export const CommandLifecycle = Schema.Struct({
+  type: Schema.Literal("command_lifecycle"),
+  command_uuid: Schema.String,
+  state: LifecycleState,
+  uuid: Schema.optionalKey(Schema.String),
+  session_id: Schema.optionalKey(Schema.String),
+})
+/**
+ * @since 0.1.0
+ * @category models
+ */
+export type CommandLifecycle = typeof CommandLifecycle.Type
 
 /**
  * Anything the CLI writes to us.
@@ -98,21 +104,17 @@ export interface CommandLifecycle {
  */
 export type Frame = SDKMessage | CommandLifecycle
 
-const isLifecycleState = Schema.is(LifecycleState)
+const isLifecycle = Schema.is(CommandLifecycle)
 
 /**
  * A frame as a `CommandLifecycle`, or undefined if it isn't one.
  *
  * @internal
  */
-export const decodeLifecycle = (frame: unknown): CommandLifecycle | undefined => {
-  if (typeof frame !== "object" || frame === null) return undefined
-  const f = frame as Record<string, unknown>
-  if (f.type !== "command_lifecycle" || typeof f.command_uuid !== "string" || !isLifecycleState(f.state)) {
-    return undefined
-  }
-  return frame as CommandLifecycle
-}
+export const decodeLifecycle = (frame: unknown): CommandLifecycle | undefined => (isLifecycle(frame) ? frame : undefined)
+
+/** Any JSON text, parsed; none if it isn't JSON. */
+const parseJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -213,12 +215,6 @@ export type RecordLine =
       }
     }
 
-const recorder = (path: string | undefined) => {
-  if (path === undefined) return (_line: RecordLine) => {}
-  mkdirSync(dirname(path), { recursive: true })
-  return (line: RecordLine) => appendFileSync(path, JSON.stringify(line) + "\n")
-}
-
 /**
  * The recording line for a transport error.
  *
@@ -267,20 +263,19 @@ export const transcriptPath = (cwd: string, sessionId: string, configDir?: strin
     `${sessionId}.jsonl`,
   )
 
+const decodeManifest = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Struct({ version: Schema.String })))
+
 /**
  * The CLI version bundled with the installed SDK (its `manifest.json`), or null.
  *
  * @internal
  */
-export const bundledVersion: Effect.Effect<string | null> = Effect.sync(() => {
-  try {
-    const entry = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"))
-    const manifest = JSON.parse(readFileSync(join(dirname(entry), "manifest.json"), "utf8")) as { version?: unknown }
-    return typeof manifest.version === "string" ? manifest.version : null
-  } catch {
-    return null
-  }
-})
+export const bundledVersion: Effect.Effect<string | null> = Effect.try(() =>
+  readFileSync(join(dirname(fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"))), "manifest.json"), "utf8"),
+).pipe(
+  Effect.map((text) => Option.getOrNull(Option.map(decodeManifest(text), (m) => m.version))),
+  Effect.orElseSucceed(() => null),
+)
 
 // ---------------------------------------------------------------------------
 // Process
@@ -419,6 +414,8 @@ export const restoreSystemFields = (
   })
 }
 
+const isEntry = Schema.is(Schema.Struct({ type: Schema.String }))
+
 /**
  * Entries of a transcript JSONL file; lines that are not JSON objects with a `type` are skipped.
  *
@@ -426,15 +423,9 @@ export const restoreSystemFields = (
  */
 export const parseTranscript = (text: string): Array<SessionStoreEntry> =>
   text.split("\n").flatMap((line) => {
-    if (line.trim() === "") return []
-    try {
-      const entry = JSON.parse(line) as unknown
-      return typeof entry === "object" && entry !== null && typeof (entry as { type?: unknown }).type === "string"
-        ? [entry as SessionStoreEntry]
-        : []
-    } catch {
-      return [] // a line cut off by a crash mid-write
-    }
+    // Blank, or cut off by a crash mid-write.
+    const entry = Option.getOrUndefined(parseJson(line))
+    return isEntry(entry) ? [entry as SessionStoreEntry] : []
   })
 
 // ---------------------------------------------------------------------------
@@ -557,9 +548,10 @@ const recordHooks = (
 const openQuery = Effect.fnUntraced(function* (
   options: Options,
   launch: Launch,
-  record: (line: RecordLine) => void,
-  recording: boolean,
+  recorder: Recorder.Recorder | null,
 ) {
+  const record = (line: RecordLine) => recorder?.record(line)
+  const recording = recorder !== null
   const spawner = makeSpawner(launch)
   /** `in` frames so far: where a hook call happened, for `hook` lines. */
   let frames = 0
@@ -576,58 +568,70 @@ const openQuery = Effect.fnUntraced(function* (
     },
   })
 
-  const query = yield* Effect.try({
-    try: () =>
-      sdkQuery({
-        prompt: Stream.toAsyncIterable(Stream.fromQueue(input)),
-        options: {
-          ...options,
-          ...(recording && options.hooks !== undefined && { hooks: recordHooks(options.hooks, record, () => frames) }),
-          spawnClaudeCodeProcess: spawner.spawn,
-        },
-      }),
-    catch: toSdkError("open"),
-  })
-
-  // Pump the SDK generator into a queue so readers can come and go without
-  // calling `return()` on the generator (which would end the session).
-  const pump = yield* Stream.fromAsyncIterable(query as AsyncIterable<Frame>, toSdkError("frames")).pipe(
-    Stream.runForEach((frame) =>
-      Effect.sync(() => {
-        frames++
-        record({ dir: "in", frame })
-        Queue.offerUnsafe(output, frame)
-      }),
-    ),
-    Effect.onExit((exit) =>
-      Effect.suspend(() => {
-        const found = Exit.isFailure(exit) ? Cause.findErrorOption(exit.cause) : Option.none()
-        if (Option.isNone(found)) {
-          Queue.endUnsafe(output)
-          return Effect.void
-        }
+  /** How the frame stream ended: cleanly, or with the cause the frame reader should fail with. */
+  const pumpEnded = (exit: Exit.Exit<void, ClaudeSdkError>): Effect.Effect<void> =>
+    Effect.suspend(() => {
+      if (Exit.isSuccess(exit) || Cause.hasInterruptsOnly(exit.cause)) {
+        Queue.endUnsafe(output)
+        return Effect.void
+      }
+      const found = Cause.findErrorOption(exit.cause)
+      if (Option.isSome(found)) {
         const error = withStderr(found.value, spawner.stderr())
         record(errorLine(error))
         Queue.failCauseUnsafe(output, Cause.fail(error))
-        // The CLI died: whatever still carries its marker is an orphan.
-        return ProcessTree.kill(spawner.marker, { pid: spawner.pid(), grace: Duration.seconds(2) })
-      }),
-    ),
-    Effect.forkDetach,
-  )
+      } else {
+        // A bug on our side (e.g. the recording can't be written): the reader sees the defect.
+        Queue.failCauseUnsafe(output, exit.cause)
+      }
+      // Either way the frames stop here: whatever still carries the marker is an orphan.
+      return ProcessTree.kill(spawner.marker, { pid: spawner.pid(), grace: Duration.seconds(2) })
+    })
 
-  // Close the query (the SDK ends stdin, then force-kills after a grace
-  // period), give the pump time to observe the exit, then kill whatever is
-  // left in the process group (commands the agent started in the background).
-  yield* Effect.addFinalizer(() =>
-    Effect.sync(() => {
-      Queue.endUnsafe(input)
-      query.close()
-    }).pipe(
-      Effect.andThen(Fiber.await(pump).pipe(Effect.timeoutOption(Duration.seconds(10)))),
-      Effect.andThen(Fiber.interrupt(pump)),
-      Effect.andThen(reap(spawner, Duration.seconds(5), Duration.seconds(3))),
-    ),
+  // Spawn the CLI and start its pump in one uninterruptible step, so an
+  // interrupt can't leave a process with nothing to stop it.
+  const { query } = yield* Effect.acquireRelease(
+    Effect.gen(function* () {
+      const query = yield* Effect.try({
+        try: () =>
+          sdkQuery({
+            prompt: Stream.toAsyncIterable(Stream.fromQueue(input)),
+            options: {
+              ...options,
+              ...(recording && options.hooks !== undefined && { hooks: recordHooks(options.hooks, record, () => frames) }),
+              spawnClaudeCodeProcess: spawner.spawn,
+            },
+          }),
+        catch: toSdkError("open"),
+      })
+      // Pump the SDK generator into a queue so readers can come and go without
+      // calling `return()` on the generator (which would end the session).
+      const pump = yield* Stream.fromAsyncIterable(query as AsyncIterable<Frame>, toSdkError("frames")).pipe(
+        Stream.runForEach((frame) =>
+          Effect.sync(() => {
+            frames++
+            record({ dir: "in", frame })
+            Queue.offerUnsafe(output, frame)
+          }),
+        ),
+        Effect.onExit(pumpEnded),
+        Effect.forkDetach,
+      )
+      return { query, pump }
+    }),
+    // Close the query (the SDK ends stdin, then force-kills after a grace
+    // period), give the pump time to observe the exit, then kill whatever is
+    // left in the process group (commands the agent started in the background).
+    ({ query, pump }) =>
+      Effect.sync(() => {
+        Queue.endUnsafe(input)
+        query.close()
+      }).pipe(
+        Effect.andThen(Fiber.await(pump).pipe(Effect.timeoutOption(Duration.seconds(10)))),
+        Effect.andThen(Fiber.interrupt(pump)),
+        Effect.andThen(reap(spawner, Duration.seconds(5), Duration.seconds(3))),
+        Effect.andThen(recorder?.flush ?? Effect.void),
+      ),
   )
 
   yield* Effect.tryPromise({ try: () => query.initializationResult(), catch: toSdkError("initialize") })
@@ -684,13 +688,13 @@ const statusQuery = (options: Options, launch: Launch) =>
   Effect.scoped(
     Effect.gen(function* () {
       const spawner = makeSpawner(launch)
-      const query = yield* Effect.try({
-        try: () => sdkQuery({ prompt: idleInput(), options: { ...options, spawnClaudeCodeProcess: spawner.spawn } }),
-        catch: toSdkError("status"),
-      })
       // Nothing to save, so don't wait out the SDK's grace: close, then clear the group.
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => query.close()).pipe(Effect.andThen(reap(spawner, Duration.seconds(1), Duration.seconds(1)))),
+      const query = yield* Effect.acquireRelease(
+        Effect.try({
+          try: () => sdkQuery({ prompt: idleInput(), options: { ...options, spawnClaudeCodeProcess: spawner.spawn } }),
+          catch: toSdkError("status"),
+        }),
+        (query) => Effect.sync(() => query.close()).pipe(Effect.andThen(reap(spawner, Duration.seconds(1), Duration.seconds(1)))),
       )
       yield* Effect.tryPromise({ try: () => query.initializationResult(), catch: toSdkError("initialize") })
       const account = yield* Effect.tryPromise({ try: () => query.accountInfo(), catch: toSdkError("accountInfo") })
@@ -734,22 +738,32 @@ const readHistory = ({ sessionId, cwd, transcript }: SessionLookup) =>
  * @category layers
  */
 export const layer = (options: LayerOptions = {}): Layer.Layer<ClaudeSdk> =>
-  Layer.sync(ClaudeSdk, () => {
-    const record = recorder(options.record)
-    return ClaudeSdk.of({
-      open: (sdkOptions, launch = noLaunch) => openQuery(sdkOptions, launch, record, options.record !== undefined),
-      sessionExists: ({ sessionId, cwd, transcript }) =>
-        Effect.promise(() => getSessionInfo(sessionId, { dir: cwd }).catch(() => undefined)).pipe(
-          Effect.map((info) => info !== undefined || existsSync(transcript)),
-        ),
-      version: bundledVersion,
-      status: (sdkOptions, launch = noLaunch) =>
-        statusQuery(sdkOptions, launch).pipe(Effect.tap((status) => Effect.sync(() => record({ dir: "status", status })))),
-      history: (lookup) =>
-        readHistory(lookup).pipe(
-          Effect.tap((history) =>
-            Effect.sync(() => record({ dir: "history", sessionId: lookup.sessionId, cwd: lookup.cwd, history })),
+  Layer.effect(
+    ClaudeSdk,
+    Effect.gen(function* () {
+      const recorder =
+        options.record !== undefined
+          ? yield* Recorder.make(options.record, { truncate: false }).pipe(
+              // A recording that can't even start is a bug in the caller's setup.
+              Effect.orDie,
+            )
+          : null
+      const record = (line: RecordLine) => recorder?.record(line)
+      return ClaudeSdk.of({
+        open: (sdkOptions, launch = noLaunch) => openQuery(sdkOptions, launch, recorder),
+        sessionExists: ({ sessionId, cwd, transcript }) =>
+          Effect.promise(() => getSessionInfo(sessionId, { dir: cwd }).catch(() => undefined)).pipe(
+            Effect.map((info) => info !== undefined || existsSync(transcript)),
           ),
-        ),
-    })
-  })
+        version: bundledVersion,
+        status: (sdkOptions, launch = noLaunch) =>
+          statusQuery(sdkOptions, launch).pipe(Effect.tap((status) => Effect.sync(() => record({ dir: "status", status })))),
+        history: (lookup) =>
+          readHistory(lookup).pipe(
+            Effect.tap((history) =>
+              Effect.sync(() => record({ dir: "history", sessionId: lookup.sessionId, cwd: lookup.cwd, history })),
+            ),
+          ),
+      })
+    }),
+  )

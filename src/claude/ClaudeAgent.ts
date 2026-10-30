@@ -40,7 +40,7 @@ import type {
   SettingSource,
   SyncHookJSONOutput,
 } from "@anthropic-ai/claude-agent-sdk"
-import { Cause, Clock, DateTime, Deferred, Duration, Effect, Fiber, Layer, Option, PubSub, Stream } from "effect"
+import { Cause, Clock, Context, DateTime, type Duration, Effect, Fiber, Layer, Option, Stream, Tracer } from "effect"
 import { randomUUID } from "node:crypto"
 import { tmpdir } from "node:os"
 import {
@@ -68,8 +68,9 @@ import {
 } from "../AgentError.ts"
 import type { AgentEvent, TurnOutcome, TurnSucceeded } from "../AgentEvent.ts"
 import { type LimitWindow, type LimitWindowStatus, MessageId, SessionId, type TokenUsage, TurnId } from "../Domain.ts"
+import * as Env from "../internal/env.ts"
+import * as Session from "../internal/session.ts"
 import * as Launcher from "../Launcher.ts"
-import * as Watchdog from "../Watchdog.ts"
 import * as ClaudeSdk from "./ClaudeSdk.ts"
 
 /**
@@ -112,24 +113,11 @@ export interface ClaudeAgentOptions {
 // ---------------------------------------------------------------------------
 
 /**
- * Variables a parent Claude Code session sets that would make the child think it is nested.
+ * Variables a parent agent session sets that would make the child think it is nested.
  *
  * @internal
  */
-export const nestingMarkers: ReadonlyArray<string> = [
-  "CLAUDECODE",
-  "CLAUDE_CODE_ENTRYPOINT",
-  "CLAUDE_CODE_SESSION_ID",
-  "CLAUDE_CODE_MESSAGING_SOCKET",
-  "CLAUDE_CODE_MESSAGING_TOKEN",
-  "CLAUDE_CODE_EXECPATH",
-  "CLAUDE_CODE_CHILD_SESSION",
-  "CLAUDE_CODE_SESSION_ATTENDED",
-  "CLAUDE_PID",
-  "CLAUDE_EFFORT",
-  "CLAUDE_AGENT_SDK_VERSION",
-  "AI_AGENT",
-]
+export const nestingMarkers: ReadonlyArray<string> = Env.nestingMarkers
 
 /**
  * The SDK replaces the child's environment with this, so it starts from the host's.
@@ -139,19 +127,11 @@ export const nestingMarkers: ReadonlyArray<string> = [
 export const buildEnv = (
   host: Readonly<Record<string, string | undefined>>,
   overrides: Readonly<Record<string, string | undefined>> = {},
-): Record<string, string> => {
-  const env: Record<string, string | undefined> = { ...host }
-  for (const key of nestingMarkers) delete env[key]
-  for (const [key, value] of Object.entries(overrides)) {
-    if (value === undefined) delete env[key]
-    else env[key] = value
-  }
+): Record<string, string> => ({
+  ...Env.resolve(host, overrides),
   // MCP isolation: no claude.ai connectors, whatever the caller passed.
-  env.ENABLE_CLAUDEAI_MCP_SERVERS = "false"
-  const out: Record<string, string> = {}
-  for (const [key, value] of Object.entries(env)) if (value !== undefined) out[key] = value
-  return out
-}
+  ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+})
 
 /**
  * `Effort` as the SDK's `EffortLevel`: `minimal` becomes `low`.
@@ -178,9 +158,17 @@ export const disallowedTools = (disable: RunOptions["disable"]): Array<string> =
 // Hooks
 // ---------------------------------------------------------------------------
 
+/**
+ * Runs a hook's effect for the SDK. The session passes `Effect.runPromiseWith`
+ * of its own context, so hooks see the caller's services (logger, tracer).
+ *
+ * @internal
+ */
+export type RunHook = (effect: Effect.Effect<string | undefined>, options: { readonly signal: AbortSignal }) => Promise<string | undefined>
+
 /** Run a hook to completion; a failure, defect, throw or abort adds nothing. */
-const runHook = (hook: () => Effect.Effect<Option.Option<string>>, signal: AbortSignal): Promise<string | undefined> =>
-  Effect.runPromise(
+const runHook = (run: RunHook, hook: () => Effect.Effect<Option.Option<string>>, signal: AbortSignal): Promise<string | undefined> =>
+  run(
     Effect.suspend(hook).pipe(
       Effect.map((text) => (Option.isSome(text) && text.value !== "" ? text.value : undefined)),
       Effect.catchCause(() => Effect.succeed(undefined)),
@@ -230,14 +218,14 @@ const matcher = <E extends HookEvent>(
  *
  * @internal
  */
-export const sdkHooks = (hooks: Hooks): NonNullable<Options["hooks"]> => {
+export const sdkHooks = (hooks: Hooks, run: RunHook = Effect.runPromise): NonNullable<Options["hooks"]> => {
   const out: NonNullable<Options["hooks"]> = {}
   const { beforeTool, afterTool, beforeStop } = hooks
   if (beforeTool !== undefined) {
     out.PreToolUse = matcher("PreToolUse", async (input, signal) =>
       addContext(
         "PreToolUse",
-        await runHook(() => beforeTool({ callId: input.tool_use_id, name: input.tool_name, input: input.tool_input }), signal),
+        await runHook(run, () => beforeTool({ callId: input.tool_use_id, name: input.tool_name, input: input.tool_input }), signal),
       ),
     )
   }
@@ -246,6 +234,7 @@ export const sdkHooks = (hooks: Hooks): NonNullable<Options["hooks"]> => {
       addContext(
         "PostToolUse",
         await runHook(
+          run,
           () =>
             afterTool({
               callId: input.tool_use_id,
@@ -262,6 +251,7 @@ export const sdkHooks = (hooks: Hooks): NonNullable<Options["hooks"]> => {
       addContext(
         "PostToolUseFailure",
         await runHook(
+          run,
           () => afterTool({ callId: input.tool_use_id, name: input.tool_name, input: input.tool_input, output: input.error, isError: true }),
           signal,
         ),
@@ -269,7 +259,7 @@ export const sdkHooks = (hooks: Hooks): NonNullable<Options["hooks"]> => {
     )
   }
   if (beforeStop !== undefined) {
-    out.Stop = matcher("Stop", async (_input, signal) => addContext("Stop", await runHook(beforeStop, signal)))
+    out.Stop = matcher("Stop", async (_input, signal) => addContext("Stop", await runHook(run, beforeStop, signal)))
   }
   return out
 }
@@ -287,14 +277,15 @@ export const buildOptions = (
   run: RunOptions,
   config: ClaudeAgentOptions,
   sessionId: SessionId,
-  hostEnv: Readonly<Record<string, string | undefined>> = process.env,
+  hostEnv: Readonly<Record<string, string | undefined>> = Env.host(),
+  runHookEffect?: RunHook,
 ): Options => {
   const model = run.model ?? config.model
   const disallowed = disallowedTools(run.disable)
   return {
     cwd: run.cwd,
     env: buildEnv(hostEnv, { ...config.env, ...run.env }),
-    ...(run.hooks !== undefined && { hooks: sdkHooks(run.hooks) }),
+    ...(run.hooks !== undefined && { hooks: sdkHooks(run.hooks, runHookEffect) }),
     ...(run.resume !== undefined ? { resume: run.resume } : { sessionId }),
     ...(model !== undefined && { model }),
     ...(run.effort !== undefined && { effort: toEffortLevel(run.effort) }),
@@ -325,7 +316,7 @@ export const buildOptions = (
 export const buildStatusOptions = (
   config: ClaudeAgentOptions,
   cwd: string,
-  hostEnv: Readonly<Record<string, string | undefined>> = process.env,
+  hostEnv: Readonly<Record<string, string | undefined>> = Env.host(),
 ): Options => ({
   cwd,
   env: buildEnv(hostEnv, config.env),
@@ -653,7 +644,7 @@ export const classifyOutcome = (input: OutcomeInput): TurnOutcome => {
   if (result.subtype === "error_max_budget_usd") {
     return new SpendCapReached({
       message,
-      capUsd: input.capUsd ?? Number.NaN,
+      capUsd: input.capUsd,
       spentUsd: result.total_cost_usd,
       estimated: false,
     })
@@ -769,15 +760,14 @@ export interface StepContext {
 }
 
 /**
- * The result of `step`: the new state, events to emit, and messages dropped.
+ * The result of `step`: the new state, and events to emit (messages the CLI
+ * cancelled, discarded or refused are `MessageDropped` events).
  *
  * @internal
  */
 export interface Step {
   readonly state: State
   readonly events: ReadonlyArray<AgentEvent>
-  /** Messages the CLI cancelled, discarded or refused: they will never land. */
-  readonly dropped: ReadonlyArray<{ readonly messageId: string; readonly state: ClaudeSdk.LifecycleState }>
 }
 
 const heartbeatIntervalMs = 1000
@@ -811,7 +801,6 @@ const endTurn = (ctx: StepContext, state: State, turn: TurnState, result: SDKRes
       raw,
     },
   ],
-  dropped: [],
 })
 
 /**
@@ -849,27 +838,25 @@ const stepFrame = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step
       case "started": {
         if (state.turn === null) {
           const turn = newTurn(id)
-          return { state: withLanded({ ...state, turn }, id), events: startEvents(id, turn.turnId, raw), dropped: [] }
+          return { state: withLanded({ ...state, turn }, id), events: startEvents(id, turn.turnId, raw) }
         }
-        if (state.turn.messages.includes(id)) return { state, events: [{ _tag: "Other", raw }], dropped: [] }
+        if (state.turn.messages.includes(id)) return { state, events: [{ _tag: "Other", raw }] }
         const turn = { ...state.turn, messages: [...state.turn.messages, id] }
         return {
           state: withLanded({ ...state, turn }, id),
           events: [{ _tag: "MessageLanded", messageId: MessageId.make(id), turnId: turn.turnId, raw }],
-          dropped: [],
         }
       }
       case "cancelled":
       case "discarded":
       case "refused":
-        if (state.landed.has(id)) return { state, events: [{ _tag: "Other", raw }], dropped: [] }
+        if (state.landed.has(id)) return { state, events: [{ _tag: "Other", raw }] }
         return {
           state,
           events: [{ _tag: "MessageDropped", messageId: MessageId.make(id), reason: lifecycle.state, raw }],
-          dropped: [{ messageId: id, state: lifecycle.state }],
         }
       default:
-        return { state, events: [{ _tag: "Other", raw }], dropped: [] }
+        return { state, events: [{ _tag: "Other", raw }] }
     }
   }
 
@@ -888,7 +875,7 @@ const stepFrame = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step
   switch (frame.type) {
     case "system": {
       if (frame.subtype === "init") {
-        if (state.started) return { state, events: [{ _tag: "Other", raw }], dropped: [] }
+        if (state.started) return { state, events: [{ _tag: "Other", raw }] }
         return {
           state: { ...state, started: true },
           events: [
@@ -902,7 +889,6 @@ const stepFrame = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step
               raw,
             },
           ],
-          dropped: [],
         }
       }
       break
@@ -917,12 +903,12 @@ const stepFrame = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step
           ...state,
           turn: { ...turn, assistantError: error, rateLimit: params?.rate_limit_info ?? turn.rateLimit },
         }
-        return { state: next, events: frameEvents(frame, turn.turnId), dropped: [] }
+        return { state: next, events: frameEvents(frame, turn.turnId) }
       }
       break
     }
     case "rate_limit_event":
-      return { state: { ...state, rateLimit: frame.rate_limit_info }, events: frameEvents(frame, state.turn?.turnId ?? null), dropped: [] }
+      return { state: { ...state, rateLimit: frame.rate_limit_info }, events: frameEvents(frame, state.turn?.turnId ?? null) }
     case "result":
       if (state.turn !== null) return endTurn(ctx, state, state.turn, frame, null, raw)
       break
@@ -931,11 +917,11 @@ const stepFrame = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step
   const turnId = state.turn?.turnId ?? null
   if (isHeartbeat(frame)) {
     if (state.lastHeartbeatMs !== null && ctx.nowMs - state.lastHeartbeatMs < heartbeatIntervalMs) {
-      return { state, events: [], dropped: [] }
+      return { state, events: [] }
     }
-    return { state: { ...state, lastHeartbeatMs: ctx.nowMs }, events: [{ _tag: "Heartbeat", turnId, raw }], dropped: [] }
+    return { state: { ...state, lastHeartbeatMs: ctx.nowMs }, events: [{ _tag: "Heartbeat", turnId, raw }] }
   }
-  return { state, events: frameEvents(frame, turnId), dropped: [] }
+  return { state, events: frameEvents(frame, turnId) }
 }
 
 /**
@@ -945,7 +931,7 @@ const stepFrame = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step
  */
 export const stepExit = (ctx: StepContext, state: State, error: ProcessFailure | null): Step => {
   const held = { ...state, held: [] }
-  if (state.turn === null) return { state: held, events: state.held, dropped: [] }
+  if (state.turn === null) return { state: held, events: state.held }
   const ended = endTurn(ctx, held, state.turn, null, error ?? { message: "Claude Code exited mid-turn", signal: null, exitCode: null }, error)
   return { ...ended, events: [...state.held, ...ended.events] }
 }
@@ -985,19 +971,26 @@ export const markStalled = (state: State, turnId: TurnId, stall: Stall): State =
 // Session
 // ---------------------------------------------------------------------------
 
-interface Landing {
-  readonly turnId: TurnId
-}
-
-const End = Symbol("End")
-
-const agentError = (message: string, cause?: unknown) =>
-  new AgentError({ message, provider, ...(cause !== undefined && { cause }) })
+const agentError = Session.agentError(provider)
+const sessionClosed = Session.sessionClosed(provider)
+const timed = Session.timed(provider)
 
 const fromSdkError = (e: ClaudeSdk.ClaudeSdkError) => agentError(`${e.operation}: ${e.message}`, e)
 
-const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Service"], config: ClaudeAgentOptions, run: RunOptions) {
+/** How the frame stream ended. */
+type Ending =
+  | { readonly _tag: "Exited" }
+  | { readonly _tag: "Died"; readonly error: ClaudeSdk.ClaudeSdkError }
+  | { readonly _tag: "Defect"; readonly cause: unknown }
+  | { readonly _tag: "Closed" }
+
+const openSession = Effect.fn("ClaudeAgent.open")(function* (
+  sdk: ClaudeSdk.ClaudeSdk["Service"],
+  config: ClaudeAgentOptions,
+  run: RunOptions,
+) {
   const sessionId = run.resume ?? SessionId.make(randomUUID())
+  yield* Effect.annotateCurrentSpan({ provider, sessionId, resume: run.resume !== undefined })
   const transcript = location(run, sessionId, config)
 
   if (run.resume !== undefined && config.checkResume !== false) {
@@ -1008,64 +1001,35 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
   }
 
   const wrap = yield* Launcher.prepare({ provider, cwd: run.cwd })
+  // Hooks run on the SDK's promises, but in this session's context (logger, tracer, services);
+  // not as children of this `open` span, which is long over by the time a hook runs.
+  const runHookEffect: RunHook = Effect.runPromiseWith(Context.omit(Tracer.ParentSpan)(yield* Effect.context<never>()))
   const query = yield* sdk
-    .open(buildOptions(run, config, sessionId), { wrap })
+    .open(buildOptions(run, config, sessionId, Env.host(), runHookEffect), { wrap })
     .pipe(Effect.mapError((e) => sessionNotFound(e.message, sessionId) ?? fromSdkError(e)))
-  const watchdog = run.watchdog !== undefined ? yield* Watchdog.make(run.watchdog) : null
+  const runtime = yield* Session.make({ provider, watchdog: run.watchdog, stallGrace: config.stallGrace })
+  const { turns } = runtime
 
   const ctx = { sessionId, resumed: run.resume !== undefined, capUsd: run.spendCapUsd ?? null }
   let state = initialState
+  /** Set as soon as the frame stream ends, so calls made while the last turn resolves already fail. */
   let closed: { readonly error: AgentError | null } | null = null
-  const pending = new Map<string, Deferred.Deferred<Landing, AgentError>>()
-  const turnEnds = new Map<string, Deferred.Deferred<TurnOutcome, AgentError>>()
-  const pubsub = yield* PubSub.unbounded<AgentEvent | typeof End>()
-  /** Replayed to subscriptions made after `init`, so every subscription starts with it. */
-  let sessionStarted: AgentEvent | null = null
   /** For telling a clean `end` after a failed turn from a crash (see `isCleanExitAfterFailedTurn`). */
   let endRequested = false
   let lastTurnFailed = false
 
-  const turnEnd = (turnId: string) => {
-    let d = turnEnds.get(turnId)
-    if (d === undefined) {
-      d = Deferred.makeUnsafe<TurnOutcome, AgentError>()
-      turnEnds.set(turnId, d)
-    }
-    return d
-  }
-
-  const land = (messageId: string, turnId: TurnId) => {
-    const d = pending.get(messageId)
-    pending.delete(messageId)
-    return d === undefined ? Effect.void : Deferred.succeed(d, { turnId })
-  }
-
   const apply = (result: Step) =>
-    Effect.gen(function* () {
+    Effect.suspend(() => {
       state = result.state
-      for (const event of result.events) {
-        if (watchdog !== null) yield* watchdog.observe(event)
-        if (event._tag === "TurnStarted") turnEnd(event.turnId)
-        if (event._tag === "SessionStarted") sessionStarted = event
-        if (event._tag === "TurnEnded") lastTurnFailed = event.outcome._tag !== "Succeeded"
-        yield* PubSub.publish(pubsub, event)
-        if (event._tag === "TurnStarted") yield* land(event.turnId, event.turnId)
-        else if (event._tag === "MessageLanded") yield* land(event.messageId, event.turnId)
-        else if (event._tag === "TurnEnded") yield* Deferred.succeed(turnEnd(event.turnId), event.outcome)
-      }
-      for (const { messageId, state: lifecycle } of result.dropped) {
-        const d = pending.get(messageId)
-        pending.delete(messageId)
-        if (d !== undefined) yield* Deferred.fail(d, agentError(`message ${messageId} was ${lifecycle} by Claude Code`))
-      }
+      return Effect.forEach(
+        result.events,
+        (event) => {
+          if (event._tag === "TurnEnded") lastTurnFailed = event.outcome._tag !== "Succeeded"
+          return runtime.emit(event)
+        },
+        { discard: true },
+      )
     })
-
-  /** How the frame stream ended. */
-  type Ending =
-    | { readonly _tag: "Exited" }
-    | { readonly _tag: "Died"; readonly error: ClaudeSdk.ClaudeSdkError }
-    | { readonly _tag: "Defect"; readonly cause: unknown }
-    | { readonly _tag: "Closed" }
 
   const finish = (reported: Ending) =>
     Effect.gen(function* () {
@@ -1081,8 +1045,10 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
           : ending._tag === "Defect"
             ? agentError(`bug while reading Claude Code frames: ${String(ending.cause)}`, ending.cause)
             : null
-      // Closed first, so calls made as soon as the last turn resolves already fail.
       closed = { error }
+      // A bug on our side (the frames are no longer read): stop the CLI rather than leave it
+      // running, unread, until the scope closes.
+      if (ending._tag === "Defect") yield* query.close
       if (ending._tag !== "Closed") {
         const failure: ProcessFailure | null =
           ending._tag === "Died"
@@ -1092,19 +1058,13 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
               : null
         yield* apply(stepExit({ ...ctx, nowMs: 0 }, state, failure))
       }
-      const reason = error ?? agentError(ending._tag === "Closed" ? "session closed" : "Claude Code exited")
-      for (const d of pending.values()) yield* Deferred.fail(d, reason)
-      pending.clear()
-      for (const d of turnEnds.values()) yield* Deferred.fail(d, reason)
-      yield* PubSub.publish(pubsub, End)
+      yield* runtime.end(error)
     })
 
   const consumer = yield* query.frames.pipe(
     Stream.runForEach((frame) =>
       Clock.currentTimeMillis.pipe(
-        Effect.flatMap((nowMs) =>
-          apply(step({ ...ctx, nowMs, nextPending: pending.keys().next().value ?? null }, state, frame)),
-        ),
+        Effect.flatMap((nowMs) => apply(step({ ...ctx, nowMs, nextPending: turns.oldestUnlanded() }, state, frame))),
       ),
     ),
     Effect.matchCauseEffect({
@@ -1120,40 +1080,35 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
     Effect.forkScoped,
   )
 
-  // Watchdog: a stalled turn is interrupted; if it hasn't ended after the
-  // grace period, the process is killed (and the session ends with it).
-  if (watchdog !== null) {
-    const grace = run.watchdog?.grace ?? config.stallGrace ?? Duration.seconds(10)
-    yield* watchdog.expirations.pipe(
-      Stream.runForEach((expiry) =>
-        Effect.gen(function* () {
-          if (closed !== null || state.turn?.turnId !== expiry.turnId) return
-          state = markStalled(state, expiry.turnId, { idleMs: expiry.idleMs, inTool: expiry.inTool })
-          yield* query.interrupt.pipe(Effect.ignore)
-          const ended = yield* Deferred.await(turnEnd(expiry.turnId)).pipe(
-            Effect.exit,
-            Effect.timeoutOption(grace),
-          )
-          if (Option.isNone(ended)) yield* query.kill
-        }),
-      ),
-      Effect.forkScoped,
-    )
-  }
+  // A stalled turn is interrupted; if it hasn't ended after the grace period,
+  // the process is killed (and the session ends with it).
+  yield* runtime.supervise({
+    stall: (expiry) =>
+      Effect.sync(() => {
+        if (closed !== null || state.turn?.turnId !== expiry.turnId) return false
+        state = markStalled(state, expiry.turnId, { idleMs: expiry.idleMs, inTool: expiry.inTool })
+        return true
+      }),
+    interrupt: () => query.interrupt,
+    kill: query.kill,
+  })
 
-  const ensureOpen = Effect.suspend(() =>
-    closed === null ? Effect.void : Effect.fail(closed.error ?? agentError("session has ended")),
-  )
+  const unavailable = () =>
+    closed === null ? null : sessionClosed(closed.error !== null ? `session has ended: ${closed.error.message}` : "session has ended")
+  const ensureOpen = Effect.suspend(() => {
+    const error = unavailable()
+    return error === null ? Effect.void : Effect.fail(error)
+  })
 
   const submit = (input: Input, priority: "next" | "later") =>
     Effect.gen(function* () {
       const uuid = randomUUID()
       const id = MessageId.make(uuid)
-      const landed = Deferred.makeUnsafe<Landing, AgentError>()
-      // Check and register in one step, so `finish` either sees this entry or we see `closed`.
+      // Check and register in one step, so `finish` either fails this message or we see `closed`.
       yield* Effect.suspend(() => {
-        if (closed !== null) return Effect.fail(closed.error ?? agentError("session has ended"))
-        pending.set(id, landed)
+        const error = unavailable()
+        if (error !== null) return Effect.fail(error)
+        turns.expect(id)
         return Effect.void
       })
       const message: SDKUserMessage = {
@@ -1165,70 +1120,54 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
       }
       yield* query.send(message).pipe(
         Effect.mapError(fromSdkError),
-        Effect.tapError(() => Effect.sync(() => pending.delete(id))),
+        Effect.tapError(() => Effect.sync(() => turns.withdraw(id))),
       )
-      return { id, landed }
+      return id
     })
 
-  const busy = () => state.turn !== null || pending.size > 0
+  const priority = () => (state.turn !== null || turns.busy() ? "later" : "next")
 
-  const send = (input: Input) =>
-    Effect.suspend(() => submit(input, busy() ? "later" : "next")).pipe(Effect.map(({ id }) => id))
+  const send = Effect.fn("ClaudeAgent.send")((input: Input) => Effect.suspend(() => submit(input, priority())))
 
-  const turn = (input: Input) =>
-    Effect.gen(function* () {
-      const { landed } = yield* submit(input, busy() ? "later" : "next")
-      const { turnId } = yield* Deferred.await(landed)
-      const outcome = yield* Deferred.await(turnEnd(turnId))
-      if (outcome._tag === "Succeeded") return outcome satisfies TurnSucceeded
-      return yield* Effect.fail(outcome)
-    })
+  const turn = Effect.fn("ClaudeAgent.turn")(function* (input: Input) {
+    const id = yield* Effect.suspend(() => submit(input, priority()))
+    const outcome = yield* turns.landing(id).pipe(Effect.flatMap(turns.outcome))
+    if (outcome._tag === "Succeeded") return outcome satisfies TurnSucceeded
+    return yield* Effect.fail(outcome)
+  })
 
-  const steer = (input: Input) =>
-    Effect.gen(function* () {
-      const running = state.turn?.turnId ?? null
-      const { id, landed } = yield* submit(input, "next")
-      const { turnId } = yield* Deferred.await(landed)
-      return running !== null && turnId === running
-        ? ({ _tag: "Landed", messageId: id, turnId } as const)
-        : ({ _tag: "StartedNewTurn", messageId: id, turnId } as const)
-    })
+  const steer = Effect.fn("ClaudeAgent.steer")(function* (input: Input) {
+    const running = state.turn?.turnId ?? null
+    const id = yield* submit(input, "next")
+    const turnId = yield* turns.landing(id)
+    return running !== null && turnId === running
+      ? ({ _tag: "Landed", messageId: id, turnId } as const)
+      : ({ _tag: "StartedNewTurn", messageId: id, turnId } as const)
+  })
 
   const interrupt = ensureOpen.pipe(
     Effect.andThen(Effect.sync(() => (state = markInterrupt(state)))),
     Effect.andThen(query.interrupt.pipe(Effect.mapError(fromSdkError))),
+    Effect.withSpan("ClaudeAgent.interrupt"),
   )
 
+  // Ending an ended session reports how it ended.
   const end = Effect.sync(() => {
     endRequested = true
   }).pipe(
     Effect.andThen(query.endInput),
     Effect.andThen(Fiber.await(consumer)),
     Effect.andThen(Effect.suspend(() => (closed?.error ? Effect.fail(closed.error) : Effect.void))),
+    Effect.withSpan("ClaudeAgent.end"),
   )
-
-  const subscribe = Effect.gen(function* () {
-    const subscription = yield* PubSub.subscribe(pubsub)
-    const tail = Stream.suspend(() => (closed?.error ? Stream.fail(closed.error) : Stream.empty))
-    if (closed !== null) return tail
-    const prefix = sessionStarted
-    return Stream.fromSubscription(subscription).pipe(
-      Stream.takeWhile((item): item is AgentEvent => item !== End),
-      // Published between subscribing and reading `sessionStarted`: already in the prefix.
-      Stream.filter((event) => event !== prefix),
-      (live) => (prefix === null ? live : Stream.concat(Stream.make(prefix), live)),
-      Stream.concat(tail),
-    )
-  })
-  const events: Stream.Stream<AgentEvent, AgentError> = Stream.unwrap(subscribe)
 
   const session: AgentSession = {
     sessionId,
     provider,
     location: Option.some(transcript),
     pid: Effect.succeed(query.pid),
-    subscribe,
-    events,
+    subscribe: runtime.subscribe,
+    events: Stream.unwrap(runtime.subscribe),
     send,
     turn,
     steer,
@@ -1470,29 +1409,26 @@ export const layer = (options: ClaudeAgentOptions = {}): Layer.Layer<Agent, neve
           Effect.map(capabilities),
         ),
         open: (run) => openSession(sdk, options, run),
-        status: (statusOptions = {}) =>
-          Effect.gen(function* () {
-          const cwd = tmpdir()
-          const wrap = yield* Launcher.prepare({ provider, cwd })
-          const config = { ...options, env: { ...options.env, ...statusOptions.env } }
-          const snapshot = yield* sdk.status(buildStatusOptions(config, cwd), { wrap }).pipe(
-            Effect.mapError(fromSdkError),
-            Effect.timeoutOrElse({
-              duration: Duration.seconds(30),
-              orElse: () => Effect.fail(agentError("status: Claude Code did not answer within 30 seconds")),
-            }),
+        status: Effect.fn("ClaudeAgent.status")(
+          function* (statusOptions = {}) {
+            const cwd = tmpdir()
+            const wrap = yield* Launcher.prepare({ provider, cwd })
+            const config = { ...options, env: { ...options.env, ...statusOptions.env } }
+            const snapshot = yield* timed("status", sdk.status(buildStatusOptions(config, cwd), { wrap }).pipe(Effect.mapError(fromSdkError)))
+            return accountStatus(snapshot, yield* DateTime.now)
+          },
+          Effect.scoped,
+        ),
+        history: Effect.fn("ClaudeAgent.history")(function* (sessionId, { cwd }) {
+          const history = yield* timed(
+            "history",
+            sdk.history({ sessionId, cwd, transcript: location({ cwd }, sessionId, options) }).pipe(Effect.mapError(fromSdkError)),
           )
-          return accountStatus(snapshot, yield* DateTime.now)
-        }).pipe(Effect.scoped),
-        history: (sessionId, { cwd }) =>
-          sdk.history({ sessionId, cwd, transcript: location({ cwd }, sessionId, options) }).pipe(
-            Effect.mapError(fromSdkError),
-            Effect.flatMap((history) =>
-              history === null
-                ? Effect.fail(new SessionNotFound({ message: `No Claude Code session ${sessionId} for ${cwd}`, sessionId }))
-                : Effect.succeed(historyEvents(history.messages)),
-            ),
-          ),
+          if (history === null) {
+            return yield* new SessionNotFound({ message: `No Claude Code session ${sessionId} for ${cwd}`, sessionId })
+          }
+          return historyEvents(history.messages)
+        }),
       })
     }),
   )

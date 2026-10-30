@@ -114,6 +114,17 @@ agent.open({
 ```
 
 Variables that tell an agent it's nested, such as `CLAUDECODE`, are always removed.
+Codex sessions also drop Claude Code's login token, `CLAUDE_CODE_OAUTH_TOKEN`: Codex
+passes its environment to every command it runs. Set it in `env` to keep it.
+
+## Store the options, or send them elsewhere
+
+`RunSettings` is `RunOptions` without `hooks`, as a `Schema`. Durations encode as
+milliseconds and an `undefined` env value as `null`, so the result is plain JSON.
+
+```ts
+const json = yield* Schema.encodeEffect(Schema.fromJsonString(RunSettings))(settingsOf(options))
+```
 
 ## Keep it going until the tests pass
 

@@ -1,6 +1,9 @@
 /**
  * The README's systemd recipe (`examples/SystemdLauncher.ts`), against the
  * real user manager. Skipped where there is none (e.g. CI containers).
+ *
+ * The out-of-memory cases need `EFFECT_AGENT_OOM_TESTS=1`: their kernel OOM
+ * kills are real, and desktops such as KDE Plasma alert on every one.
  */
 import { NodeServices } from "@effect/platform-node"
 import { describe, expect, it } from "@effect/vitest"
@@ -14,6 +17,7 @@ import * as SystemdLauncher from "../examples/SystemdLauncher.ts"
 const hasUserManager =
   process.platform === "linux" &&
   spawnSync("systemd-run", ["--user", "--scope", "--quiet", "--", "true"], { stdio: "ignore" }).status === 0
+const oomTests = process.env.EFFECT_AGENT_OOM_TESTS === "1"
 
 const alive = (pid: number) => {
   try {
@@ -75,7 +79,7 @@ describe.skipIf(!hasUserManager)("SystemdLauncher example", () => {
   )
 
   for (const oomPolicy of ["stop", "continue"] as const) {
-    it.live(`reports an out-of-memory kill (OOMPolicy=${oomPolicy}), after the session ends too`, () =>
+    it.live.skipIf(!oomTests)(`reports an out-of-memory kill (OOMPolicy=${oomPolicy}), after the session ends too`, () =>
       Effect.gen(function* () {
         const { systemd, oomKilledAfterSession } = yield* withLauncher(
           { properties: { MemoryMax: "50M", MemorySwapMax: "0" }, oomPolicy },

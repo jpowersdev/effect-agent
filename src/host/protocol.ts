@@ -1,15 +1,15 @@
 /**
  * The RPC group a host serves over its unix socket (effect/rpc, NDJSON).
  * Every payload, result and error is a Schema, so typed failures
- * (`TurnFailure` members, `AgentError`, `EventsTrimmed`) arrive as the same
- * classes on the client.
+ * (`TurnFailure` members, `SessionError` members, `EventsTrimmed`) arrive as
+ * the same classes on the client.
  *
  * @since 0.1.0
  */
 import { Schema } from "effect"
 import { Rpc, RpcGroup } from "effect/rpc"
 import { Capabilities, SteerOutcome } from "../Agent.ts"
-import { AgentError, TurnFailure } from "../AgentError.ts"
+import { AgentError, SessionError, TurnFailure } from "../AgentError.ts"
 import { AgentEvent, TurnSucceeded } from "../AgentEvent.ts"
 import { MessageId, SessionId, TurnId } from "../Domain.ts"
 
@@ -77,7 +77,7 @@ export type HostInfo = typeof HostInfo.Type
  * of acting again.
  */
 const Input = { input: Schema.String, requestId: Schema.String }
-const TurnError = Schema.Union([TurnFailure, AgentError])
+const TurnError = Schema.Union([TurnFailure, SessionError])
 
 /**
  * The hooks a client can answer for a host.
@@ -153,14 +153,14 @@ export class HostRpcs extends RpcGroup.make(
   Rpc.make("Subscribe", {
     payload: { fromSeq: Schema.Number, live: Schema.Boolean },
     success: SeqEvent,
-    error: Schema.Union([EventsTrimmed, AgentError]),
+    error: Schema.Union([EventsTrimmed, SessionError]),
     stream: true,
   }),
-  Rpc.make("Send", { payload: Input, success: MessageId, error: AgentError }),
-  Rpc.make("Steer", { payload: Input, success: SteerOutcome, error: AgentError }),
-  Rpc.make("Interrupt", { payload: { requestId: Schema.String }, error: AgentError }),
+  Rpc.make("Send", { payload: Input, success: MessageId, error: SessionError }),
+  Rpc.make("Steer", { payload: Input, success: SteerOutcome, error: SessionError }),
+  Rpc.make("Interrupt", { payload: { requestId: Schema.String }, error: SessionError }),
   /** Graceful: finish queued work, end the session; the host then exits. */
-  Rpc.make("End", { error: AgentError }),
+  Rpc.make("End", { error: SessionError }),
   /** Hard: close the session now (killing its processes); the host then exits. */
   Rpc.make("Stop"),
   Rpc.make("Turn", { payload: Input, success: TurnSucceeded, error: TurnError }),

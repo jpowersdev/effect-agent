@@ -6,16 +6,6 @@
  */
 
 /**
- * The host: runs one session and serves it over a unix socket. Internal:
- * `SessionHost.run` is the entry point, so this module is left out of the API
- * reference.
- *
- * @since 0.1.0
- * @category modules
- */
-export * as Host from "./Host.ts"
-
-/**
  * What a host process is started with, and where hosts live on disk.
  *
  * @since 0.1.0

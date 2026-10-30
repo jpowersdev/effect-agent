@@ -151,7 +151,7 @@ RemoteAgent.layer({
   host: { command, args },
   dir: "/run/user/1000/effect-agent", // default: $XDG_RUNTIME_DIR/effect-agent
   maxEvents: 50_000, // events kept in memory; older ones are read from the file
-  persistEvents: true, // false: no events file, and no catching up past maxEvents
+  persistEvents: true, // false: no events file, no catching up past maxEvents, and no awaitTurn past the last 10 000 turns
   retainEvents: "24 hours", // how long the events file outlives the host
   orphanTimeout: "30 minutes",
   hookTimeout: "5 seconds",
@@ -179,7 +179,9 @@ RemoteAgent.layer({
 })
 ```
 
-With `reconnect: false`, calls fail with `AgentError` at the first drop.
+When the schedule gives up, or at once if the host is gone, calls fail with
+`ConnectionLost`. With `reconnect: false`, they fail that way at the first drop. After
+`detach`, calls on that handle fail with `SessionClosed`.
 
 ## Try it end to end
 

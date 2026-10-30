@@ -3,36 +3,26 @@
  *
  * A `HostSpec` is everything needed to rebuild a provider layer and open one
  * session in another process, so it is plain data: provider-layer options
- * that serialize, `RunOptions` without hooks (durations as strings such as
- * `"30 seconds"` or millis), and the host's own settings.
+ * that serialize, `RunSettings` (`RunOptions` without hooks), and the host's
+ * own settings. Durations are encoded as millis.
  *
  * @since 0.1.0
  */
-import { Duration, Layer, Option, Schema } from "effect"
-import type { ChildProcessSpawner } from "effect/process"
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, statSync } from "node:fs"
+import { Duration, Schema } from "effect"
+import { chmodSync, mkdirSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Agent, Effort, type RunOptions } from "../Agent.ts"
+import { RunSettings } from "../Agent.ts"
 import { AgentError, SessionNotFound } from "../AgentError.ts"
-import { SessionId } from "../Domain.ts"
-import * as ClaudeAgent from "../claude/ClaudeAgent.ts"
-import * as ClaudeReplay from "../claude/ClaudeReplay.ts"
-import * as ClaudeSdk from "../claude/ClaudeSdk.ts"
-import * as CodexAgent from "../codex/CodexAgent.ts"
-import * as CodexAppServer from "../codex/CodexAppServer.ts"
-import * as CodexReplay from "../codex/CodexReplay.ts"
-import type { JsonValue } from "../codex/protocol.ts"
+import { DurationInput, EnvOverrides, SessionId } from "../Domain.ts"
 
 /**
- * A duration as `Duration` input text (`"30 seconds"`) or millis.
+ * A duration: `Duration` input text (`"30 seconds"`) or millis. Encoded as millis.
  *
  * @since 0.1.0
  * @category models
  */
-export const DurationSpec = Schema.Union([Schema.String, Schema.Number]).pipe(
-  Schema.check(Schema.makeFilter((u: string | number) => Option.isSome(Duration.fromInput(u as Duration.Input)))),
-)
+export const DurationSpec = DurationInput
 /**
  * @since 0.1.0
  * @category models
@@ -40,12 +30,12 @@ export const DurationSpec = Schema.Union([Schema.String, Schema.Number]).pipe(
 export type DurationSpec = typeof DurationSpec.Type
 
 /**
- * `null` removes the variable (as `undefined` does in `RunOptions.env`).
+ * Environment overrides; encoded with `null` where `RunOptions.env` has `undefined` (removes the variable).
  *
  * @since 0.1.0
  * @category models
  */
-export const EnvSpec = Schema.Record(Schema.String, Schema.NullOr(Schema.String))
+export const EnvSpec = EnvOverrides
 /**
  * @since 0.1.0
  * @category models
@@ -100,39 +90,17 @@ export const CodexOptionsSpec = Schema.Struct({
 export type CodexOptionsSpec = typeof CodexOptionsSpec.Type
 
 /**
- * `RunOptions` without `hooks`.
+ * `RunOptions` without `hooks`: `RunSettings`.
  *
  * @since 0.1.0
  * @category models
  */
-export const RunSpec = Schema.Struct({
-  cwd: Schema.String,
-  env: Schema.optionalKey(EnvSpec),
-  model: Schema.optionalKey(Schema.String),
-  effort: Schema.optionalKey(Effort),
-  appendSystemPrompt: Schema.optionalKey(Schema.String),
-  disable: Schema.optionalKey(
-    Schema.Struct({
-      askUser: Schema.optionalKey(Schema.Boolean),
-      subagents: Schema.optionalKey(Schema.Boolean),
-      tools: Schema.optionalKey(Schema.Array(Schema.String)),
-    }),
-  ),
-  spendCapUsd: Schema.optionalKey(Schema.Number),
-  resume: Schema.optionalKey(SessionId),
-  watchdog: Schema.optionalKey(
-    Schema.Struct({
-      idle: DurationSpec,
-      toolIdle: Schema.optionalKey(DurationSpec),
-      grace: Schema.optionalKey(DurationSpec),
-    }),
-  ),
-})
+export const RunSpec = RunSettings
 /**
  * @since 0.1.0
  * @category models
  */
-export type RunSpec = typeof RunSpec.Type
+export type RunSpec = RunSettings
 
 /**
  * The provider a host runs a session with.
@@ -319,118 +287,9 @@ export type ReadyLine = typeof ReadyLine.Type
 // Conversions
 // ---------------------------------------------------------------------------
 
-const toEnv = (env: EnvSpec): Record<string, string | undefined> =>
-  Object.fromEntries(Object.entries(env).map(([k, v]) => [k, v ?? undefined]))
-
-const fromEnv = (env: Readonly<Record<string, string | undefined>>): EnvSpec =>
-  Object.fromEntries(Object.entries(env).map(([k, v]) => [k, v ?? null]))
-
-const millis = (input: Duration.Input): number => Duration.toMillis(Duration.fromInputUnsafe(input))
-
 /**
  * A validated `DurationSpec` as a `Duration`.
  *
  * @internal
  */
-export const toDuration = (spec: DurationSpec): Duration.Duration => Duration.fromInputUnsafe(spec as Duration.Input)
-
-/**
- * `RunOptions` -> `RunSpec`. `hooks` are dropped (check for them first: functions can't cross processes).
- *
- * @internal
- */
-export const fromRunOptions = (run: RunOptions): RunSpec => {
-  return {
-    cwd: run.cwd,
-    ...(run.env !== undefined && { env: fromEnv(run.env) }),
-    ...(run.model !== undefined && { model: run.model }),
-    ...(run.effort !== undefined && { effort: run.effort }),
-    ...(run.appendSystemPrompt !== undefined && { appendSystemPrompt: run.appendSystemPrompt }),
-    ...(run.disable !== undefined && {
-      disable: {
-        ...(run.disable.askUser !== undefined && { askUser: run.disable.askUser }),
-        ...(run.disable.subagents !== undefined && { subagents: run.disable.subagents }),
-        ...(run.disable.tools !== undefined && { tools: [...run.disable.tools] }),
-      },
-    }),
-    ...(run.spendCapUsd !== undefined && { spendCapUsd: run.spendCapUsd }),
-    ...(run.resume !== undefined && { resume: run.resume }),
-    ...(run.watchdog !== undefined && {
-      watchdog: {
-        idle: millis(run.watchdog.idle),
-        ...(run.watchdog.toolIdle !== undefined && { toolIdle: millis(run.watchdog.toolIdle) }),
-        ...(run.watchdog.grace !== undefined && { grace: millis(run.watchdog.grace) }),
-      },
-    }),
-  }
-}
-
-/**
- * `RunSpec` -> `RunOptions` (without `hooks`).
- *
- * @internal
- */
-export const toRunOptions = (run: RunSpec): RunOptions => ({
-  cwd: run.cwd,
-  ...(run.env !== undefined && { env: toEnv(run.env) }),
-  ...(run.model !== undefined && { model: run.model }),
-  ...(run.effort !== undefined && { effort: run.effort }),
-  ...(run.appendSystemPrompt !== undefined && { appendSystemPrompt: run.appendSystemPrompt }),
-  ...(run.disable !== undefined && { disable: run.disable }),
-  ...(run.spendCapUsd !== undefined && { spendCapUsd: run.spendCapUsd }),
-  ...(run.resume !== undefined && { resume: run.resume }),
-  ...(run.watchdog !== undefined && {
-    watchdog: {
-      idle: toDuration(run.watchdog.idle),
-      ...(run.watchdog.toolIdle !== undefined && { toolIdle: toDuration(run.watchdog.toolIdle) }),
-      ...(run.watchdog.grace !== undefined && { grace: toDuration(run.watchdog.grace) }),
-    },
-  }),
-})
-
-const claudeOptions = (spec: ClaudeOptionsSpec = {}): ClaudeAgent.ClaudeAgentOptions => ({
-  ...(spec.settingSources !== undefined && { settingSources: spec.settingSources }),
-  ...(spec.pathToClaudeCodeExecutable !== undefined && { pathToClaudeCodeExecutable: spec.pathToClaudeCodeExecutable }),
-  ...(spec.model !== undefined && { model: spec.model }),
-  ...(spec.checkResume !== undefined && { checkResume: spec.checkResume }),
-  ...(spec.env !== undefined && { env: toEnv(spec.env) }),
-  ...(spec.stallGrace !== undefined && { stallGrace: toDuration(spec.stallGrace) }),
-})
-
-/**
- * The real (or replayed) provider `Agent` layer for a spec, with no
- * `Launcher`. Codex spawns its app-server through the platform's
- * `ChildProcessSpawner` (`NodeServices.layer`, `BunServices.layer`).
- *
- * @internal
- */
-export const providerLayer = (spec: ProviderSpec): Layer.Layer<Agent, never, ChildProcessSpawner.ChildProcessSpawner> => {
-  const replay = spec.replay
-  if (spec.provider === "claude") {
-    const sdk =
-      replay !== undefined
-        ? ClaudeReplay.layerFile(replay, {
-            ...(spec.replayKnownSessions !== undefined && { knownSessions: spec.replayKnownSessions }),
-            ...(spec.replayHookLog !== undefined && {
-              onHook: (call: ClaudeReplay.ReplayedHook) => appendFileSync(spec.replayHookLog!, `${JSON.stringify(call)}\n`),
-            }),
-          })
-        : ClaudeSdk.layer()
-    return ClaudeAgent.layer(claudeOptions(spec.claude)).pipe(Layer.provide(sdk))
-  }
-  const codex = spec.codex ?? {}
-  const server =
-    replay !== undefined
-      ? Layer.suspend(() => CodexReplay.layer(readFileSync(replay, "utf8")))
-      : CodexAppServer.layer({
-          ...(codex.codexPath !== undefined && { codexPath: codex.codexPath }),
-          ...(codex.args !== undefined && { args: codex.args }),
-          ...(codex.forceKillAfter !== undefined && { forceKillAfter: toDuration(codex.forceKillAfter) }),
-        })
-  return CodexAgent.layer({
-    ...(codex.pricing !== undefined && { pricing: codex.pricing }),
-    // Decoded from the JSON spec, so the values are JSON.
-    ...(codex.config !== undefined && { config: codex.config as Readonly<Record<string, JsonValue>> }),
-    ...(codex.stallGrace !== undefined && { stallGrace: toDuration(codex.stallGrace) }),
-  }).pipe(Layer.provide(server))
-}
+export const toDuration = (spec: DurationSpec): Duration.Duration => Duration.fromInputUnsafe(spec)

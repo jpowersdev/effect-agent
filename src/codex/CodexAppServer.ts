@@ -22,9 +22,10 @@
  *
  * @since 0.1.0
  */
-import { Cause, Context, Deferred, Duration, Effect, Exit, Fiber, FileSystem, Layer, Option, Queue, Schema, Scope, Stream } from "effect"
+import { Cause, Context, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, Queue, Schema, Scope, Stream } from "effect"
 import { ChildProcess, ChildProcessSpawner } from "effect/process"
 import { AgentError } from "../AgentError.ts"
+import * as Recorder from "../internal/recorder.ts"
 import * as Launcher from "../Launcher.ts"
 import * as ProcessTree from "../ProcessTree.ts"
 import * as P from "./protocol.ts"
@@ -129,8 +130,9 @@ export interface Options {
   readonly args?: ReadonlyArray<string>
   /**
    * Tee every frame to this JSONL file (`{"dir":"out"|"in","msg":...}` per
-   * line). Each connection truncates the file. Needs a `FileSystem` in the
-   * layer's context (e.g. `NodeServices.layer`).
+   * line). A connection truncates the file and records until it closes; one
+   * that starts while another is recording isn't recorded (so a `status`
+   * call during a session leaves the session's recording alone).
    */
   readonly record?: string
   /** How long to wait after SIGTERM before SIGKILL. Default 10 seconds. */
@@ -293,6 +295,46 @@ export const makeRpcCore = Effect.fnUntraced(function* (write: (msg: P.Message) 
   }
 })
 
+const RpcErrorBody = Schema.Struct({
+  code: Schema.Number,
+  message: Schema.String,
+  data: Schema.optionalKey(Schema.Unknown),
+})
+
+/**
+ * One JSON-RPC frame as app-server writes it. `error: null` (which some
+ * servers send alongside a result) counts as no error.
+ */
+const WireMessage = Schema.Struct({
+  id: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
+  method: Schema.optionalKey(Schema.String),
+  params: Schema.optionalKey(Schema.Unknown),
+  result: Schema.optionalKey(Schema.Unknown),
+  error: Schema.optionalKey(Schema.NullOr(RpcErrorBody)),
+  emittedAtMs: Schema.optionalKey(Schema.Number),
+})
+const fromWire = ({ error, ...rest }: typeof WireMessage.Type): P.Message =>
+  error === null || error === undefined ? rest : { ...rest, error }
+const decodeWireLine = Schema.decodeUnknownOption(Schema.fromJsonString(WireMessage))
+const decodeWire = Schema.decodeUnknownOption(WireMessage)
+
+/**
+ * A line of app-server output as a `Message`; none for anything that isn't a JSON-RPC object.
+ *
+ * @internal
+ */
+export const decodeMessage = (line: string): Option.Option<P.Message> => Option.map(decodeWireLine(line), fromWire)
+
+/**
+ * An already-parsed frame as a `Message`; none for anything that isn't a JSON-RPC object.
+ *
+ * @internal
+ */
+export const decodeMessageValue = (value: unknown): Option.Option<P.Message> => Option.map(decodeWire(value), fromWire)
+
+/** JSON-RPC "internal error": our handler for a server request failed unexpectedly. */
+const INTERNAL_ERROR = -32603
+
 /** Builds the env passed to the spawner: `extendEnv` semantics, `undefined` removes. */
 const childEnv = (env: Readonly<Record<string, string | undefined>> | undefined) => ({ ...env })
 
@@ -310,18 +352,13 @@ const signalOf = (error: unknown): string | null => {
 export const make = (options: Options = {}) =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
-    const fs = yield* Effect.serviceOption(FileSystem.FileSystem)
     const codexPath = options.codexPath ?? "codex"
     const forceKillAfter = options.forceKillAfter ?? Duration.seconds(10)
     // A Launcher provided to the layer applies when the caller doesn't provide its own.
-    const layerLauncher = yield* Effect.serviceOption(Launcher.Launcher)
-    const prepareWrap = (cwd: string) =>
-      Effect.flatMap(Effect.serviceOption(Launcher.Launcher), (callerLauncher) => {
-        const prepare = Launcher.prepare({ provider, cwd })
-        return Option.isNone(callerLauncher) && Option.isSome(layerLauncher)
-          ? Effect.provideService(prepare, Launcher.Launcher, layerLauncher.value)
-          : prepare
-      })
+    const prepareWrap = Launcher.prepareWithFallback(yield* Effect.serviceOption(Launcher.Launcher))
+
+    /** Whether a connection is recording; another one that starts meanwhile isn't. */
+    let recording = false
 
     const version = yield* Effect.cached(
       spawner.string(ChildProcess.make(codexPath, ["--version"], { stderr: "ignore" })).pipe(
@@ -332,33 +369,34 @@ export const make = (options: Options = {}) =>
 
     const connect = (connectOptions: ConnectOptions): Effect.Effect<Connection, AgentError, Scope.Scope> =>
       Effect.gen(function* () {
-        // Recording: frames are appended to an in-memory buffer synchronously (so
-        // their order is exact) and flushed by a fiber and on scope close.
-        let recordBuffer: Array<string> = []
+        // A connection that starts while another is recording isn't recorded.
+        // Check and claim the recording in one step (another connection may be starting too);
+        // only the connection that claimed it records, and gives it up when it closes.
         const recordPath = options.record
-        let flush: Effect.Effect<void> = Effect.void
-        if (recordPath !== undefined) {
-          if (Option.isNone(fs)) {
-            return yield* agentError("CodexAppServer `record` needs a FileSystem service (e.g. NodeServices.layer)")
-          }
-          const fileSystem = fs.value
-          yield* fileSystem
-            .writeFileString(recordPath, "")
-            .pipe(Effect.mapError((cause) => agentError(`cannot write recording ${recordPath}`, cause)))
-          flush = Effect.suspend(() => {
-            if (recordBuffer.length === 0) return Effect.void
-            const data = recordBuffer.join("")
-            recordBuffer = []
-            return Effect.ignore(fileSystem.writeFileString(recordPath, data, { flag: "a" }))
-          })
-          yield* Effect.addFinalizer(() => flush)
-          yield* Effect.forkScoped(Effect.forever(Effect.andThen(Effect.sleep(200), flush)))
-        }
-        const record = (dir: "in" | "out", msg: unknown) => {
-          if (recordPath !== undefined) recordBuffer.push(JSON.stringify({ dir, msg }) + "\n")
-        }
+        const owns =
+          recordPath === undefined
+            ? false
+            : yield* Effect.acquireRelease(
+                Effect.sync(() => {
+                  if (recording) return false
+                  recording = true
+                  return true
+                }),
+                (claimed) =>
+                  Effect.sync(() => {
+                    if (claimed) recording = false
+                  }),
+              )
+        const recorder =
+          owns && recordPath !== undefined
+            ? yield* Recorder.make(recordPath, { truncate: true }).pipe(
+                Effect.mapError((cause) => agentError(`cannot write recording ${recordPath}`, cause)),
+              )
+            : Recorder.none
+        const record = (dir: "in" | "out", msg: unknown) => recorder.record({ dir, msg })
+        const flush = recorder.flush
 
-        const wrap = yield* prepareWrap(connectOptions.cwd)
+        const wrap = yield* prepareWrap({ provider, cwd: connectOptions.cwd })
         // Inherited by app-server and every command it runs (each in its own PTY session,
         // outside our process group), so they can all be found and stopped.
         const marker = ProcessTree.newMarker()
@@ -372,7 +410,8 @@ export const make = (options: Options = {}) =>
               detached: true,
               env: { ...childEnv(connectOptions.env), [ProcessTree.markerVariable]: marker },
               extendEnv: true,
-              stdin: "pipe",
+              // Frames are written in order as they are queued; the spawner pipes them in.
+              stdin: Stream.fromQueue(stdinQueue).pipe(Stream.encodeText),
               stdout: "pipe",
               stderr: "pipe",
               killSignal: "SIGTERM",
@@ -392,13 +431,6 @@ export const make = (options: Options = {}) =>
           })
         const core = yield* makeRpcCore(write)
 
-        yield* Stream.fromQueue(stdinQueue).pipe(
-          Stream.encodeText,
-          Stream.run(handle.stdin),
-          Effect.ignore,
-          Effect.forkScoped,
-        )
-
         // Keep the last stderr lines for error messages; stderr must be drained anyway.
         const stderrTail: Array<string> = []
         yield* Stream.decodeText(handle.stderr).pipe(
@@ -414,31 +446,39 @@ export const make = (options: Options = {}) =>
         )
 
         const onServerRequest = connectOptions.onServerRequest ?? defaultServerRequestHandler
+        // Always answer: app-server waits on a server request until it gets one.
         const answer = (req: P.ServerRequest) =>
-          onServerRequest(req).pipe(
-            Effect.matchEffect({
-              onFailure: (e) => write({ id: req.id, error: { code: e.code, message: e.message } }),
+          Effect.suspend(() => onServerRequest(req)).pipe(
+            Effect.matchCauseEffect({
+              onFailure: (cause) => {
+                const error = Cause.findErrorOption(cause)
+                return write({
+                  id: req.id,
+                  error: Option.isSome(error)
+                    ? { code: error.value.code, message: error.value.message }
+                    : { code: INTERNAL_ERROR, message: `effect-agent failed to handle ${req.method}` },
+                })
+              },
               onSuccess: (result) => write({ id: req.id, result }),
             }),
           )
 
         const reader = yield* Stream.decodeText(handle.stdout).pipe(
           Stream.splitLines,
-          Stream.runForEach((line) => {
-            if (line.trim() === "") return Effect.void
-            let msg: P.Message
-            try {
-              msg = JSON.parse(line)
-            } catch {
-              return Effect.void
-            }
-            record("in", msg)
-            return core.dispatch(msg).pipe(
-              Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: (req) => Effect.forkScoped(answer(req)) })),
-              Effect.asVoid,
-            )
-          }),
-          Effect.ignore,
+          Stream.runForEach((line) =>
+            Option.match(decodeMessage(line), {
+              // Not JSON-RPC (a blank line, a log line): nothing to route.
+              onNone: () => Effect.void,
+              onSome: (msg) => {
+                record("in", msg)
+                return core.dispatch(msg).pipe(
+                  Effect.flatMap(Option.match({ onNone: () => Effect.void, onSome: (req) => Effect.forkScoped(answer(req)) })),
+                  Effect.asVoid,
+                )
+              },
+            }),
+          ),
+          Effect.catchCause((cause) => Effect.logError("codex app-server reader failed", cause)),
           Effect.forkScoped,
         )
 
@@ -449,10 +489,7 @@ export const make = (options: Options = {}) =>
             const info: ProcessExit = Exit.isSuccess(exit)
               ? { exitCode: exit.value, signal: null }
               : { exitCode: null, signal: signalOf(Cause.squash(exit.cause)) }
-            return Effect.gen(function* () {
-              // Whatever still carries the marker is an orphan of a dead app-server.
-              yield* ProcessTree.kill(marker, { grace: Duration.seconds(2) }).pipe(Effect.forkScoped)
-              yield* Fiber.join(reader).pipe(Effect.timeoutOption(Duration.seconds(2)))
+            const ended = Effect.gen(function* () {
               yield* core.failPending(
                 `codex app-server exited (${info.signal ?? `code ${info.exitCode}`})${
                   stderrTail.length > 0 ? `: ${stderrTail.slice(-3).join(" | ")}` : ""
@@ -461,6 +498,12 @@ export const make = (options: Options = {}) =>
               yield* core.endIncoming
               yield* Deferred.succeed(core.exitSignal, info)
             })
+            return Effect.gen(function* () {
+              // Whatever still carries the marker is an orphan of a dead app-server.
+              yield* ProcessTree.kill(marker, { grace: Duration.seconds(2) }).pipe(Effect.forkScoped)
+              // Let the reader drain what's left; however it ends, the connection ends with it.
+              yield* Fiber.await(reader).pipe(Effect.timeoutOption(Duration.seconds(2)))
+            }).pipe(Effect.ensuring(ended))
           }),
           Effect.forkScoped,
         )

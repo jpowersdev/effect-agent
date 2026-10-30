@@ -1,11 +1,14 @@
 import { describe, expect, it } from "@effect/vitest"
-import { DateTime, Option, Schema } from "effect"
+import { DateTime, Duration, Option, Schema } from "effect"
 import {
   type AccountStatus,
   AgentEvent,
   appliesTo,
   LimitWindowStatus,
   Pricing,
+  type RunOptions,
+  RunSettings,
+  settingsOf,
   SessionId,
   TurnId,
   UsageLimited,
@@ -13,6 +16,40 @@ import {
 } from "../src/index.ts"
 
 describe("schemas", () => {
+  it("RunSettings: RunOptions without hooks, through JSON", () => {
+    const run: RunOptions = {
+      cwd: "/w",
+      env: { KEEP: "1", DROP: undefined },
+      effort: "high",
+      disable: { tools: ["Bash"] },
+      resume: SessionId.make("s-1"),
+      watchdog: { idle: "30 seconds", grace: Duration.seconds(2) },
+      hooks: { beforeStop: () => null as never },
+    }
+    const json = Schema.encodeSync(Schema.fromJsonString(RunSettings))(settingsOf(run))
+    expect(JSON.parse(json)).toEqual({
+      cwd: "/w",
+      env: { KEEP: "1", DROP: null },
+      effort: "high",
+      disable: { tools: ["Bash"] },
+      resume: "s-1",
+      watchdog: { idle: 30_000, grace: 2_000 },
+    })
+    const back = Schema.decodeUnknownSync(Schema.fromJsonString(RunSettings))(json)
+    // Strict: `DROP` must still be there (as undefined), or the host variable wouldn't be removed.
+    expect(back.env).toStrictEqual({ KEEP: "1", DROP: undefined })
+    expect(Duration.toMillis(Duration.fromInputUnsafe(back.watchdog!.idle))).toBe(30_000)
+    // Infinite durations survive JSON too (JSON has no Infinity: they encode as text).
+    for (const [idle, millis] of [[Duration.infinity, Infinity], ["Infinity", Infinity], ["-Infinity", -Infinity]] as const) {
+      const text = Schema.encodeSync(Schema.fromJsonString(RunSettings))({ cwd: "/w", watchdog: { idle } })
+      const decoded = Schema.decodeUnknownSync(Schema.fromJsonString(RunSettings))(text)
+      expect(Duration.toMillis(Duration.fromInputUnsafe(decoded.watchdog!.idle))).toBe(millis)
+    }
+    // Text durations decode too; nonsense doesn't.
+    expect(Schema.decodeUnknownSync(RunSettings)({ cwd: "/w", watchdog: { idle: "5 minutes" } }).watchdog).toBeDefined()
+    expect(() => Schema.decodeUnknownSync(RunSettings)({ cwd: "/w", watchdog: { idle: "soonish" } })).toThrow()
+  })
+
   it("round-trips a TurnEnded with a typed usage-limit outcome through JSON", () => {
     const resetsAt = DateTime.makeUnsafe(1793803680_000)
     const event: AgentEvent = {

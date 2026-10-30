@@ -54,27 +54,27 @@ import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { closeSync, existsSync, openSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
-import { Agent, type AgentSession, type Hooks, type RunOptions } from "../Agent.ts"
-import { AgentError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
+import { Agent, type AgentSession, type Hooks, type RunOptions, settingsOf } from "../Agent.ts"
+import { AgentError, ConnectionLost, SessionClosed, type SessionError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnSucceeded } from "../AgentEvent.ts"
 import { type MessageId, SessionId, type TurnId } from "../Domain.ts"
 import * as Launcher from "../Launcher.ts"
+import * as ProcessTree from "../ProcessTree.ts"
 import * as EventFile from "./EventFile.ts"
 import { defaults as hostDefaults, isLive, pruneEvents, readManifest } from "./Host.ts"
 import {
   defaultDir,
   ensureDir,
   eventsPath,
-  fromRunOptions,
   HostSpec,
   type Manifest,
   manifestPath,
-  providerLayer,
   type ProviderSpec,
   ReadyLine,
   socketPath,
 } from "./HostSpec.ts"
-import { type EventsTrimmed, type HookName, type HookRequest, type HostInfo, HostRpcs, type SeqEvent } from "./protocol.ts"
+import { providerLayer } from "./providers.ts"
+import { type EventsTrimmed, type HookName, type HookRequest, type HookStreamItem, type HostInfo, HostRpcs, type SeqEvent } from "./protocol.ts"
 
 /**
  * Options for `layer`.
@@ -92,8 +92,9 @@ export interface RemoteAgentOptions extends ProviderSpec {
   readonly maxEvents?: number
   /**
    * Hosts append every event to `<dir>/<sessionId>.events.jsonl` (mode 0600),
-   * so `subscribeFrom` can serve any seq, and `AgentHosts.events` can read a
-   * session's log after its host has exited. Default true.
+   * so `subscribeFrom` can serve any seq, `awaitTurn` and `awaitMessage` any
+   * turn, and `AgentHosts.events` can read a session's log after its host has
+   * exited. Default true.
    */
   readonly persistEvents?: boolean
   /**
@@ -107,7 +108,7 @@ export interface RemoteAgentOptions extends ProviderSpec {
    * session ending), re-dial it on this schedule: subscriptions resume from
    * the last seq they delivered, and calls in flight are retried (`send`,
    * `steer` and `turn` carry a request id, so the host acts on them once).
-   * Calls fail with `AgentError` when the schedule gives up, or at once if the
+   * Calls fail with `ConnectionLost` when the schedule gives up, or at once if the
    * host is gone (manifest removed or pid dead). `false`: fail on the first
    * drop. Default `defaultReconnect`.
    */
@@ -151,12 +152,8 @@ export const defaultReconnect: Schedule.Schedule<Duration.Duration> = Schedule.m
   Schedule.during("30 seconds"),
 ])
 
-/** Failures that mean "lost the host" (as opposed to the session's own ending). */
-const connectionErrors = new WeakSet<AgentError>()
-const connectionError = (error: AgentError): AgentError => {
-  connectionErrors.add(error)
-  return error
-}
+/** Why a call can't reach the host: it's gone (or unreachable), or this handle was detached. */
+type Unreachable = ConnectionLost | SessionClosed
 
 /**
  * `AgentSession`, plus what reattaching needs.
@@ -175,23 +172,28 @@ export interface RemoteSession extends AgentSession {
    * than the host's cache and the events file isn't there to read it from
    * (`persistEvents: false`, or the file is missing or unreadable).
    */
-  readonly subscribeFrom: (fromSeq: number) => Stream.Stream<SeqEvent, EventsTrimmed | AgentError>
+  readonly subscribeFrom: (fromSeq: number) => Stream.Stream<SeqEvent, EventsTrimmed | SessionError>
   /** The last event's sequence number (-1 before any). */
-  readonly lastSeq: Effect.Effect<number, AgentError>
-  readonly info: Effect.Effect<HostInfo, AgentError>
-  /** That turn's ending: at once if it already ended (even before a reattach), otherwise when it does. */
-  readonly awaitTurn: (turnId: TurnId) => Effect.Effect<TurnSucceeded, TurnFailure | AgentError>
+  readonly lastSeq: Effect.Effect<number, SessionError>
+  readonly info: Effect.Effect<HostInfo, SessionError>
+  /**
+   * That turn's ending: at once if it already ended (even before a reattach),
+   * otherwise when it does. The host keeps the last 10 000 endings in memory
+   * and finds older ones in the events file; with `persistEvents: false`, an
+   * older one fails with `AgentError`.
+   */
+  readonly awaitTurn: (turnId: TurnId) => Effect.Effect<TurnSucceeded, TurnFailure | SessionError>
   /**
    * The ending of the turn a message landed in, by the `MessageId` that `send`
    * returned: persist that, and a runner restarted mid-turn can pick the result
    * up without knowing the turn id. Fails with `AgentError` if the message was
    * dropped, never reached a turn, or wasn't sent through this host.
    */
-  readonly awaitMessage: (messageId: MessageId) => Effect.Effect<TurnSucceeded, TurnFailure | AgentError>
-  /** Drop the connection and leave the session running. Calls made after it fail with `AgentError`. */
+  readonly awaitMessage: (messageId: MessageId) => Effect.Effect<TurnSucceeded, TurnFailure | SessionError>
+  /** Drop the connection and leave the session running. Calls made after it fail with `SessionClosed`. */
   readonly detach: Effect.Effect<void>
   /** Close the session now (killing its processes) and wait for the host to exit. */
-  readonly stop: Effect.Effect<void, AgentError>
+  readonly stop: Effect.Effect<void, SessionError>
 }
 
 /**
@@ -251,23 +253,100 @@ export class AgentHosts extends Context.Service<
     readonly events: (
       sessionId: SessionId,
       fromSeq?: number,
-    ) => Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | AgentError>
+    ) => Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | SessionError>
   }
 >()("effect-agent/AgentHosts") {}
-
-const isAlive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM"
-  }
-}
 
 const removeHostFiles = (dir: string, sessionId: string) => {
   rmSync(manifestPath(dir, sessionId), { force: true })
   rmSync(socketPath(dir, sessionId), { force: true })
 }
+
+/** What `answerHooks` needs from a connection to a host. */
+interface HookChannel {
+  /** `HookRequests`, followed across reconnects. */
+  readonly requests: (registration: {
+    readonly clientId: string
+    readonly hooks: ReadonlyArray<HookName>
+    readonly timeoutMs: number
+  }) => Stream.Stream<HookStreamItem, unknown>
+  readonly respond: (hookId: string, result: string | null) => Effect.Effect<void>
+  /** Hooks run here, so they outlive the request that delivered them. */
+  readonly scope: Scope.Scope
+  readonly agentError: (message: string) => AgentError
+}
+
+/** A hook request run with this client's hooks. */
+const runHook = (hooks: Hooks, request: HookRequest): Effect.Effect<Option.Option<string>> => {
+  const c = request.call
+  switch (request.hook) {
+    case "beforeTool":
+      return hooks.beforeTool !== undefined && c !== null
+        ? hooks.beforeTool({ callId: c.callId, name: c.name, input: c.input })
+        : Effect.succeedNone
+    case "afterTool":
+      return hooks.afterTool !== undefined && c !== null
+        ? hooks.afterTool({ callId: c.callId, name: c.name, input: c.input, output: c.output ?? "", isError: c.isError ?? false })
+        : Effect.succeedNone
+    case "beforeStop":
+      return hooks.beforeStop !== undefined ? hooks.beforeStop() : Effect.succeedNone
+  }
+}
+
+/**
+ * Register to answer hook calls (again after each reconnect, keeping
+ * `clientId`), and answer each by running the hook here. Returns once the
+ * host has the registration.
+ */
+const answerHooks = (channel: HookChannel, hooks: Hooks, timeout: Duration.Duration) =>
+  Effect.gen(function* () {
+    const names = hookNames(hooks)
+    if (names.length === 0) return
+    const clientId = randomUUID()
+    const timeoutMs = Duration.toMillis(timeout)
+    /** Results by hook id: a request delivered again after a reconnect doesn't run twice. */
+    const runs = new Map<string, Deferred.Deferred<string | null>>()
+    const answer = (request: HookRequest) =>
+      Effect.gen(function* () {
+        let result = runs.get(request.hookId)
+        if (result === undefined) {
+          result = Deferred.makeUnsafe<string | null>()
+          runs.set(request.hookId, result)
+          if (runs.size > 1_000) runs.delete(runs.keys().next().value!)
+          // As locally: a failure, defect or timeout adds nothing. The host's timer
+          // decides (and logs) a timeout; this one, a second later, only stops a hook
+          // that is still running. With the same deadline, a busy host could take
+          // this "nothing" as the answer and never log the timeout.
+          yield* Effect.suspend(() => runHook(hooks, request)).pipe(
+            Effect.timeoutOption(Duration.sum(timeout, Duration.seconds(1))),
+            Effect.map((text) => (Option.isSome(text) && Option.isSome(text.value) && text.value.value !== "" ? text.value.value : null)),
+            Effect.catchCause(() => Effect.succeed(null)),
+            Effect.flatMap((text) => Deferred.succeed(result!, text)),
+            Effect.forkIn(channel.scope),
+          )
+        }
+        yield* channel.respond(request.hookId, yield* Deferred.await(result))
+      })
+    const registered = Deferred.makeUnsafe<void, AgentError>()
+    yield* channel.requests({ clientId, hooks: names, timeoutMs }).pipe(
+      Stream.runForEach((item) =>
+        item._tag === "Registered"
+          ? Deferred.succeed(registered, undefined).pipe(Effect.asVoid)
+          : answer(item).pipe(Effect.forkIn(channel.scope), Effect.asVoid),
+      ),
+      Effect.onExit((exit) =>
+        Deferred.done(registered, Exit.isSuccess(exit) ? Exit.void : Exit.fail(channel.agentError("could not register to answer hooks"))),
+      ),
+      Effect.ignore,
+      Effect.forkIn(channel.scope),
+    )
+    yield* Deferred.await(registered).pipe(
+      Effect.timeoutOrElse({
+        duration: Duration.seconds(10),
+        orElse: () => Effect.fail(channel.agentError("the host did not take the hook registration")),
+      }),
+    )
+  })
 
 /**
  * Live manifests in `dir`; stale ones (dead pid) are removed with their sockets.
@@ -292,23 +371,15 @@ export const listHosts = (dir: string): Array<Manifest> => {
   return live
 }
 
-const waitForExit = (pid: number, timeout: Duration.Input) =>
-  Effect.gen(function* () {
-    const deadline = Date.now() + Duration.toMillis(Duration.fromInputUnsafe(timeout))
-    while (Date.now() < deadline) {
-      if (!isAlive(pid)) return true
-      yield* Effect.sleep(Duration.millis(25))
-    }
-    return !isAlive(pid)
-  })
+/** Whether `pid` exits within `timeout`. */
+const waitForExit = (pid: number, timeout: Duration.Input): Effect.Effect<boolean> =>
+  Effect.sync(() => !isAlive(pid)).pipe(
+    Effect.repeat({ schedule: Schedule.spaced("25 millis"), until: (gone) => gone }),
+    Effect.timeoutOption(timeout),
+    Effect.map((exited) => exited._tag === "Some" || !isAlive(pid)),
+  )
 
-const signal = (pid: number, sig: NodeJS.Signals) => {
-  try {
-    process.kill(pid, sig)
-  } catch {
-    // Already gone.
-  }
-}
+const { isAlive, signal } = ProcessTree
 
 /**
  * `Agent` and `AgentHosts`, running each session in its own host process.
@@ -329,7 +400,7 @@ export const layer = (
       const readyTimeout = options.readyTimeout ?? Duration.seconds(60)
       const hostCommand = options.host
       const local = Context.get(yield* Layer.build(providerLayer(options)), Agent)
-      const layerLauncher = yield* Effect.serviceOption(Launcher.Launcher)
+      const prepareWithLayer = Launcher.prepareWithFallback(yield* Effect.serviceOption(Launcher.Launcher))
 
       const agentError = (message: string, cause?: unknown) =>
         new AgentError({ message, provider, ...(cause !== undefined && { cause }) })
@@ -337,13 +408,7 @@ export const layer = (
         new SessionNotFound({ message: `no live host for session ${sessionId}: ${why}`, sessionId })
       const fromClient = (e: RpcClientError.RpcClientError) => agentError(`host connection: ${e.message}`, e)
 
-      const prepareWrap = (cwd: string) =>
-        Effect.flatMap(Effect.serviceOption(Launcher.Launcher), (caller) => {
-          const prepare = Launcher.prepare({ provider, cwd })
-          return Option.isNone(caller) && Option.isSome(layerLauncher)
-            ? Effect.provideService(prepare, Launcher.Launcher, layerLauncher.value)
-            : prepare
-        })
+      const prepareWrap = (cwd: string) => prepareWithLayer({ provider, cwd })
 
       // ---- starting a host ----
 
@@ -459,20 +524,29 @@ export const layer = (
 
           type State =
             | { readonly _tag: "Connected"; readonly conn: Conn }
-            | { readonly _tag: "Reconnecting"; readonly next: Deferred.Deferred<Conn, AgentError> }
-            | { readonly _tag: "Failed"; readonly error: AgentError }
+            | { readonly _tag: "Reconnecting"; readonly next: Deferred.Deferred<Conn, Unreachable> }
+            | { readonly _tag: "Failed"; readonly error: Unreachable }
 
           let detached = false
-          /** A subscription ran to its end, `Info` said so, or `end`/`stop` returned: a drop after that is the host exiting. */
-          let sessionEnded = false
-          const markEnded = Effect.sync(() => {
-            sessionEnded = true
-          })
+          /**
+           * How the session ended, as far as this client has seen (a subscription
+           * ran to its end or failed with the session's error, `Info` said so, or
+           * `end`/`stop` returned). A drop after that is the host exiting, not a
+           * lost connection. `error` null: cleanly, or not known to have failed.
+           */
+          let ended: { readonly error: AgentError | null } | null = null
+          const noteEnded = (error: AgentError | null) => {
+            if (ended === null || (ended.error === null && error !== null)) ended = { error }
+          }
+          const markEnded = (error: AgentError | null = null) => Effect.sync(() => noteEnded(error))
+          /** Calls on a session that has ended. */
+          const endedError = (end: { readonly error: AgentError | null }) =>
+            new SessionClosed({ message: end.error !== null ? `session is gone: ${end.error.message}` : "session has ended", provider })
           /** Connections given up on, closed once the next one is up (or when the session's scope closes). */
           const retired = new Set<Conn>()
-          /** Completed by `detach`: calls and streams still running fail with `AgentError` rather than being interrupted. */
+          /** Completed by `detach`: calls and streams still running fail with `SessionClosed` rather than being interrupted. */
           const detachedSignal = Deferred.makeUnsafe<void>()
-          const detachedError = () => agentError("detached from the session")
+          const detachedError = () => new SessionClosed({ message: "detached from the session", provider })
           const whenDetached = Effect.andThen(Deferred.await(detachedSignal), Effect.fail(detachedError()))
 
           const hostGone = (): string | null => {
@@ -481,7 +555,7 @@ export const layer = (
             if (manifest.pid !== target.pid || !isAlive(target.pid)) return `host ${target.pid} is gone`
             return null
           }
-          const lostError = (message: string) => connectionError(agentError(message))
+          const lostError = (message: string) => new ConnectionLost({ message, provider })
 
           /** Dial the host; when this connection drops later, `lost` hears of it at once. */
           const dialTracked = Effect.suspend(() => {
@@ -498,7 +572,7 @@ export const layer = (
 
           const first = yield* dialTracked
           let state: State = { _tag: "Connected", conn: first }
-          if (first.info.ended) sessionEnded = true
+          if (first.info.ended) noteEnded(null)
 
           const closeRetired = Effect.suspend(() => {
             const conns = [...retired]
@@ -507,11 +581,11 @@ export const layer = (
           })
 
           /** Re-dial on the schedule; fail at once if the host is clearly gone. */
-          const reconnect = (next: Deferred.Deferred<Conn, AgentError>, schedule: Schedule.Schedule<unknown, AgentError>) =>
+          const reconnect = (next: Deferred.Deferred<Conn, Unreachable>, schedule: Schedule.Schedule<unknown, AgentError>) =>
             Effect.gen(function* () {
               const attempt = Effect.suspend(() => {
                 const gone = hostGone()
-                return gone !== null ? Effect.fail(lostError(gone)) : dialTracked
+                return gone !== null ? Effect.fail(agentError(gone)) : dialTracked
               })
               const exit = yield* attempt.pipe(
                 Effect.retry({ schedule, while: () => !detached && hostGone() === null }),
@@ -524,7 +598,7 @@ export const layer = (
                   return yield* Deferred.fail(next, detachedError())
                 }
                 state = { _tag: "Connected", conn }
-                if (conn.info.ended) sessionEnded = true
+                if (conn.info.ended) noteEnded(null)
                 yield* closeRetired
                 return yield* Deferred.succeed(next, conn)
               }
@@ -548,16 +622,20 @@ export const layer = (
             Effect.suspend(() => {
               if (detached || state._tag !== "Connected" || state.conn !== conn) return Effect.void
               retired.add(conn)
-              if (options.reconnect === false || sessionEnded) {
+              if (ended !== null) {
+                state = { _tag: "Failed", error: endedError(ended) }
+                return Effect.void
+              }
+              if (options.reconnect === false) {
                 state = { _tag: "Failed", error: lostError(`host connection: ${why}`) }
                 return Effect.void
               }
-              const next = Deferred.makeUnsafe<Conn, AgentError>()
+              const next = Deferred.makeUnsafe<Conn, Unreachable>()
               state = { _tag: "Reconnecting", next }
               return reconnect(next, options.reconnect ?? defaultReconnect).pipe(Effect.forkIn(sessionScope), Effect.asVoid)
             })
 
-          const current: Effect.Effect<Conn, AgentError> = Effect.suspend(() => {
+          const current: Effect.Effect<Conn, Unreachable> = Effect.suspend(() => {
             if (detached) return Effect.fail(detachedError())
             switch (state._tag) {
               case "Connected":
@@ -588,7 +666,7 @@ export const layer = (
           /** Run a call on the current connection; after a drop, again on the next one. */
           const call = <A, E>(
             make: (client: Client) => Effect.Effect<A, E>,
-          ): Effect.Effect<A, Exclude<E, RpcClientError.RpcClientError> | AgentError> =>
+          ): Effect.Effect<A, Exclude<E, RpcClientError.RpcClientError> | Unreachable> =>
             Effect.gen(function* () {
               while (true) {
                 const conn = yield* current
@@ -600,7 +678,7 @@ export const layer = (
               }
             }).pipe(Effect.raceFirst(whenDetached))
 
-          const info = call((c) => c.Info()).pipe(Effect.tap((i) => (i.ended ? markEnded : Effect.void)))
+          const info = call((c) => c.Info()).pipe(Effect.tap((i) => (i.ended ? markEnded() : Effect.void)))
 
           const detach = Effect.suspend(() => {
             if (detached) return Effect.void
@@ -616,7 +694,7 @@ export const layer = (
 
           const stop = Effect.gen(function* () {
             const stopped = yield* call((c) => c.Stop()).pipe(
-              Effect.tap(markEnded),
+              Effect.tap(markEnded()),
               Effect.timeoutOption(Duration.seconds(30)),
               Effect.exit,
             )
@@ -633,10 +711,10 @@ export const layer = (
           /** A streaming call that survives drops: after one, `make` runs again on the next connection. */
           const follow = <A, E>(
             make: (client: Client) => Stream.Stream<A, E>,
-          ): Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | AgentError> =>
+          ): Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | Unreachable> =>
             Stream.suspend(() => {
               if (detached) return Stream.fail(detachedError())
-              const attempt = (): Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | AgentError> =>
+              const attempt = (): Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | Unreachable> =>
                 Stream.unwrap(
                   Effect.map(current, (conn) =>
                     make(conn.client).pipe(
@@ -652,7 +730,7 @@ export const layer = (
             }).pipe(Stream.interruptWhen(whenDetached))
 
           /** `Subscribe`, resumed after a drop from the seq after the last one delivered. */
-          const subscribeFrom = (fromSeq: number, live = false): Stream.Stream<SeqEvent, EventsTrimmed | AgentError> =>
+          const subscribeFrom = (fromSeq: number, live = false): Stream.Stream<SeqEvent, EventsTrimmed | SessionError> =>
             Stream.suspend(() => {
               let next = Math.max(0, Math.floor(fromSeq))
               let delivered = false
@@ -665,15 +743,17 @@ export const layer = (
                     }),
                   ),
                   // The host ends the stream when the session ends (not when a consumer stops early).
-                  Stream.concat(Stream.unwrap(Effect.as(markEnded, Stream.empty))),
+                  Stream.concat(Stream.unwrap(Effect.as(markEnded(), Stream.empty))),
                 ),
               ).pipe(
                 // The session's own ending error.
-                Stream.tapError((e) => (e._tag === "AgentError" && !connectionErrors.has(e) ? markEnded : Effect.void)),
+                Stream.tapError((e) =>
+                  e._tag === "AgentError" ? markEnded(e) : e._tag === "SessionClosed" ? markEnded() : Effect.void,
+                ),
               )
             })
 
-          const toEvents = (stream: Stream.Stream<SeqEvent, EventsTrimmed | AgentError>): Stream.Stream<AgentEvent, AgentError> =>
+          const toEvents = (stream: Stream.Stream<SeqEvent, EventsTrimmed | SessionError>): Stream.Stream<AgentEvent, SessionError> =>
             stream.pipe(
               Stream.map((entry) => entry.event),
               Stream.mapError((e) => (e._tag === "EventsTrimmed" ? agentError(e.message, e) : e)),
@@ -687,83 +767,6 @@ export const layer = (
               onSuccess: (i) => toEvents(subscribeFrom(i.lastSeq + 1, !i.ended)),
             }),
           )
-
-          /**
-           * Register to answer hook calls (again after each reconnect, keeping
-           * `clientId`), and answer each by running the hook here. Returns once
-           * the host has the registration.
-           */
-          const answerHooks = (hooks: Hooks, timeout: Duration.Duration) =>
-            Effect.gen(function* () {
-              const names = hookNames(hooks)
-              if (names.length === 0) return
-              const clientId = randomUUID()
-              const timeoutMs = Duration.toMillis(timeout)
-              /** Results by hook id: a request delivered again after a reconnect doesn't run twice. */
-              const runs = new Map<string, Deferred.Deferred<string | null>>()
-              const runHook = (request: HookRequest): Effect.Effect<Option.Option<string>> => {
-                const c = request.call
-                switch (request.hook) {
-                  case "beforeTool":
-                    return hooks.beforeTool !== undefined && c !== null
-                      ? hooks.beforeTool({ callId: c.callId, name: c.name, input: c.input })
-                      : Effect.succeedNone
-                  case "afterTool":
-                    return hooks.afterTool !== undefined && c !== null
-                      ? hooks.afterTool({
-                          callId: c.callId,
-                          name: c.name,
-                          input: c.input,
-                          output: c.output ?? "",
-                          isError: c.isError ?? false,
-                        })
-                      : Effect.succeedNone
-                  case "beforeStop":
-                    return hooks.beforeStop !== undefined ? hooks.beforeStop() : Effect.succeedNone
-                }
-              }
-              const answer = (request: HookRequest) =>
-                Effect.gen(function* () {
-                  let result = runs.get(request.hookId)
-                  if (result === undefined) {
-                    result = Deferred.makeUnsafe<string | null>()
-                    runs.set(request.hookId, result)
-                    if (runs.size > 1_000) runs.delete(runs.keys().next().value!)
-                    // As locally: a failure, defect or timeout adds nothing. The host's timer
-                    // decides (and logs) a timeout; this one, a second later, only stops a hook
-                    // that is still running. With the same deadline, a busy host could take
-                    // this "nothing" as the answer and never log the timeout.
-                    yield* Effect.suspend(() => runHook(request)).pipe(
-                      Effect.timeoutOption(Duration.sum(timeout, Duration.seconds(1))),
-                      Effect.map((text) => (Option.isSome(text) && Option.isSome(text.value) && text.value.value !== "" ? text.value.value : null)),
-                      Effect.catchCause(() => Effect.succeed(null)),
-                      Effect.flatMap((text) => Deferred.succeed(result!, text)),
-                      Effect.forkIn(sessionScope),
-                    )
-                  }
-                  const text = yield* Deferred.await(result)
-                  yield* call((c) => c.HookResponse({ hookId: request.hookId, result: text })).pipe(Effect.ignore)
-                })
-              const registered = Deferred.makeUnsafe<void, AgentError>()
-              yield* follow((client) => client.HookRequests({ clientId, hooks: names, timeoutMs })).pipe(
-                Stream.runForEach((item) =>
-                  item._tag === "Registered"
-                    ? Deferred.succeed(registered, undefined).pipe(Effect.asVoid)
-                    : answer(item).pipe(Effect.forkIn(sessionScope), Effect.asVoid),
-                ),
-                Effect.onExit((exit) =>
-                  Deferred.done(registered, Exit.isSuccess(exit) ? Exit.void : Exit.fail(agentError("could not register to answer hooks"))),
-                ),
-                Effect.ignore,
-                Effect.forkIn(sessionScope),
-              )
-              yield* Deferred.await(registered).pipe(
-                Effect.timeoutOrElse({
-                  duration: Duration.seconds(10),
-                  orElse: () => Effect.fail(agentError("the host did not take the hook registration")),
-                }),
-              )
-            })
 
           /** One request id per call, repeated by its retries, so the host acts on it once. */
           const once = <A, E>(make: (requestId: string) => Effect.Effect<A, E>) => Effect.suspend(() => make(randomUUID()))
@@ -780,7 +783,17 @@ export const layer = (
             turn: (input) => once((requestId) => call((c) => c.Turn({ input, requestId }))),
             steer: (input) => once((requestId) => call((c) => c.Steer({ input, requestId }))),
             interrupt: once((requestId) => call((c) => c.Interrupt({ requestId }))),
-            end: call((c) => c.End()).pipe(Effect.tap(markEnded)),
+            // Once the host is gone, ending reports how the session ended, as it would have.
+            end: Effect.suspend(() =>
+              state._tag === "Failed" && ended !== null
+                ? ended.error !== null
+                  ? Effect.fail(ended.error)
+                  : Effect.void
+                : call((c) => c.End()).pipe(
+                    Effect.tap(markEnded()),
+                    Effect.tapError((e) => (e._tag === "AgentError" ? markEnded(e) : Effect.void)),
+                  ),
+            ),
             subscribeFrom: (fromSeq) => subscribeFrom(fromSeq),
             lastSeq: Effect.map(info, (i) => i.lastSeq),
             info,
@@ -791,7 +804,18 @@ export const layer = (
           }
 
           yield* Effect.addFinalizer(() => (onClose === "stop" && !detached ? Effect.ignore(stop) : detach))
-          if (answering !== undefined) yield* answerHooks(answering.hooks, Duration.fromInputUnsafe(answering.timeout))
+          if (answering !== undefined) {
+            yield* answerHooks(
+              {
+                requests: (registration) => follow((client) => client.HookRequests(registration)),
+                respond: (hookId, result) => call((c) => c.HookResponse({ hookId, result })).pipe(Effect.ignore),
+                scope: sessionScope,
+                agentError,
+              },
+              answering.hooks,
+              Duration.fromInputUnsafe(answering.timeout),
+            )
+          }
           return session
         })
 
@@ -811,6 +835,7 @@ export const layer = (
         session: { readonly hookTimeout?: Duration.Input } = {},
       ): Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope> =>
         Effect.gen(function* () {
+          yield* Effect.annotateCurrentSpan({ provider, resume: run.resume !== undefined })
           yield* refuseHooks(run.hooks)
           if (run.resume !== undefined) {
             const existing = readManifest(manifestPath(dir, run.resume))
@@ -825,7 +850,7 @@ export const layer = (
             ...(options.replay !== undefined && { replay: options.replay }),
             ...(options.replayKnownSessions !== undefined && { replayKnownSessions: options.replayKnownSessions }),
             ...(options.replayHookLog !== undefined && { replayHookLog: options.replayHookLog }),
-            run: fromRunOptions(run),
+            run: settingsOf(run),
             dir,
             ...(options.maxEvents !== undefined && { maxEvents: options.maxEvents }),
             ...(options.orphanTimeout !== undefined && { orphanTimeout: Duration.toMillis(Duration.fromInputUnsafe(options.orphanTimeout)) }),
@@ -844,13 +869,14 @@ export const layer = (
           return yield* connect(ready, onScopeClose, answering).pipe(
             Effect.tapError(() => Effect.sync(() => signal(ready.pid, "SIGTERM"))),
           )
-        })
+        }).pipe(Effect.withSpan("RemoteAgent.open"))
 
       const attach = (
         sessionId: SessionId,
         attachOptions: AttachOptions = {},
       ): Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope> =>
         Effect.gen(function* () {
+          yield* Effect.annotateCurrentSpan({ provider, sessionId })
           yield* refuseHooks(attachOptions.hooks)
           prune()
           const manifest = readManifest(manifestPath(dir, sessionId))
@@ -869,7 +895,7 @@ export const layer = (
               return Effect.fail(notFound(sessionId, e.message))
             }),
           )
-        })
+        }).pipe(Effect.withSpan("RemoteAgent.attach"))
 
       const fromFile = (sessionId: SessionId, fromSeq: number): Stream.Stream<SeqEvent, AgentError> =>
         EventFile.read(eventsPath(dir, sessionId), fromSeq).pipe(
@@ -877,8 +903,8 @@ export const layer = (
           Stream.mapError((e) => (e instanceof AgentError ? e : agentError(e.message, e))),
         )
 
-      const events = (sessionId: SessionId, fromSeq = 0): Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | AgentError> =>
-        Stream.suspend((): Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | AgentError> => {
+      const events = (sessionId: SessionId, fromSeq = 0): Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | SessionError> =>
+        Stream.suspend((): Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | SessionError> => {
           prune()
           const file = eventsPath(dir, sessionId)
           const manifest = readManifest(manifestPath(dir, sessionId))
@@ -892,7 +918,7 @@ export const layer = (
           const followed = Stream.unwrap(
             connect(manifest, "detach").pipe(
               Effect.map((session) => session.subscribeFrom(next)),
-              Effect.catchTag("AgentError", (e) => Effect.fail(connectionError(e))),
+              Effect.catchTag("AgentError", (e) => Effect.fail(new ConnectionLost({ message: e.message, provider }))),
             ),
           ).pipe(
             Stream.tap((entry) =>
@@ -901,7 +927,7 @@ export const layer = (
               }),
             ),
             Stream.catchIf(
-              (e): e is AgentError => e._tag === "AgentError" && connectionErrors.has(e) && existsSync(file),
+              (e): e is ConnectionLost => e._tag === "ConnectionLost" && existsSync(file),
               () => Stream.suspend(() => fromFile(sessionId, next)),
             ),
           )

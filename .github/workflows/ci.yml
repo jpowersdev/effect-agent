@@ -55,6 +55,8 @@ jobs:
       - uses: ./.github/actions/setup
       - run: pnpm typecheck
       - run: pnpm test
+        env:
+          EFFECT_AGENT_OOM_TESTS: "1"
       - run: pnpm build
       - run: pnpm check:pack
 

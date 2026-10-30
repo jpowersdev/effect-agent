@@ -45,6 +45,26 @@ const failureOf = <A, E>(exit: Exit.Exit<A, E>) =>
   Exit.isFailure(exit) ? Option.getOrUndefined(Cause.findErrorOption(exit.cause)) : undefined
 
 describe("ClaudeAgent over recordings", () => {
+  it.effect("hooks run in the session's context, but not under the span of the long-finished open", () =>
+    Effect.gen(function* () {
+      const parents: Array<string> = []
+      const parentName = Effect.currentParentSpan.pipe(
+        Effect.map((span) => (span._tag === "Span" ? span.name : span._tag)),
+        Effect.orElseSucceed(() => "none"),
+      )
+      const session = yield* (yield* Agent).open({
+        cwd,
+        hooks: {
+          beforeTool: () => Effect.map(parentName, (name) => (parents.push(name), Option.none())),
+        },
+      })
+      yield* session.turn("Use the Bash tool once to run `echo hello`, then reply with the secret word.")
+      expect(parents.length).toBeGreaterThan(0)
+      expect(parents).not.toContain("ClaudeAgent.open")
+    }).pipe(Effect.scoped, Effect.provide(replay("hooks"))),
+  )
+
+
   it.effect("recorded hook calls reach the session's hooks, with the CLI's inputs, and their answers reach the SDK", () =>
     Effect.gen(function* () {
       const calls: Array<unknown> = []
@@ -225,8 +245,8 @@ describe("ClaudeAgent over recordings", () => {
       const { events, fiber } = yield* collect(session)
       const error = failureOf(yield* session.turn("sleep").pipe(Effect.exit))
       expect(error).toMatchObject({ _tag: "ProcessKilled", signal: "SIGKILL", exitCode: null })
-      expect(failureOf(yield* session.send("hello?").pipe(Effect.exit))?._tag).toBe("AgentError")
-      expect(failureOf(yield* session.interrupt.pipe(Effect.exit))?._tag).toBe("AgentError")
+      expect(failureOf(yield* session.send("hello?").pipe(Effect.exit))?._tag).toBe("SessionClosed")
+      expect(failureOf(yield* session.interrupt.pipe(Effect.exit))?._tag).toBe("SessionClosed")
       expect(failureOf(yield* Fiber.join(fiber).pipe(Effect.exit))?._tag).toBe("AgentError")
       expect(events.at(-1)).toMatchObject({ _tag: "TurnEnded", outcome: { _tag: "ProcessKilled" } })
       // A late subscriber sees the failure immediately.
@@ -397,7 +417,7 @@ describe("ClaudeAgent over recordings", () => {
       expect(error?.message).toContain("killed")
       expect(events.at(-1)).toMatchObject({ _tag: "TurnEnded", outcome: { _tag: "Stalled" } })
       // As after any process death: later calls and the stream fail.
-      expect(failureOf(yield* session.send("hello?").pipe(Effect.exit))?._tag).toBe("AgentError")
+      expect(failureOf(yield* session.send("hello?").pipe(Effect.exit))?._tag).toBe("SessionClosed")
       expect(failureOf(yield* Fiber.join(fiber).pipe(Effect.exit))?._tag).toBe("AgentError")
     }).pipe(
       Effect.provide(ClaudeAgent.layer({ stallGrace: "5 seconds" }).pipe(Layer.provide(ClaudeReplay.layer(recording)))),

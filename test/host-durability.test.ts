@@ -23,8 +23,9 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { AgentError, type AgentEvent, type MessageId, SessionId, SessionNotFound, TurnId } from "../src/index.ts"
-import { AgentHosts, Host, HostSpec, RemoteAgent, type SeqEvent } from "../src/host/index.ts"
+import { AgentError, type AgentEvent, ConnectionLost, MessageId, SessionId, SessionNotFound, TurnId } from "../src/index.ts"
+import { AgentHosts, HostSpec, RemoteAgent, type SeqEvent } from "../src/host/index.ts"
+import * as Host from "../src/host/Host.ts"
 import { host } from "./support/hostCommand.ts"
 
 const root = mkdtempSync(join(tmpdir(), "ea-hostd-"))
@@ -137,7 +138,8 @@ for (const p of providers) {
         Effect.gen(function* () {
           const session = yield* (yield* AgentHosts).open({ cwd: p.cwd })
           started.add(session.hostPid)
-          const live = yield* collect(Stream.unwrap(session.subscribe))
+          // Subscribed before `send`, so no event after it can be missed.
+          const live = yield* collect(yield* session.subscribe)
           const messageId = yield* session.send("sleep for a long time")
           yield* waitUntil(() => toolCallTurn(live.items) !== undefined, "the tool call")
           const firstTurn = toolCallTurn(live.items)!
@@ -329,7 +331,8 @@ for (const p of providers) {
           const session = yield* (yield* AgentHosts).open({ cwd: p.cwd })
           started.add(session.hostPid)
           const all = yield* collect(session.subscribeFrom(0))
-          const live = yield* collect(Stream.unwrap(session.subscribe))
+          // Subscribed before `send`, so no event after it can be missed.
+          const live = yield* collect(yield* session.subscribe)
           yield* session.send("sleep for a long time")
           yield* waitUntil(() => all.items.some((e) => e.event._tag === "ToolCall"), "the tool call")
 
@@ -456,7 +459,7 @@ for (const p of providers) {
     )
 
     it.live(
-      "with the host killed, calls and subscriptions fail AgentError at once",
+      "with the host killed, calls and subscriptions fail ConnectionLost at once",
       () =>
         Effect.gen(function* () {
           const session = yield* (yield* AgentHosts).open({ cwd: p.cwd })
@@ -467,16 +470,16 @@ for (const p of providers) {
           yield* waitUntil(() => !isAlive(session.hostPid), "the host to die")
           const t0 = Date.now()
           const failure = failureOf(yield* session.send("hello?").pipe(Effect.exit))
-          expect(failure).toBeInstanceOf(AgentError)
+          expect(failure).toBeInstanceOf(ConnectionLost)
           expect(failure).toMatchObject({ message: expect.stringMatching(/gone/) })
-          expect(failureOf(yield* Fiber.join(all.fiber).pipe(Effect.flatten, Effect.exit))).toBeInstanceOf(AgentError)
+          expect(failureOf(yield* Fiber.join(all.fiber).pipe(Effect.flatten, Effect.exit))).toBeInstanceOf(ConnectionLost)
           expect(Date.now() - t0).toBeLessThan(2_000) // not the 30 s schedule
         }).pipe(Effect.scoped, Effect.provide(layer(p.simple, { onScopeClose: "detach" }))),
       timeout,
     )
 
     it.live(
-      "when the schedule runs out, calls fail AgentError",
+      "when the schedule runs out, calls fail ConnectionLost",
       () =>
         Effect.gen(function* () {
           const session = yield* (yield* AgentHosts).open({ cwd: p.cwd })
@@ -488,7 +491,7 @@ for (const p of providers) {
           yield* waitUntil(() => drops(dir, session.sessionId) === 1, "the host to drop the connection")
           const t0 = Date.now()
           const failure = failureOf(yield* session.info.pipe(Effect.exit))
-          expect(failure).toBeInstanceOf(AgentError)
+          expect(failure).toBeInstanceOf(ConnectionLost)
           expect(failure).toMatchObject({ message: expect.stringMatching(/could not reconnect/) })
           expect(Date.now() - t0).toBeLessThan(5_000)
           expect(isAlive(session.hostPid)).toBe(true)
@@ -516,8 +519,8 @@ for (const p of providers) {
           const all = yield* collect(session.subscribeFrom(0))
           yield* waitUntil(() => all.items.length > 0, "the first event")
           process.kill(session.hostPid, "SIGUSR2")
-          expect(failureOf(yield* Fiber.join(all.fiber).pipe(Effect.flatten, Effect.exit))).toBeInstanceOf(AgentError)
-          expect(failureOf(yield* session.info.pipe(Effect.exit))).toBeInstanceOf(AgentError)
+          expect(failureOf(yield* Fiber.join(all.fiber).pipe(Effect.flatten, Effect.exit))).toBeInstanceOf(ConnectionLost)
+          expect(failureOf(yield* session.info.pipe(Effect.exit))).toBeInstanceOf(ConnectionLost)
           expect(isAlive(session.hostPid)).toBe(true)
           process.kill(session.hostPid, "SIGTERM")
           yield* waitUntil(() => !isAlive(session.hostPid), "the host to exit")
@@ -548,6 +551,36 @@ describe("host events file: resumed sessions", () => {
     resumed,
     raw: null,
   })
+
+  it.live("AwaitTurn and AwaitMessage answer for turns past the 10 000 kept in memory, from the events file", () =>
+    Effect.gen(function* () {
+      const path = HostSpec.eventsPath(root, "long-session")
+      const log = yield* Host.makeLog(2, "test", { path, resumed: false })
+      yield* log.append(started(false))
+      for (let i = 0; i <= 10_000; i++) {
+        log.sent(`m${i}`)
+        yield* log.append({ _tag: "MessageLanded", messageId: MessageId.make(`m${i}`), turnId: TurnId.make(`t${i}`), raw: null })
+        for (const event of turn(`t${i}`)) yield* log.append(event)
+      }
+      expect(yield* log.awaitTurn("t0")).toMatchObject({ _tag: "Succeeded", finalText: "t0" })
+      expect(yield* log.awaitMessage("m0")).toMatchObject({ _tag: "Succeeded", finalText: "t0" })
+      expect(yield* log.awaitTurn("t10000")).toMatchObject({ _tag: "Succeeded", finalText: "t10000" })
+      log.closeFile()
+    }),
+  )
+
+  it.live("without an events file, AwaitTurn on a turn too old to remember fails at once instead of waiting", () =>
+    Effect.gen(function* () {
+      // In memory only, with a ring of 2: the host keeps 10 000 turn endings either way.
+      const log = yield* Host.makeLog(2, "test")
+      yield* log.append(started(false))
+      for (let i = 0; i <= 10_000; i++) for (const event of turn(`t${i}`)) yield* log.append(event)
+      // The session is still running, so waiting on t0 would never end.
+      const old = yield* log.awaitTurn("t0").pipe(Effect.flip, Effect.timeoutOption("1 second"))
+      expect(Option.getOrUndefined(old)).toMatchObject({ _tag: "AgentError", message: expect.stringMatching(/settled too long ago/) })
+      expect(yield* log.awaitTurn("t10000")).toMatchObject({ _tag: "Succeeded", finalText: "t10000" })
+    }),
+  )
 
   it.live("a resumed session's host numbers on from the file an earlier host left; a new one starts it afresh", () =>
     Effect.gen(function* () {
