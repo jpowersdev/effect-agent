@@ -14,11 +14,13 @@
  * group, so commands the agent left running stop too.
  *
  * The CLI is spawned here (the SDK's `spawnClaudeCodeProcess`), detached into
- * its own process group, with the command wrapped by a `Launcher.Wrap`. Claude
- * Code's Bash tool starts each command in a new session (its own process
- * group), so killing the CLI's group alone would leave `(cmd &)` running; the
- * CLI is also given a unique `EFFECT_AGENT_PROCESS` variable, which every
- * process it starts inherits, and on Linux processes carrying it are killed too.
+ * its own process group, with the command wrapped by a `Launcher.Wrap`.
+ *
+ * Claude Code's Bash tool starts each command in a new session (its own
+ * process group), so killing the CLI's group alone would leave `(cmd &)`
+ * running. The CLI is also given a unique `EFFECT_AGENT_PROCESS` variable,
+ * which every process it starts inherits, and on Linux processes carrying it
+ * are killed too.
  *
  * `status` and `history` are the account and transcript reads `ClaudeAgent`
  * needs outside a session.
@@ -167,13 +169,16 @@ export interface RecordedOpen {
 }
 
 /**
- * One line of a JSONL recording. `in`/`out`/`ctl interrupt` are the core format;
- * `ctl open`/`ctl end` mark session boundaries and `error` a thrown transport error.
- * `hook` is one call of an SDK hook callback (`Options.hooks`): its event, the
- * input the CLI passed, what the callback returned, and `position`, the number
- * of `in` frames the session had received when the CLI called it. It is
- * written when the callback returns, so it may come after later lines; replay
- * goes by `position`.
+ * One line of a JSONL recording.
+ *
+ * - `in`, `out` and `ctl interrupt`: the frames themselves.
+ * - `ctl open` and `ctl end`: session boundaries.
+ * - `error`: a thrown transport error.
+ * - `hook`: one call of an SDK hook callback (`Options.hooks`). Its event, the
+ *   input the CLI passed, what the callback returned, and `position`: the
+ *   number of `in` frames the session had received when the CLI called it.
+ *   It is written when the callback returns, so it may come after later
+ *   lines; replay goes by `position`.
  *
  * @since 0.1.0
  * @category models

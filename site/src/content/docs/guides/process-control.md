@@ -1,40 +1,123 @@
 ---
 title: "Process control"
-description: "Wrap agent processes with a Launcher, stop everything they started, and catch stalls."
+description: "Clean up after agents, limit their resources, and catch stuck turns."
 sidebar:
   order: 5
 ---
 
-Provide a `Launcher` to wrap every agent process: it gets the command and returns the one to run instead. Provide it as a layer, or per session around `open`.
+## Clean up after a session
 
-## Recipe: a systemd scope per session
+There's nothing to call. When a session's scope closes, its agent and every process the
+agent started are stopped. If an agent dies, its leftovers are stopped right away.
 
-On Linux with a systemd user manager, [`examples/SystemdLauncher.ts`](https://github.com/jpowersdev/effect-agent/blob/main/examples/SystemdLauncher.ts) runs each agent process in its own transient scope (`systemd-run --user --scope`). Copy it into your app. It gives you three things:
-- **Everything stops:** stopping the scope at the end of the session kills everything in the cgroup, including commands that cleared their environment.
-- **Limits:** resource limits cover the agent and everything it starts.
-- **An answer to "was that an OOM kill?"** A turn that ends `ProcessKilled` doesn't say why it died.
+```ts
+yield* Effect.scoped(
+  Effect.gen(function* () {
+    const session = yield* agent.open({ cwd })
+    yield* session.turn("Start the dev server and check the home page")
+  }),
+)
+// The dev server is gone too
+```
+
+This works on Linux only, since it reads `/proc`. A command that clears its environment
+escapes it; the [systemd scope](#limit-memory-per-session) below catches those too.
+
+## Run agents at a lower priority
+
+A `Launcher` gets each agent's command and returns the one to run instead.
+
+```ts
+import { Launcher } from "@jpowersdev/effect-agent"
+
+const Nice = Launcher.layer(() =>
+  Effect.succeed(({ command, args }) => ({
+    command: "nice",
+    args: ["-n", "10", command, ...args],
+  })),
+)
+
+program.pipe(Effect.provide(Nice))
+```
+
+To wrap a single session, provide the launcher around `open`:
+
+```ts
+agent.open({ cwd }).pipe(Effect.provideService(Launcher.Launcher, launcher))
+```
+
+## Limit memory per session
+
+On Linux with a systemd user manager,
+[`examples/SystemdLauncher.ts`](https://github.com/jpowersdev/effect-agent/blob/main/examples/SystemdLauncher.ts)
+runs each agent in its own transient scope. Copy it into your app; it isn't part of the
+package.
 
 ```ts
 import * as SystemdLauncher from "./SystemdLauncher.ts"
 
-const result = yield* Effect.gen(function* () {
-  const systemd = yield* SystemdLauncher.make({ properties: { MemoryMax: "4G", TasksMax: "512" } })
-  const session = yield* agent.open({ cwd }).pipe(Effect.provideService(Launcher.Launcher, systemd.launcher))
-  return yield* session.turn(prompt).pipe(
-    Effect.catchTag("ProcessKilled", (killed) =>
-      // OutOfMemory: an error of your own
-      Effect.flatMap(systemd.oomKilled, (oom) => Effect.fail(oom ? new OutOfMemory({ cause: killed }) : killed)),
-    ),
-  )
-}).pipe(Effect.scoped, Effect.provide(NodeServices.layer))
+const systemd = yield* SystemdLauncher.make({
+  // See systemd.resource-control(5)
+  properties: { MemoryMax: "4G", TasksMax: "512" },
+})
+
+const session = yield* agent
+  .open({ cwd })
+  .pipe(Effect.provideService(Launcher.Launcher, systemd.launcher))
 ```
 
-- **OOM policy:** `oomPolicy: "stop"` (systemd's default) stops the whole scope when the kernel OOM killer strikes, so the turn ends `ProcessKilled`. With `"continue"`, usually only the runaway command dies, and the agent sees it fail and carries on. `oomKilled` reports the kill either way.
-- **Slices:** each `make` puts its scopes in a slice of their own, which keeps the OOM count after the scope is gone. All of those slices sit under `effect_agent.slice`, so `systemctl --user set-property effect_agent.slice MemoryMax=16G` caps every agent together.
-- **Arguments:** the recipe passes `--expand-environment=no`. Without it, `systemd-run` expands `$VAR` in the command line and silently rewrites any argument (such as a prompt) that contains a `$`.
-- **Remote sessions:** for `RemoteAgent`, pass `stopOnEnd: false`. The `Launcher` then wraps the host, so the host, the agent and its commands share one scope, and that scope must outlive the caller.
-- **Testing:** `test/systemd-launcher.test.ts` checks the recipe against the real user manager, and skips itself where there is none. `node scripts/live-systemd.ts` runs it with Claude Code: a session under limits, and an out-of-memory command under each policy.
+The limits cover the agent and everything it starts. When the session ends, everything
+in the scope is stopped, including commands that cleared their environment.
 
-Without one, processes are still stopped when the session ends, and as soon as an agent process dies its leftovers are swept. Both Claude Code and Codex start each command in its own session, so a process-group kill alone misses them. Instead, each agent process gets a unique `EFFECT_AGENT_PROCESS` variable, and every live process carrying it is stopped (Linux, via `/proc`). A cgroup launcher is still the stronger guarantee: it also covers commands that clear their environment.
+## Tell an out-of-memory kill apart
 
-`watchdog: { idle, toolIdle, grace }` ends a quiet turn `Stalled`. Heartbeats count as activity, so a model that is thinking is not idle; `toolIdle` applies while a tool call runs.
+A turn whose agent was killed fails with `ProcessKilled`. `oomKilled` says whether it
+was the OOM killer.
+
+```ts
+yield* session.turn(prompt).pipe(
+  Effect.catchTag("ProcessKilled", (killed) =>
+    Effect.flatMap(systemd.oomKilled, (oom) =>
+      // OutOfMemory is your own error
+      Effect.fail(oom ? new OutOfMemory({ cause: killed }) : killed),
+    ),
+  ),
+)
+```
+
+## Let only the runaway command die
+
+By default an OOM kill stops the whole scope, so the turn ends `ProcessKilled`. With
+`oomPolicy: "continue"`, usually only the command that ran out dies, and the agent sees
+it fail and carries on.
+
+```ts
+SystemdLauncher.make({ properties: { MemoryMax: "4G" }, oomPolicy: "continue" })
+```
+
+## Limit all agents together
+
+Every scope sits under `effect_agent.slice`, so one command caps them all:
+
+```sh
+systemctl --user set-property effect_agent.slice MemoryMax=16G
+```
+
+`node scripts/live-systemd.ts` runs the recipe with Claude Code: a session under limits,
+and an out-of-memory command under each policy.
+
+## Catch a stuck turn
+
+A turn with no events for `idle` is interrupted and fails with `Stalled`. While a tool
+call runs, the limit is `toolIdle`. `Heartbeat` events count, so a model that's thinking
+isn't idle.
+
+```ts
+agent.open({
+  cwd,
+  watchdog: { idle: "5 minutes", toolIdle: "30 minutes" },
+})
+```
+
+If the turn still hasn't ended 10 seconds later (`grace`), the agent is killed, which
+ends the session.
