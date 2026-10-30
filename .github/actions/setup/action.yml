@@ -1,0 +1,21 @@
+name: Setup
+description: Node 24 and pnpm (from packageManager) with the store cached, optionally Bun, then install from the lockfile.
+inputs:
+  bun-version:
+    description: The version of Bun to install (none if empty)
+    required: false
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 24
+    - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      with:
+        cache: true
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      if: ${{ inputs.bun-version != '' }}
+      with:
+        bun-version: ${{ inputs.bun-version }}
+    - run: pnpm install --frozen-lockfile
+      shell: bash
