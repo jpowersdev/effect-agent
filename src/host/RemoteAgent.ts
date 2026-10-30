@@ -11,7 +11,7 @@
  *     provider: "claude",
  *     host: { command: process.execPath, args: [fileURLToPath(new URL("./host.ts", import.meta.url))] },
  *     onScopeClose: "detach",
- *   })
+ *   }).pipe(Layer.provide(NodeServices.layer))
  *
  *   // process A
  *   const session = yield* (yield* Agent).open({ cwd })
@@ -26,6 +26,11 @@
  * `events`). Hooks stay in the client: the host forwards each hook call to
  * an attached client that has hooks (see `AttachOptions`).
  *
+ * Platform: the layer needs a `ChildProcessSpawner` (for `status` and
+ * `history`, which run locally), so provide `NodeServices.layer` or
+ * `BunServices.layer`. It talks to hosts over unix sockets through
+ * `@effect/platform-node-shared`, as both of those platforms do.
+ *
  * Process supervision: hosts are started with `detached: true` and survive
  * their caller, but a service manager may still kill them. A runner under
  * systemd with the default `KillMode=control-group` has every process in its
@@ -34,9 +39,11 @@
  * `Launcher.ts`); it applies to the host command, so the host and the agent
  * CLI it runs live in that scope.
  */
-import * as NodeSocket from "@effect/platform-node/NodeSocket"
+// The unix-socket client Effect's Node and Bun platforms both use.
+import * as NodeSocket from "@effect/platform-node-shared/NodeSocket"
 import { Cause, Context, Deferred, Duration, Effect, Exit, Layer, Option, Schedule, Schema, Scope, Stream } from "effect"
 import { RpcClient, RpcClientError, RpcSerialization } from "effect/rpc"
+import type { ChildProcessSpawner } from "effect/process"
 import { Socket } from "effect/socket"
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
@@ -266,7 +273,9 @@ const signal = (pid: number, sig: NodeJS.Signals) => {
   }
 }
 
-export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHosts> =>
+export const layer = (
+  options: RemoteAgentOptions,
+): Layer.Layer<Agent | AgentHosts, never, ChildProcessSpawner.ChildProcessSpawner> =>
   Layer.effectContext(
     Effect.gen(function* () {
       const provider = options.provider

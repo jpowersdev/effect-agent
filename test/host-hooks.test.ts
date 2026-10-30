@@ -6,7 +6,7 @@
  * hooks use (the live check in scripts/live-reattach.ts covers the CLI firing
  * them).
  */
-import { NodeSocket } from "@effect/platform-node"
+import { NodeServices, NodeSocket } from "@effect/platform-node"
 import { afterAll, describe, expect, it } from "@effect/vitest"
 import { Cause, Duration, Effect, Exit, Fiber, Layer, Option, Ref, Schedule } from "effect"
 import { RpcClient, RpcClientError, RpcSerialization } from "effect/rpc"
@@ -46,7 +46,7 @@ const layer = (options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
     testInvokeHook: true,
     onScopeClose: "detach",
     ...options,
-  })
+  }).pipe(Layer.provide(NodeServices.layer))
 
 const bash = { callId: "toolu_1", name: "Bash", input: { command: "ls" } }
 
@@ -275,7 +275,7 @@ describe("remote hooks over a recording with hook calls", () => {
       dir,
       onScopeClose: "detach",
       ...options,
-    })
+    }).pipe(Layer.provide(NodeServices.layer))
   const answered = (hookLog: string, event: string) =>
     readFileSync(hookLog, "utf8")
       .split("\n")

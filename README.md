@@ -43,6 +43,10 @@ Each provider is two layers: a transport (`ClaudeSdk`, `CodexAppServer`) and an 
 
 `agent.capabilities` reports the same at runtime, plus the tool's version.
 
+## Platform
+
+The library imports no platform package; `effect` is a peer dependency. Where Effect has a platform service, the library takes it from context: Codex spawns its app-server through `ChildProcessSpawner`, and a session host reads its spec and reports readiness through `Stdio`. Provide `NodeServices.layer` from `@effect/platform-node`, or `BunServices.layer` from `@effect/platform-bun`. Everything else uses Node's built-in modules, which Bun implements; Effect's own Bun platform is built on the same modules. That covers files, the Claude SDK's process, the leftover-process sweep, and unix sockets through `@effect/platform-node-shared`. The test suite runs hosts on both runtimes.
+
 ## Sessions
 
 `agent.open(options)` returns an `AgentSession`:
@@ -108,10 +112,12 @@ The host process runs an entry point in *your* app; the library ships no executa
 
 ```ts
 // host.ts
-import { NodeRuntime } from "@effect/platform-node"
+import { NodeRuntime, NodeServices } from "@effect/platform-node"
+import { Effect } from "effect"
 import { SessionHost } from "effect-agent/host"
 
-NodeRuntime.runMain(SessionHost.run)
+NodeRuntime.runMain(SessionHost.run.pipe(Effect.provide(NodeServices.layer)))
+// Bun: BunRuntime.runMain(SessionHost.run.pipe(Effect.provide(BunServices.layer)))
 ```
 
 ```ts
@@ -122,7 +128,7 @@ const layer = RemoteAgent.layer({
   claude: { model },
   host: { command: process.execPath, args: [fileURLToPath(new URL("./host.ts", import.meta.url))] },
   onScopeClose: "detach",
-})
+}).pipe(Layer.provide(NodeServices.layer))   // status and history run locally
 
 // before the restart: persist the session id and the MessageId
 const session = yield* (yield* Agent).open({ cwd })   // Agent works unchanged; capabilities.reattach is true
@@ -134,7 +140,7 @@ yield* session.subscribeFrom(lastPersistedSeq + 1).pipe(Stream.runForEach(persis
 const result = yield* session.awaitMessage(messageId)         // even if the turn ended while nobody was attached
 ```
 
-`host` is just a command, so the runtime (Node, Bun) and whether you bundle are up to you: if you bundle your app, make `host.ts` a second entry point, as you would a worker. Module loading dominates host startup, so a bundled entry starts noticeably faster (about 0.1 s versus 0.25 s here).
+`host` is just a command, so the runtime (Node or Bun, for the host and the client independently) and whether you bundle are up to you: if you bundle your app, make `host.ts` a second entry point, as you would a worker. Module loading dominates host startup, so a bundled entry starts noticeably faster (about 0.1 s versus 0.25 s here).
 
 A `RemoteSession` is an `AgentSession` plus `subscribeFrom(seq)` (a stream of `{ seq, event }` from any seq, then live), `lastSeq`, `awaitTurn` / `awaitMessage` (by turn id, or by the `MessageId` that `send` returned), `detach` and `stop`. `subscribe`/`events` are live from now, as for a local session. `onScopeClose` is `"stop"` by default (closing the scope ends the session, as locally); set `"detach"` to leave it running. `AgentHosts.list` lists live hosts. `status` and `history` run locally.
 
@@ -189,6 +195,8 @@ pnpm typecheck && pnpm test
 node scripts/live-claude.ts   # live, against the real CLIs (small cost)
 node scripts/live-codex.ts
 ```
+
+`EFFECT_AGENT_TEST_HOST=bun` runs every session host (in the tests and `scripts/live-reattach.ts`) under Bun instead of Node.
 
 ## Building
 

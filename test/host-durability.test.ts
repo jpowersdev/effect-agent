@@ -5,8 +5,9 @@
  * triggers: SIGUSR2 (drop every connection now) and `testDropBeforeReply`
  * (drop them right after the host has acted on a call, before it replies).
  */
+import { NodeServices } from "@effect/platform-node"
 import { afterAll, describe, expect, it } from "@effect/vitest"
-import { Cause, Duration, Effect, Exit, Fiber, Option, Schedule, Stream } from "effect"
+import { Cause, Duration, Effect, Exit, Fiber, Layer, Option, Schedule, Stream } from "effect"
 import {
   appendFileSync,
   chmodSync,
@@ -122,7 +123,7 @@ const timeout = 30_000
 
 for (const p of providers) {
   const layer = (name: string, options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
-    RemoteAgent.layer({ host, provider: p.name, replay: fixture(p.name, name), dir, ...options })
+    RemoteAgent.layer({ host, provider: p.name, replay: fixture(p.name, name), dir, ...options }).pipe(Layer.provide(NodeServices.layer))
 
   const toolCallTurn = (events: ReadonlyArray<AgentEvent>) => {
     const call = events.find((e) => e._tag === "ToolCall")

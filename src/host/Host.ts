@@ -12,8 +12,9 @@
  * death so connected clients get the last events. It removes its socket and
  * manifest on the way out; the events file stays for `retainEvents`.
  */
-import * as NodeSocket from "@effect/platform-node/NodeSocket"
-import * as NodeSocketServer from "@effect/platform-node/NodeSocketServer"
+// The unix-socket server Effect's Node and Bun platforms both use.
+import * as NodeSocket from "@effect/platform-node-shared/NodeSocket"
+import * as NodeSocketServer from "@effect/platform-node-shared/NodeSocketServer"
 import { Cause, Context, DateTime, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, PubSub, Schema, Scope, Stream } from "effect"
 import { RpcSerialization, RpcServer } from "effect/rpc"
 import { SocketServer } from "effect/socket"
@@ -78,7 +79,7 @@ export const makeOnce = (scope: Scope.Scope, limit: number) => {
 
 export interface HostIO {
   /** Report readiness (or the open failure) to whoever started the host. Called once. */
-  readonly ready: (line: ReadyLine) => void
+  readonly ready: (line: ReadyLine) => Effect.Effect<void>
   /** The session id is known (e.g. to name the log file). */
   readonly opened: (sessionId: string) => void
 }
@@ -415,7 +416,7 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
             ? failure.value
             : agentError(`open failed: ${describe(opened.cause)}`)
         yield* Effect.logError("open failed", error)
-        io.ready({ _tag: "Failed", error })
+        yield* io.ready({ _tag: "Failed", error })
         yield* Scope.close(sessionScope, Exit.void)
         return 1
       }
@@ -430,7 +431,7 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       const existing = readManifest(manifestFile)
       if (existing !== undefined && existing.pid !== process.pid && isLive(existing)) {
         const error = agentError(`session ${sessionId} is already hosted by pid ${existing.pid}; attach to it instead`)
-        io.ready({ _tag: "Failed", error })
+        yield* io.ready({ _tag: "Failed", error })
         yield* Scope.close(sessionScope, Exit.void)
         return 1
       }
@@ -443,7 +444,7 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       ).pipe(Effect.exit)
       if (Exit.isFailure(madeLog)) {
         const error = agentError(`cannot open the events file: ${describe(madeLog.cause)}`)
-        io.ready({ _tag: "Failed", error })
+        yield* io.ready({ _tag: "Failed", error })
         yield* Scope.close(sessionScope, Exit.void)
         return 1
       }
@@ -469,7 +470,7 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
 
       if (Buffer.byteLength(socket) > 107) {
         const error = agentError(`socket path ${socket} is too long for a unix socket; use a shorter dir`)
-        io.ready({ _tag: "Failed", error })
+        yield* io.ready({ _tag: "Failed", error })
         yield* Scope.close(sessionScope, Exit.void)
         return 1
       }
@@ -561,7 +562,7 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       const serverContext = yield* Layer.build(NodeSocketServer.layer({ path: socket })).pipe(Effect.exit)
       if (Exit.isFailure(serverContext)) {
         const error = agentError(`cannot listen on ${socket}: ${describe(serverContext.cause)}`)
-        io.ready({ _tag: "Failed", error })
+        yield* io.ready({ _tag: "Failed", error })
         yield* Scope.close(sessionScope, Exit.void)
         return 1
       }
@@ -600,7 +601,7 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       writeFileSync(`${manifestFile}.tmp`, Schema.encodeSync(Schema.fromJsonString(Manifest))(manifest), { mode: 0o600 })
       renameSync(`${manifestFile}.tmp`, manifestFile)
 
-      io.ready({ _tag: "Ready", sessionId, socket, pid: process.pid })
+      yield* io.ready({ _tag: "Ready", sessionId, socket, pid: process.pid })
       yield* Effect.logInfo(`serving on ${socket}`)
 
       // ---- orphan timeout ----

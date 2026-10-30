@@ -6,8 +6,8 @@
  * that serialize, `RunOptions` without hooks (durations as strings such as
  * `"30 seconds"` or millis), and the host's own settings.
  */
-import * as NodeServices from "@effect/platform-node/NodeServices"
 import { Duration, Layer, Option, Schema } from "effect"
+import type { ChildProcessSpawner } from "effect/process"
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -253,8 +253,12 @@ const claudeOptions = (spec: ClaudeOptionsSpec = {}): ClaudeAgent.ClaudeAgentOpt
   ...(spec.stallGrace !== undefined && { stallGrace: toDuration(spec.stallGrace) }),
 })
 
-/** The real (or replayed) provider `Agent` layer for a spec, with no `Launcher`. */
-export const providerLayer = (spec: ProviderSpec): Layer.Layer<Agent> => {
+/**
+ * The real (or replayed) provider `Agent` layer for a spec, with no
+ * `Launcher`. Codex spawns its app-server through the platform's
+ * `ChildProcessSpawner` (`NodeServices.layer`, `BunServices.layer`).
+ */
+export const providerLayer = (spec: ProviderSpec): Layer.Layer<Agent, never, ChildProcessSpawner.ChildProcessSpawner> => {
   const replay = spec.replay
   if (spec.provider === "claude") {
     const sdk =
@@ -276,7 +280,7 @@ export const providerLayer = (spec: ProviderSpec): Layer.Layer<Agent> => {
           ...(codex.codexPath !== undefined && { codexPath: codex.codexPath }),
           ...(codex.args !== undefined && { args: codex.args }),
           ...(codex.forceKillAfter !== undefined && { forceKillAfter: toDuration(codex.forceKillAfter) }),
-        }).pipe(Layer.provide(NodeServices.layer))
+        })
   return CodexAgent.layer({
     ...(codex.pricing !== undefined && { pricing: codex.pricing }),
     ...(codex.config !== undefined && { config: codex.config }),

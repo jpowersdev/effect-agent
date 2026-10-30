@@ -4,8 +4,9 @@
  * a unix socket, so detaching, reattaching and process death are exercised
  * for real.
  */
+import { NodeServices } from "@effect/platform-node"
 import { afterAll, describe, expect, it } from "@effect/vitest"
-import { Cause, DateTime, Duration, Effect, Exit, Fiber, Option, Stream } from "effect"
+import { Cause, DateTime, Duration, Effect, Exit, Fiber, Layer, Option, Stream } from "effect"
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -63,7 +64,7 @@ const timeout = 30_000
 
 for (const p of providers) {
   const layer = (name: string, options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
-    RemoteAgent.layer({ host, provider: p.name, replay: fixture(p.name, name), dir, ...options })
+    RemoteAgent.layer({ host, provider: p.name, replay: fixture(p.name, name), dir, ...options }).pipe(Layer.provide(NodeServices.layer))
 
   /** Open a session, send one message and return as soon as it lands, leaving the session running. */
   const startTurn = (name: string, options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
@@ -356,6 +357,7 @@ describe("host: attach", () => {
       const failure = failureOf(yield* (yield* AgentHosts).attach(id).pipe(Effect.scoped, Effect.exit))
       expect(failure).toBeInstanceOf(SessionNotFound)
       expect(failure).toMatchObject({ sessionId: id })
-    }).pipe(Effect.provide(RemoteAgent.layer({ host, provider: "codex", replay: fixture("codex", "simple"), dir }))),
+    }).pipe(Effect.provide(RemoteAgent.layer({ host, provider: "codex", replay: fixture("codex", "simple"), dir })),
+      Effect.provide(NodeServices.layer)),
   )
 })

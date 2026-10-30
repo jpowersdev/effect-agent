@@ -2,6 +2,7 @@
  * The same programs against both providers (over their recorded sessions),
  * checking the guarantees `Agent` makes regardless of provider.
  */
+import { NodeServices } from "@effect/platform-node"
 import { afterAll, describe, expect, it } from "@effect/vitest"
 import { Cause, Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
@@ -140,7 +141,7 @@ const remote = (local: Provider): Provider => ({
       dir: hostDir,
       ...(local.kind === "claude" && scenario === "resumeMissing" && { replayKnownSessions: "all" as const }),
       ...(pricing !== undefined && { codex: { pricing } }),
-    })
+    }).pipe(Layer.provide(NodeServices.layer))
   },
 })
 

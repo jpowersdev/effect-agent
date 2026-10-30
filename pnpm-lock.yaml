@@ -11,12 +11,9 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: 0.3.312
         version: 0.3.312(@anthropic-ai/sdk@1.3.0(zod@4.6.7))(@modelcontextprotocol/sdk@1.32.2(zod@4.6.7))(zod@4.6.7)
-      '@effect/platform-node':
-        specifier: 4.1.0
-        version: 4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.10.0))
-      effect:
-        specifier: 4.1.0
-        version: 4.1.0
+      '@effect/platform-node-shared':
+        specifier: ^4.1.0
+        version: 4.1.0(effect@4.1.0)
     devDependencies:
       '@babel/cli':
         specifier: ^8.0.6
@@ -24,6 +21,12 @@ importers:
       '@babel/core':
         specifier: ^8.0.9
         version: 8.0.9
+      '@effect/platform-bun':
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)
+      '@effect/platform-node':
+        specifier: 4.1.0
+        version: 4.1.0(effect@4.1.0)(redis@6.3.0(@opentelemetry/api@1.10.0))
       '@effect/vitest':
         specifier: 4.1.0
         version: 4.1.0(effect@4.1.0)(vitest@5.0.5(@opentelemetry/api@1.10.0)(@types/node@26.6.6)(vite@8.3.5(@types/node@26.6.6)(esbuild@0.28.2)))
@@ -33,6 +36,9 @@ importers:
       babel-plugin-annotate-pure-calls:
         specifier: ^0.5.0
         version: 0.5.0(@babel/core@8.0.9)
+      effect:
+        specifier: 4.1.0
+        version: 4.1.0
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -170,6 +176,11 @@ packages:
   '@babel/types@8.0.8':
     resolution: {integrity: sha512-iXSSZAKQWmaeAwGtFw10v9fg5hUiUs0L+w+Z2K11kym3pDNK+SF0VcAQPsEFvWcTSZ7LMgClMXDBvTbH0IlICg==}
     engines: {node: ^22.18.0 || >=24.11.0}
+
+  '@effect/platform-bun@4.1.0':
+    resolution: {integrity: sha512-ZgIV+tV2utcbiopbWSoJuGn3FZuyqhLWIYITFCR8vlwnKicO1q0WgP4BBjDUYUTMRPEU/N1+BcZourAgpiDI/w==}
+    peerDependencies:
+      effect: ^4.1.0
 
   '@effect/platform-node-shared@4.1.0':
     resolution: {integrity: sha512-uYQfFRoxWLo8fIhiSeBcmz/R1ooOfE3HF3cWHFgxz82tZMk2Wn02BGABcdLmaAch9VpDLbtWnuhSxNyBsGMUFg==}
@@ -1575,6 +1586,14 @@ snapshots:
     dependencies:
       '@babel/helper-string-parser': 8.0.8
       '@babel/helper-validator-identifier': 8.0.6
+
+  '@effect/platform-bun@4.1.0(effect@4.1.0)':
+    dependencies:
+      '@effect/platform-node-shared': 4.1.0(effect@4.1.0)
+      effect: 4.1.0
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
 
   '@effect/platform-node-shared@4.1.0(effect@4.1.0)':
     dependencies:

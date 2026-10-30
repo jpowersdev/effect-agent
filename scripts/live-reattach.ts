@@ -29,6 +29,7 @@
  * Runs in /tmp/effect-agent-live/reattach/ (Claude `claude-haiku-5-5`, Codex at
  * effort `low`); each provider costs two short command turns.
  */
+import { NodeServices } from "@effect/platform-node"
 import { spawn } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
@@ -118,7 +119,7 @@ const processA = (provider: Provider) =>
     console.log(JSON.stringify({ sessionId: session.sessionId, turnId, hostPid: session.hostPid, agentPid }))
     // Gone mid-turn, without even closing the scope.
     process.exit(0)
-  }).pipe(Effect.scoped, Effect.provide(RemoteAgent.layer(options(provider))))
+  }).pipe(Effect.scoped, Effect.provide(RemoteAgent.layer(options(provider))), Effect.provide(NodeServices.layer))
 
 // ---------------------------------------------------------------------------
 // Process B
@@ -227,7 +228,7 @@ const processB = (provider: Provider) =>
     rmSync(HostSpec.eventsPath(dir, a.sessionId), { force: true })
     rmSync(HostSpec.logPath(dir, a.sessionId), { force: true })
     console.log(`  ${provider} passed in ${Date.now() - t0} ms`)
-  }).pipe(Effect.provide(RemoteAgent.layer(options(provider))))
+  }).pipe(Effect.provide(RemoteAgent.layer(options(provider))), Effect.provide(NodeServices.layer))
 
 // ---------------------------------------------------------------------------
 // Remote hooks (Claude)
@@ -318,7 +319,7 @@ const hooksScenario = Effect.gen(function* () {
     rmSync(HostSpec.logPath(dir, id), { force: true })
   }
   console.log(`  hooks passed in ${Date.now() - t0} ms`)
-}).pipe(Effect.provide(RemoteAgent.layer({ ...options("claude"), onScopeClose: "stop" })))
+}).pipe(Effect.provide(RemoteAgent.layer({ ...options("claude"), onScopeClose: "stop" })), Effect.provide(NodeServices.layer))
 
 // ---------------------------------------------------------------------------
 

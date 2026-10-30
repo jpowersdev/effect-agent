@@ -1,22 +1,27 @@
 /**
  * The program a session host process runs. The library ships no executable:
- * add a one-line entry to your app and point `RemoteAgent.layer({ host })` at it.
+ * add a one-line entry to your app, give it your platform's services, and
+ * point `RemoteAgent.layer({ host })` at it.
  *
  *   // host.ts
- *   import { NodeRuntime } from "@effect/platform-node"
+ *   import { NodeRuntime, NodeServices } from "@effect/platform-node"
+ *   import { Effect } from "effect"
  *   import { SessionHost } from "effect-agent/host"
  *
- *   NodeRuntime.runMain(SessionHost.run)
+ *   NodeRuntime.runMain(SessionHost.run.pipe(Effect.provide(NodeServices.layer)))
  *
- * `run` reads a JSON `HostSpec` on stdin, writes one readiness line to stdout
- * (`Ready` or `Failed`), then sends all further output to
+ * (On Bun: `BunRuntime` and `BunServices` from `@effect/platform-bun`.)
+ *
+ * `run` reads a JSON `HostSpec` from `Stdio.stdin`, writes one readiness line
+ * to `Stdio.stdout` (`Ready` or `Failed`), then sends all further output to
  * `<dir>/<sessionId>.log` and serves one session until it ends. It owns the
  * process while it runs (stdio, signals), so run nothing else in that process.
- * Bundling and the runtime (Node, Bun) are the entry's business, like any
- * other entry point in your app.
+ * Bundling and the runtime are the entry's business, like any other entry
+ * point in your app.
  */
-import { Cause, Deferred, Effect, Exit, Logger, Schema } from "effect"
-import { closeSync, openSync, readFileSync, renameSync, writeSync } from "node:fs"
+import { Cause, Deferred, Effect, Exit, Logger, Schema, Stdio, Stream } from "effect"
+import type { ChildProcessSpawner } from "effect/process"
+import { closeSync, openSync, renameSync, writeSync } from "node:fs"
 import { join } from "node:path"
 import { AgentError } from "../AgentError.ts"
 import { run as runHost } from "./Host.ts"
@@ -32,8 +37,9 @@ const describe = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
 type Reason = "ended" | "stop" | "sigterm" | "orphan"
 
-export const run: Effect.Effect<void, HostFailed> = Effect.scoped(
+export const run: Effect.Effect<void, HostFailed, Stdio.Stdio | ChildProcessSpawner.ChildProcessSpawner> = Effect.scoped(
   Effect.gen(function* () {
+    const stdio = yield* Stdio.Stdio
     // ---- log file: host-<pid>.log until the session id is known ----
     let logFd: number | null = null
     let logFile: string | null = null
@@ -48,27 +54,31 @@ export const run: Effect.Effect<void, HostFailed> = Effect.scoped(
 
     // ---- readiness: exactly one line on stdout, then stdout/stderr go to the log ----
     let readySent = false
-    const ready = (line: ReadyLine) => {
-      if (readySent) return
-      readySent = true
-      try {
-        writeSync(1, `${encodeReady(line)}\n`)
-      } catch {
-        // The parent went away; nothing to tell.
-      }
-      // Nothing may write to stdout or stderr after this: the parent closes its ends.
-      const toLog = (chunk: unknown) => {
-        write(typeof chunk === "string" ? chunk : String(chunk))
-        return true
-      }
-      process.stdout.write = toLog as typeof process.stdout.write
-      process.stderr.write = toLog as typeof process.stderr.write
-    }
+    const ready = (line: ReadyLine) =>
+      Effect.suspend(() => {
+        if (readySent) return Effect.void
+        readySent = true
+        // The parent may be gone already; then there is nobody to tell.
+        return Stream.make(`${encodeReady(line)}\n`).pipe(Stream.run(stdio.stdout()), Effect.ignore)
+      }).pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            // The parent closes its end once it has the line, so nothing else may
+            // reach stdout or stderr: catch stray writes (e.g. from a dependency).
+            const toLog = (chunk: unknown) => {
+              write(typeof chunk === "string" ? chunk : String(chunk))
+              return true
+            }
+            process.stdout.write = toLog as typeof process.stdout.write
+            process.stderr.write = toLog as typeof process.stderr.write
+          }),
+        ),
+      )
     const failed = (message: string) =>
-      Effect.sync(() => {
-        ready({ _tag: "Failed", error: new AgentError({ message, provider: "host" }) })
-        write(message)
-      }).pipe(Effect.andThen(Effect.fail(new HostFailed({ message }))))
+      ready({ _tag: "Failed", error: new AgentError({ message, provider: "host" }) }).pipe(
+        Effect.andThen(Effect.sync(() => write(message))),
+        Effect.andThen(Effect.fail(new HostFailed({ message }))),
+      )
 
     // ---- process listeners, removed when `run` ends ----
     const listen = (target: NodeJS.EventEmitter, event: string, listener: (...args: Array<any>) => void) =>
@@ -79,10 +89,12 @@ export const run: Effect.Effect<void, HostFailed> = Effect.scoped(
     yield* listen(process.stdout, "error", () => {})
     yield* listen(process.stderr, "error", () => {})
 
-    const spec = yield* Effect.try({
-      try: () => Schema.decodeUnknownSync(Schema.fromJsonString(HostSpec))(readFileSync(0, "utf8")),
-      catch: (e) => e,
-    }).pipe(Effect.catch((e) => failed(`invalid host spec: ${describe(e)}`)))
+    const spec = yield* stdio.stdin.pipe(
+      Stream.decodeText,
+      Stream.mkString,
+      Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(HostSpec))),
+      Effect.catch((e) => failed(`invalid host spec: ${describe(e)}`)),
+    )
 
     yield* Effect.acquireRelease(
       Effect.try({
