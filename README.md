@@ -1,6 +1,12 @@
-# effect-agent
+<p align="center">
+  <img src="assets/logo.svg" width="128" height="128" alt="">
+</p>
 
-Effect-native control of coding-agent CLIs (Claude Code, Codex): live sessions with steering, resumable sessions, one normalized event stream, typed endings, and account status.
+<h1 align="center">effect-agent</h1>
+
+<p align="center">
+  Effect-native control of coding-agent CLIs (Claude Code, Codex): live sessions with steering, resumable sessions, one normalized event stream, typed endings, and account status.
+</p>
 
 > Status: early development (Effect 4.1). The API will change.
 
