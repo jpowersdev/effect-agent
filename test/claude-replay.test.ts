@@ -45,6 +45,26 @@ const failureOf = <A, E>(exit: Exit.Exit<A, E>) =>
   Exit.isFailure(exit) ? Option.getOrUndefined(Cause.findErrorOption(exit.cause)) : undefined
 
 describe("ClaudeAgent over recordings", () => {
+  it.effect("hooks run in the session's context, but not under the span of the long-finished open", () =>
+    Effect.gen(function* () {
+      const parents: Array<string> = []
+      const parentName = Effect.currentParentSpan.pipe(
+        Effect.map((span) => (span._tag === "Span" ? span.name : span._tag)),
+        Effect.orElseSucceed(() => "none"),
+      )
+      const session = yield* (yield* Agent).open({
+        cwd,
+        hooks: {
+          beforeTool: () => Effect.map(parentName, (name) => (parents.push(name), Option.none())),
+        },
+      })
+      yield* session.turn("Use the Bash tool once to run `echo hello`, then reply with the secret word.")
+      expect(parents.length).toBeGreaterThan(0)
+      expect(parents).not.toContain("ClaudeAgent.open")
+    }).pipe(Effect.scoped, Effect.provide(replay("hooks"))),
+  )
+
+
   it.effect("recorded hook calls reach the session's hooks, with the CLI's inputs, and their answers reach the SDK", () =>
     Effect.gen(function* () {
       const calls: Array<unknown> = []

@@ -25,3 +25,6 @@ Changes:
 - `CodexEvents` and `Host` are no longer exported from the barrels. They were internal and exported only for the tests.
 - `CodexAppServer`'s `record` option no longer needs a `FileSystem` service.
 - A `RemoteAgent` client loads only the provider it uses.
+- Both providers give `status` and requests to app-server 60 seconds to answer (Claude's `status` had 30).
+- `RunSettings` encodes an infinite duration as `"Infinity"`, so it survives JSON.
+- Hosts and clients should run the same version: a host's RPC errors now include `SessionClosed` and `ConnectionLost`, which a 0.1 client can't decode. Stop hosts started by 0.1 before upgrading clients, or let them end.

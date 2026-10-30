@@ -307,13 +307,12 @@ describe("ClaudeAgent.step", () => {
   const run = (frames: ReadonlyArray<ClaudeSdk.Frame>, nowMs: (i: number) => number = () => 0) => {
     let state = ClaudeAgent.initialState
     const events: Array<AgentEvent> = []
-    const dropped: Array<string> = []
     frames.forEach((frame, i) => {
       const s = ClaudeAgent.step(ctx(nowMs(i)), state, frame)
       state = s.state
       events.push(...s.events)
-      dropped.push(...s.dropped.map((d) => `${d.messageId}:${d.state}`))
     })
+    const dropped = events.flatMap((e) => (e._tag === "MessageDropped" ? [`${e.messageId}:${e.reason}`] : []))
     return { state, events, dropped }
   }
   const tagsOf = (events: ReadonlyArray<AgentEvent>) => events.filter((e) => e._tag !== "Other").map((e) => e._tag)

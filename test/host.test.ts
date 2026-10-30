@@ -313,6 +313,24 @@ for (const p of providers) {
     )
 
     it.live(
+      "after a clean end and the host's exit, calls fail SessionClosed and end still succeeds",
+      () =>
+        Effect.gen(function* () {
+          const session = yield* (yield* AgentHosts).open({ cwd: p.cwd })
+          started.add(session.hostPid)
+          yield* session.turn("Reply with just the word: pong")
+          yield* session.end
+          // The host lingers briefly, then exits: the connection drops for good.
+          yield* waitUntil(() => !isAlive(session.hostPid), "the host to exit")
+          expect(failureOf(yield* session.send("hello?").pipe(Effect.exit))).toBeInstanceOf(SessionClosed)
+          expect(failureOf(yield* session.interrupt.pipe(Effect.exit))).toBeInstanceOf(SessionClosed)
+          // It ended cleanly, so ending it again reports that.
+          expect(yield* session.end.pipe(Effect.exit)).toEqual(Exit.void)
+        }).pipe(Effect.scoped, Effect.provide(layer(p.simple, { onScopeClose: "detach", linger: "200 millis" }))),
+      timeout,
+    )
+
+    it.live(
       "SIGTERM closes the session and the host exits, removing its files",
       () =>
         Effect.gen(function* () {

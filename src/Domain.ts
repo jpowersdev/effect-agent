@@ -115,17 +115,18 @@ export const LimitWindowStatus = Schema.Struct({
  */
 export type LimitWindowStatus = typeof LimitWindowStatus.Type
 
-const isDurationInput = (u: unknown): u is Duration.Input => {
-  try {
-    return Option.isSome(Duration.fromInput(u as Duration.Input))
-  } catch {
-    return false
-  }
+const isDurationInput = (u: unknown): u is Duration.Input => Option.isSome(Duration.fromInput(u as Duration.Input))
+
+/** Millis; an infinite duration as `"Infinity"`, which JSON (having no Infinity) would otherwise turn into `null`. */
+const encodeMillis = (input: Duration.Input): string | number => {
+  const millis = Duration.toMillis(Duration.fromInputUnsafe(input))
+  return Number.isFinite(millis) ? millis : "Infinity"
 }
 
 /**
  * A `Duration.Input` (`"30 seconds"`, millis, a `Duration`, ...), encoded as
- * millis so it can cross a process boundary. Decodes millis or `Duration` text.
+ * millis so it can cross a process boundary (an infinite one as
+ * `"Infinity"`). Decodes millis or `Duration` text.
  *
  * @since 0.2.0
  * @category models
@@ -134,7 +135,7 @@ export const DurationInput = Schema.Union([Schema.String, Schema.Number]).pipe(
   Schema.check(Schema.makeFilter(isDurationInput)),
   Schema.decodeTo(Schema.declare(isDurationInput), {
     decode: SchemaGetter.transform((spec) => Duration.fromInputUnsafe(spec as Duration.Input)),
-    encode: SchemaGetter.transform((input) => Duration.toMillis(Duration.fromInputUnsafe(input))),
+    encode: SchemaGetter.transform(encodeMillis),
   }),
 )
 

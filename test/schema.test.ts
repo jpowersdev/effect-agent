@@ -36,8 +36,15 @@ describe("schemas", () => {
       watchdog: { idle: 30_000, grace: 2_000 },
     })
     const back = Schema.decodeUnknownSync(Schema.fromJsonString(RunSettings))(json)
-    expect(back.env).toEqual({ KEEP: "1", DROP: undefined })
+    // Strict: `DROP` must still be there (as undefined), or the host variable wouldn't be removed.
+    expect(back.env).toStrictEqual({ KEEP: "1", DROP: undefined })
     expect(Duration.toMillis(Duration.fromInputUnsafe(back.watchdog!.idle))).toBe(30_000)
+    // Infinite durations survive JSON too (JSON has no Infinity: they encode as text).
+    for (const idle of [Duration.infinity, "Infinity"] as const) {
+      const text = Schema.encodeSync(Schema.fromJsonString(RunSettings))({ cwd: "/w", watchdog: { idle } })
+      const decoded = Schema.decodeUnknownSync(Schema.fromJsonString(RunSettings))(text)
+      expect(Duration.isFinite(Duration.fromInputUnsafe(decoded.watchdog!.idle))).toBe(false)
+    }
     // Text durations decode too; nonsense doesn't.
     expect(Schema.decodeUnknownSync(RunSettings)({ cwd: "/w", watchdog: { idle: "5 minutes" } }).watchdog).toBeDefined()
     expect(() => Schema.decodeUnknownSync(RunSettings)({ cwd: "/w", watchdog: { idle: "soonish" } })).toThrow()

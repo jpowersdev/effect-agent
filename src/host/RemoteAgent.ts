@@ -528,11 +528,20 @@ export const layer = (
             | { readonly _tag: "Failed"; readonly error: Unreachable }
 
           let detached = false
-          /** A subscription ran to its end, `Info` said so, or `end`/`stop` returned: a drop after that is the host exiting. */
-          let sessionEnded = false
-          const markEnded = Effect.sync(() => {
-            sessionEnded = true
-          })
+          /**
+           * How the session ended, as far as this client has seen (a subscription
+           * ran to its end or failed with the session's error, `Info` said so, or
+           * `end`/`stop` returned). A drop after that is the host exiting, not a
+           * lost connection. `error` null: cleanly, or not known to have failed.
+           */
+          let ended: { readonly error: AgentError | null } | null = null
+          const noteEnded = (error: AgentError | null) => {
+            if (ended === null || (ended.error === null && error !== null)) ended = { error }
+          }
+          const markEnded = (error: AgentError | null = null) => Effect.sync(() => noteEnded(error))
+          /** Calls on a session that has ended. */
+          const endedError = (end: { readonly error: AgentError | null }) =>
+            new SessionClosed({ message: end.error !== null ? `session is gone: ${end.error.message}` : "session has ended", provider })
           /** Connections given up on, closed once the next one is up (or when the session's scope closes). */
           const retired = new Set<Conn>()
           /** Completed by `detach`: calls and streams still running fail with `SessionClosed` rather than being interrupted. */
@@ -563,7 +572,7 @@ export const layer = (
 
           const first = yield* dialTracked
           let state: State = { _tag: "Connected", conn: first }
-          if (first.info.ended) sessionEnded = true
+          if (first.info.ended) noteEnded(null)
 
           const closeRetired = Effect.suspend(() => {
             const conns = [...retired]
@@ -589,7 +598,7 @@ export const layer = (
                   return yield* Deferred.fail(next, detachedError())
                 }
                 state = { _tag: "Connected", conn }
-                if (conn.info.ended) sessionEnded = true
+                if (conn.info.ended) noteEnded(null)
                 yield* closeRetired
                 return yield* Deferred.succeed(next, conn)
               }
@@ -613,7 +622,11 @@ export const layer = (
             Effect.suspend(() => {
               if (detached || state._tag !== "Connected" || state.conn !== conn) return Effect.void
               retired.add(conn)
-              if (options.reconnect === false || sessionEnded) {
+              if (ended !== null) {
+                state = { _tag: "Failed", error: endedError(ended) }
+                return Effect.void
+              }
+              if (options.reconnect === false) {
                 state = { _tag: "Failed", error: lostError(`host connection: ${why}`) }
                 return Effect.void
               }
@@ -665,7 +678,7 @@ export const layer = (
               }
             }).pipe(Effect.raceFirst(whenDetached))
 
-          const info = call((c) => c.Info()).pipe(Effect.tap((i) => (i.ended ? markEnded : Effect.void)))
+          const info = call((c) => c.Info()).pipe(Effect.tap((i) => (i.ended ? markEnded() : Effect.void)))
 
           const detach = Effect.suspend(() => {
             if (detached) return Effect.void
@@ -681,7 +694,7 @@ export const layer = (
 
           const stop = Effect.gen(function* () {
             const stopped = yield* call((c) => c.Stop()).pipe(
-              Effect.tap(markEnded),
+              Effect.tap(markEnded()),
               Effect.timeoutOption(Duration.seconds(30)),
               Effect.exit,
             )
@@ -730,11 +743,13 @@ export const layer = (
                     }),
                   ),
                   // The host ends the stream when the session ends (not when a consumer stops early).
-                  Stream.concat(Stream.unwrap(Effect.as(markEnded, Stream.empty))),
+                  Stream.concat(Stream.unwrap(Effect.as(markEnded(), Stream.empty))),
                 ),
               ).pipe(
                 // The session's own ending error.
-                Stream.tapError((e) => (e._tag === "AgentError" || e._tag === "SessionClosed" ? markEnded : Effect.void)),
+                Stream.tapError((e) =>
+                  e._tag === "AgentError" ? markEnded(e) : e._tag === "SessionClosed" ? markEnded() : Effect.void,
+                ),
               )
             })
 
@@ -768,7 +783,17 @@ export const layer = (
             turn: (input) => once((requestId) => call((c) => c.Turn({ input, requestId }))),
             steer: (input) => once((requestId) => call((c) => c.Steer({ input, requestId }))),
             interrupt: once((requestId) => call((c) => c.Interrupt({ requestId }))),
-            end: call((c) => c.End()).pipe(Effect.tap(markEnded)),
+            // Once the host is gone, ending reports how the session ended, as it would have.
+            end: Effect.suspend(() =>
+              state._tag === "Failed" && ended !== null
+                ? ended.error !== null
+                  ? Effect.fail(ended.error)
+                  : Effect.void
+                : call((c) => c.End()).pipe(
+                    Effect.tap(markEnded()),
+                    Effect.tapError((e) => (e._tag === "AgentError" ? markEnded(e) : Effect.void)),
+                  ),
+            ),
             subscribeFrom: (fromSeq) => subscribeFrom(fromSeq),
             lastSeq: Effect.map(info, (i) => i.lastSeq),
             info,

@@ -40,7 +40,7 @@ import type {
   SettingSource,
   SyncHookJSONOutput,
 } from "@anthropic-ai/claude-agent-sdk"
-import { Cause, Clock, DateTime, type Duration, Effect, Fiber, Layer, Option, Stream } from "effect"
+import { Cause, Clock, Context, DateTime, type Duration, Effect, Fiber, Layer, Option, Stream, Tracer } from "effect"
 import { randomUUID } from "node:crypto"
 import { tmpdir } from "node:os"
 import {
@@ -760,15 +760,14 @@ export interface StepContext {
 }
 
 /**
- * The result of `step`: the new state, events to emit, and messages dropped.
+ * The result of `step`: the new state, and events to emit (messages the CLI
+ * cancelled, discarded or refused are `MessageDropped` events).
  *
  * @internal
  */
 export interface Step {
   readonly state: State
   readonly events: ReadonlyArray<AgentEvent>
-  /** Messages the CLI cancelled, discarded or refused: they will never land. */
-  readonly dropped: ReadonlyArray<{ readonly messageId: string; readonly state: ClaudeSdk.LifecycleState }>
 }
 
 const heartbeatIntervalMs = 1000
@@ -802,7 +801,6 @@ const endTurn = (ctx: StepContext, state: State, turn: TurnState, result: SDKRes
       raw,
     },
   ],
-  dropped: [],
 })
 
 /**
@@ -840,27 +838,25 @@ const stepFrame = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step
       case "started": {
         if (state.turn === null) {
           const turn = newTurn(id)
-          return { state: withLanded({ ...state, turn }, id), events: startEvents(id, turn.turnId, raw), dropped: [] }
+          return { state: withLanded({ ...state, turn }, id), events: startEvents(id, turn.turnId, raw) }
         }
-        if (state.turn.messages.includes(id)) return { state, events: [{ _tag: "Other", raw }], dropped: [] }
+        if (state.turn.messages.includes(id)) return { state, events: [{ _tag: "Other", raw }] }
         const turn = { ...state.turn, messages: [...state.turn.messages, id] }
         return {
           state: withLanded({ ...state, turn }, id),
           events: [{ _tag: "MessageLanded", messageId: MessageId.make(id), turnId: turn.turnId, raw }],
-          dropped: [],
         }
       }
       case "cancelled":
       case "discarded":
       case "refused":
-        if (state.landed.has(id)) return { state, events: [{ _tag: "Other", raw }], dropped: [] }
+        if (state.landed.has(id)) return { state, events: [{ _tag: "Other", raw }] }
         return {
           state,
           events: [{ _tag: "MessageDropped", messageId: MessageId.make(id), reason: lifecycle.state, raw }],
-          dropped: [{ messageId: id, state: lifecycle.state }],
         }
       default:
-        return { state, events: [{ _tag: "Other", raw }], dropped: [] }
+        return { state, events: [{ _tag: "Other", raw }] }
     }
   }
 
@@ -879,7 +875,7 @@ const stepFrame = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step
   switch (frame.type) {
     case "system": {
       if (frame.subtype === "init") {
-        if (state.started) return { state, events: [{ _tag: "Other", raw }], dropped: [] }
+        if (state.started) return { state, events: [{ _tag: "Other", raw }] }
         return {
           state: { ...state, started: true },
           events: [
@@ -893,7 +889,6 @@ const stepFrame = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step
               raw,
             },
           ],
-          dropped: [],
         }
       }
       break
@@ -908,12 +903,12 @@ const stepFrame = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step
           ...state,
           turn: { ...turn, assistantError: error, rateLimit: params?.rate_limit_info ?? turn.rateLimit },
         }
-        return { state: next, events: frameEvents(frame, turn.turnId), dropped: [] }
+        return { state: next, events: frameEvents(frame, turn.turnId) }
       }
       break
     }
     case "rate_limit_event":
-      return { state: { ...state, rateLimit: frame.rate_limit_info }, events: frameEvents(frame, state.turn?.turnId ?? null), dropped: [] }
+      return { state: { ...state, rateLimit: frame.rate_limit_info }, events: frameEvents(frame, state.turn?.turnId ?? null) }
     case "result":
       if (state.turn !== null) return endTurn(ctx, state, state.turn, frame, null, raw)
       break
@@ -922,11 +917,11 @@ const stepFrame = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step
   const turnId = state.turn?.turnId ?? null
   if (isHeartbeat(frame)) {
     if (state.lastHeartbeatMs !== null && ctx.nowMs - state.lastHeartbeatMs < heartbeatIntervalMs) {
-      return { state, events: [], dropped: [] }
+      return { state, events: [] }
     }
-    return { state: { ...state, lastHeartbeatMs: ctx.nowMs }, events: [{ _tag: "Heartbeat", turnId, raw }], dropped: [] }
+    return { state: { ...state, lastHeartbeatMs: ctx.nowMs }, events: [{ _tag: "Heartbeat", turnId, raw }] }
   }
-  return { state, events: frameEvents(frame, turnId), dropped: [] }
+  return { state, events: frameEvents(frame, turnId) }
 }
 
 /**
@@ -936,7 +931,7 @@ const stepFrame = (ctx: StepContext, state: State, frame: ClaudeSdk.Frame): Step
  */
 export const stepExit = (ctx: StepContext, state: State, error: ProcessFailure | null): Step => {
   const held = { ...state, held: [] }
-  if (state.turn === null) return { state: held, events: state.held, dropped: [] }
+  if (state.turn === null) return { state: held, events: state.held }
   const ended = endTurn(ctx, held, state.turn, null, error ?? { message: "Claude Code exited mid-turn", signal: null, exitCode: null }, error)
   return { ...ended, events: [...state.held, ...ended.events] }
 }
@@ -1006,8 +1001,9 @@ const openSession = Effect.fn("ClaudeAgent.open")(function* (
   }
 
   const wrap = yield* Launcher.prepare({ provider, cwd: run.cwd })
-  // Hooks run on the SDK's promises, but in this session's context.
-  const runHookEffect: RunHook = Effect.runPromiseWith(yield* Effect.context<never>())
+  // Hooks run on the SDK's promises, but in this session's context (logger, tracer, services);
+  // not as children of this `open` span, which is long over by the time a hook runs.
+  const runHookEffect: RunHook = Effect.runPromiseWith(Context.omit(Tracer.ParentSpan)(yield* Effect.context<never>()))
   const query = yield* sdk
     .open(buildOptions(run, config, sessionId, Env.host(), runHookEffect), { wrap })
     .pipe(Effect.mapError((e) => sessionNotFound(e.message, sessionId) ?? fromSdkError(e)))
@@ -1050,6 +1046,9 @@ const openSession = Effect.fn("ClaudeAgent.open")(function* (
             ? agentError(`bug while reading Claude Code frames: ${String(ending.cause)}`, ending.cause)
             : null
       closed = { error }
+      // A bug on our side (the frames are no longer read): stop the CLI rather than leave it
+      // running, unread, until the scope closes.
+      if (ending._tag === "Defect") yield* query.close
       if (ending._tag !== "Closed") {
         const failure: ProcessFailure | null =
           ending._tag === "Died"
@@ -1121,7 +1120,7 @@ const openSession = Effect.fn("ClaudeAgent.open")(function* (
       }
       yield* query.send(message).pipe(
         Effect.mapError(fromSdkError),
-        Effect.tapError(() => Effect.sync(() => turns.forget(id))),
+        Effect.tapError(() => Effect.sync(() => turns.withdraw(id))),
       )
       return id
     })

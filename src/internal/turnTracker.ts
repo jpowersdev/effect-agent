@@ -21,8 +21,8 @@ import type { TurnId } from "../Domain.ts"
 export interface TurnTracker {
   /** A message was sent: `landing` waits for it. */
   readonly expect: (messageId: string) => void
-  /** A message that was never sent after all (sending it failed). */
-  readonly forget: (messageId: string) => void
+  /** A message that was never sent after all (sending it failed). Unlike a forgotten one, it was never settled. */
+  readonly withdraw: (messageId: string) => void
   readonly observe: (event: AgentEvent) => void
   /** The turn a sent message landed in; fails if it was dropped or the session ended first. */
   readonly landing: (messageId: string) => Effect.Effect<TurnId, AgentError | SessionClosed>
@@ -172,7 +172,7 @@ export const make = (options: {
     expect: (messageId) => {
       unlanded.add(messageId)
     },
-    forget: (messageId) => {
+    withdraw: (messageId) => {
       unlanded.delete(messageId)
     },
     observe,
