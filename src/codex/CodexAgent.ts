@@ -20,7 +20,7 @@
  *
  * @since 0.1.0
  */
-import { Cause, Clock, Deferred, Duration, Effect, Exit, Layer, Option, PubSub, Scope, Semaphore, Stream } from "effect"
+import { Cause, Clock, Deferred, Duration, Effect, Exit, Layer, Option, Stream } from "effect"
 import {
   type AccountStatus,
   Agent,
@@ -31,10 +31,11 @@ import {
   type SteerOutcome,
 } from "../Agent.ts"
 import { AgentError, ProcessKilled, SessionNotFound, SpendCapReached, type TurnFailure } from "../AgentError.ts"
-import type { AgentEvent, TurnOutcome, TurnSucceeded } from "../AgentEvent.ts"
+import type { AgentEvent, TurnSucceeded } from "../AgentEvent.ts"
 import { MessageId, SessionId, type TokenUsage, TurnId } from "../Domain.ts"
+import * as Env from "../internal/env.ts"
+import * as Session from "../internal/session.ts"
 import * as Pricing from "../Pricing.ts"
-import * as Watchdog from "../Watchdog.ts"
 import { CodexAppServer, CodexRpcError, type Connection, type ProcessExit, parseUserAgentVersion } from "./CodexAppServer.ts"
 import * as Events from "./CodexEvents.ts"
 import * as P from "./protocol.ts"
@@ -138,23 +139,12 @@ export const threadOverrides = (
   }
 }
 
-const nestingMarkers = new Set([
-  "CLAUDECODE",
-  "CLAUDE_PID",
-  "CLAUDE_EFFORT",
-  "CLAUDE_AGENT_SDK_VERSION",
-  "CODEX_THREAD_ID",
-  "CODEX_SESSION_ID",
-])
-
 /**
- * Host variables that describe a parent agent session (Claude Code sets
- * `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_PID`, ...; Codex sets
- * `CODEX_THREAD_ID`/`CODEX_SESSION_ID` in its commands).
+ * Host variables that describe a parent agent session.
  *
  * @internal
  */
-export const isNestingMarker = (name: string): boolean => nestingMarkers.has(name) || name.startsWith("CLAUDE_CODE_")
+export const isNestingMarker: (name: string) => boolean = Env.isNestingMarker
 
 /**
  * The env overrides for app-server (applied over the host env by the
@@ -162,17 +152,10 @@ export const isNestingMarker = (name: string): boolean => nestingMarkers.has(nam
  *
  * @internal
  */
-export const sessionEnv = (
+export const sessionEnv: (
   host: Readonly<Record<string, string | undefined>>,
-  overrides: Readonly<Record<string, string | undefined>> = {},
-): Record<string, string | undefined> => {
-  const env: Record<string, string | undefined> = {}
-  for (const name of Object.keys(host)) if (isNestingMarker(name)) env[name] = undefined
-  return { ...env, ...overrides }
-}
-
-const hostEnv = (): Readonly<Record<string, string | undefined>> =>
-  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {}
+  overrides?: Readonly<Record<string, string | undefined>>,
+) => Record<string, string | undefined> = Env.overrides
 
 /**
  * app-server's answers for a thread it has no record of.
@@ -206,52 +189,400 @@ export const isStaleSteerError = (e: CodexRpcError): boolean =>
 
 const textInput = (text: string): ReadonlyArray<P.UserInput> => [{ type: "text", text, text_elements: [] }]
 
-const agentError = (message: string, cause?: unknown) =>
-  new AgentError({ message, provider, ...(cause !== undefined ? { cause } : {}) })
+const agentError = Session.agentError(provider)
+const timed = Session.timed(provider)
 
 const toAgentError = (what: string) => (e: CodexRpcError | AgentError) =>
   e._tag === "AgentError" ? e : agentError(`${what}: ${e.message}`, e)
 
 // ---------------------------------------------------------------------------
+// Turn tracking (pure)
+// ---------------------------------------------------------------------------
+
+/**
+ * The turn this session is running (or starting: `turnId` is null until
+ * `turn/start` answers or `turn/started` arrives).
+ *
+ * @internal
+ */
+export interface Run {
+  /** Tells runs apart while `turn/start` is in flight. */
+  readonly seq: number
+  readonly turnId: TurnId | null
+  /** Messages sent into this turn whose `userMessage` item hasn't arrived yet. */
+  readonly unlanded: ReadonlyArray<MessageId>
+  readonly announced: boolean
+  readonly interruptRequested: boolean
+  readonly spendCap: { readonly capUsd: number; readonly spentUsd: number } | null
+  /** The watchdog stopped this turn. */
+  readonly stalled: { readonly idleMs: number; readonly inTool: boolean } | null
+  readonly agentMessages: ReadonlyArray<{ readonly text: string; readonly phase: string | null }>
+  /** commandExecution items started in this turn. */
+  readonly commandItems: ReadonlySet<string>
+  readonly usageAtStart: TokenUsage
+  readonly sawUsage: boolean
+}
+
+/**
+ * Session state folded by `step`.
+ *
+ * @internal
+ */
+export interface State {
+  readonly run: Run | null
+  readonly nextSeq: number
+  /** Thread total before this session's first model call (resumed threads carry history). */
+  readonly usageBase: TokenUsage | null
+  readonly sessionUsage: TokenUsage
+  /** Estimated spend when the cap was reached. */
+  readonly capReached: number | null
+}
+
+/**
+ * `State` before any frame.
+ *
+ * @internal
+ */
+export const initialState: State = { run: null, nextSeq: 1, usageBase: null, sessionUsage: Events.zeroUsage, capReached: null }
+
+/**
+ * Per-frame input to `step`.
+ *
+ * @internal
+ */
+export interface StepContext {
+  readonly threadId: string
+  readonly nowMs: number
+  /** `mapNotification`'s own bookkeeping (announced tool calls, heartbeat throttle, rate limits). */
+  readonly mapState: Events.MapState
+  /** `RunOptions.spendCapUsd`, when there is a price to estimate spend with. */
+  readonly cap: { readonly capUsd: number; readonly price: Pricing.ModelPrice } | null
+}
+
+/**
+ * What the session must do for a frame besides emitting events.
+ *
+ * @internal
+ */
+export type Command =
+  /** The spend cap was reached mid-turn: stop it. */
+  | { readonly _tag: "Interrupt"; readonly turnId: TurnId }
+  /** Our turn completed: gather what `completeTurn` needs, then end it. */
+  | { readonly _tag: "Complete"; readonly turn: P.Turn; readonly raw: P.Incoming }
+
+/**
+ * The result of `step`.
+ *
+ * @internal
+ */
+export interface Step {
+  readonly state: State
+  readonly events: ReadonlyArray<AgentEvent>
+  readonly commands: ReadonlyArray<Command>
+}
+
+const newRun = (state: State, messages: ReadonlyArray<MessageId>): Run => ({
+  seq: state.nextSeq,
+  turnId: null,
+  unlanded: messages,
+  announced: false,
+  interruptRequested: false,
+  spendCap: null,
+  stalled: null,
+  agentMessages: [],
+  commandItems: new Set(),
+  usageAtStart: state.sessionUsage,
+  sawUsage: false,
+})
+
+/**
+ * A run for `messageId`, about to be sent with `turn/start`.
+ *
+ * @internal
+ */
+export const startRun = (state: State, messageId: MessageId): State => ({
+  ...state,
+  run: newRun(state, [messageId]),
+  nextSeq: state.nextSeq + 1,
+})
+
+const updateRun = (state: State, seq: number, f: (run: Run) => Run): State =>
+  state.run === null || state.run.seq !== seq ? state : { ...state, run: f(state.run) }
+
+/**
+ * `turn/start` answered: the run's turn id, unless `turn/started` already gave it.
+ *
+ * @internal
+ */
+export const runStarted = (state: State, seq: number, turnId: string): State =>
+  updateRun(state, seq, (run) => ({ ...run, turnId: run.turnId ?? TurnId.make(turnId) }))
+
+/**
+ * `turn/start` failed: no turn is running.
+ *
+ * @internal
+ */
+export const runFailed = (state: State, seq: number): State =>
+  state.run?.seq === seq ? { ...state, run: null } : state
+
+/**
+ * Whether `steer` can go into the running turn.
+ *
+ * @internal
+ */
+export const steerable = (run: Run | null): run is Run & { readonly turnId: TurnId } =>
+  run !== null && run.turnId !== null && !run.interruptRequested && run.spendCap === null && run.stalled === null
+
+/**
+ * A message steered into the run: it lands when its `userMessage` item arrives.
+ *
+ * @internal
+ */
+export const addSteer = (state: State, seq: number, messageId: MessageId): State =>
+  updateRun(state, seq, (run) => ({ ...run, unlanded: [...run.unlanded, messageId] }))
+
+/**
+ * A steer that didn't go through.
+ *
+ * @internal
+ */
+export const removeSteer = (state: State, seq: number, messageId: MessageId): State =>
+  updateRun(state, seq, (run) => ({ ...run, unlanded: run.unlanded.filter((id) => id !== messageId) }))
+
+/**
+ * The caller interrupted the run.
+ *
+ * @internal
+ */
+export const markInterrupt = (state: State, seq: number): State =>
+  updateRun(state, seq, (run) => ({ ...run, interruptRequested: true }))
+
+/**
+ * The watchdog is stopping turn `turnId`; unchanged (and `false`) if that turn isn't running or is already stopping.
+ *
+ * @internal
+ */
+export const markStalled = (
+  state: State,
+  turnId: TurnId,
+  stall: { readonly idleMs: number; readonly inTool: boolean },
+): { readonly state: State; readonly marked: boolean } => {
+  const run = state.run
+  if (run === null || run.turnId !== turnId || run.stalled !== null) return { state, marked: false }
+  return { state: { ...state, run: { ...run, stalled: stall } }, marked: true }
+}
+
+const other = (state: State, raw: P.Incoming): Step => ({ state, events: [{ _tag: "Other", raw }], commands: [] })
+
+const tokenUsage = (ctx: StepContext, state: State, n: P.TokenUsageNotification): { readonly state: State; readonly commands: ReadonlyArray<Command> } => {
+  const total = Events.toTokenUsage(n.tokenUsage.total)
+  const usageBase = state.usageBase ?? Events.subtractUsage(total, Events.toTokenUsage(n.tokenUsage.last))
+  const sessionUsage = Events.subtractUsage(total, usageBase)
+  const run = state.run !== null ? { ...state.run, sawUsage: true } : null
+  const next: State = { ...state, usageBase, sessionUsage, run }
+  if (ctx.cap === null) return { state: next, commands: [] }
+  const spent = Pricing.costOf(ctx.cap.price, sessionUsage)
+  if (spent < ctx.cap.capUsd) return { state: next, commands: [] }
+  const capped: State = { ...next, capReached: next.capReached ?? spent }
+  if (run === null || run.turnId === null || run.spendCap !== null || run.stalled !== null || run.interruptRequested) {
+    return { state: capped, commands: [] }
+  }
+  return {
+    state: { ...capped, run: { ...run, spendCap: { capUsd: ctx.cap.capUsd, spentUsd: spent } } },
+    commands: [{ _tag: "Interrupt", turnId: run.turnId }],
+  }
+}
+
+/**
+ * Fold one frame from app-server into the session state. A completed turn
+ * isn't ended here: `Complete` asks the session to gather what
+ * `completeTurn` needs first.
+ *
+ * @internal
+ */
+export const step = (ctx: StepContext, state: State, msg: P.Incoming): Step => {
+  const params = (typeof msg.params === "object" && msg.params !== null ? msg.params : {}) as {
+    readonly threadId?: unknown
+  }
+  // Subagent threads share the connection; their turns aren't ours.
+  if (typeof params.threadId === "string" && params.threadId !== ctx.threadId) return other(state, msg)
+  let commands: ReadonlyArray<Command> = []
+  if (!("id" in msg && msg.id !== undefined)) {
+    switch (msg.method as P.NotificationMethod) {
+      case "turn/started": {
+        const turnId = TurnId.make((msg.params as P.TurnNotification).turn.id)
+        // A turn we didn't start (e.g. app-server continuing one) still gets tracked.
+        const run = state.run ?? newRun(state, [])
+        const nextSeq = state.run === null ? state.nextSeq + 1 : state.nextSeq
+        const current = { ...run, turnId: run.turnId ?? turnId }
+        if (current.turnId !== turnId || current.announced) return other({ ...state, run: current, nextSeq }, msg)
+        return {
+          state: { ...state, nextSeq, run: { ...current, announced: true } },
+          events: [{ _tag: "TurnStarted", turnId, raw: msg }],
+          commands: [],
+        }
+      }
+      case "turn/completed": {
+        const turn = (msg.params as P.TurnNotification).turn
+        const run = state.run
+        if (run === null || (run.turnId !== null && run.turnId !== turn.id)) return other(state, msg)
+        const turnId = run.turnId ?? TurnId.make(turn.id)
+        return {
+          state: { ...state, run: { ...run, turnId, announced: true } },
+          events: run.announced ? [] : [{ _tag: "TurnStarted", turnId, raw: msg }],
+          commands: [{ _tag: "Complete", turn, raw: msg }],
+        }
+      }
+      case "thread/tokenUsage/updated": {
+        const next = tokenUsage(ctx, state, msg.params as P.TokenUsageNotification)
+        state = next.state
+        commands = next.commands
+        break
+      }
+      case "item/started": {
+        const item = (msg.params as P.ItemNotification).item
+        const run = state.run
+        if (P.isItem(item, "userMessage")) {
+          const messageId =
+            run === null
+              ? undefined
+              : item.clientId !== null && run.unlanded.includes(item.clientId as MessageId)
+                ? (item.clientId as MessageId)
+                : run.unlanded[0]
+          if (run === null || messageId === undefined || run.turnId === null) return other(state, msg)
+          return {
+            state: { ...state, run: { ...run, unlanded: run.unlanded.filter((id) => id !== messageId) } },
+            events: [{ _tag: "MessageLanded", messageId, turnId: run.turnId, raw: msg }],
+            commands: [],
+          }
+        }
+        if (item.type === "commandExecution" && run !== null) {
+          state = { ...state, run: { ...run, commandItems: new Set(run.commandItems).add(item.id) } }
+        }
+        break
+      }
+      case "item/completed": {
+        const item = (msg.params as P.ItemNotification).item
+        if (P.isItem(item, "agentMessage") && state.run !== null) {
+          const run = state.run
+          state = { ...state, run: { ...run, agentMessages: [...run.agentMessages, { text: item.text ?? "", phase: item.phase ?? null }] } }
+        }
+        break
+      }
+    }
+  }
+  return { state, events: Events.mapNotification(msg, ctx.mapState, ctx.nowMs), commands }
+}
+
+/**
+ * What `completeTurn` needs from outside the frame: where the session must look before ending the turn.
+ *
+ * @internal
+ */
+export const completionNeeds = (run: Run, turn: P.Turn) => ({
+  /** Interrupted with commands started: app-server leaves them running. */
+  killCommands: turn.status === "interrupted" && run.commandItems.size > 0,
+  /** A usage-limit failure: the reset time is in the rate limits. */
+  rateLimits: turn.status === "failed" && Events.errorKind(turn.error?.codexErrorInfo) === "usageLimitExceeded",
+  /** An interrupt nobody asked for usually means app-server is shutting down. */
+  processExit: turn.status === "interrupted" && !run.interruptRequested && run.spendCap === null && run.stalled === null,
+})
+
+const turnUsageOf = (state: State, run: Run) => (run.sawUsage ? Events.subtractUsage(state.sessionUsage, run.usageAtStart) : null)
+
+const costOf = (price: Pricing.ModelPrice | undefined, state: State) =>
+  price !== undefined ? { usd: Pricing.costOf(price, state.sessionUsage), source: "estimated" as const } : null
+
+/**
+ * End the running turn from its `turn/completed`.
+ *
+ * @internal
+ */
+export const completeTurn = (
+  ctx: Pick<StepContext, "cap">,
+  state: State,
+  input: {
+    readonly turn: P.Turn
+    readonly raw: P.Incoming
+    readonly price: Pricing.ModelPrice | undefined
+    readonly rateLimits: P.GetAccountRateLimitsResponse | null
+    readonly processExit: ProcessExit | null
+  },
+): { readonly state: State; readonly events: ReadonlyArray<AgentEvent> } => {
+  const run = state.run
+  if (run === null || run.turnId === null) return { state, events: [] }
+  const { turn } = input
+  const messages =
+    run.agentMessages.length > 0
+      ? run.agentMessages
+      : turn.items.flatMap((i) => (P.isItem(i, "agentMessage") ? [{ text: i.text ?? "", phase: i.phase ?? null }] : []))
+  const outcome = Events.classifyOutcome(turn, {
+    interruptRequested: run.interruptRequested,
+    spendCap: run.spendCap,
+    capUsd: ctx.cap?.capUsd ?? null,
+    processExit: input.processExit,
+    finalText: Events.finalTextOf(messages),
+    rateLimits: input.rateLimits,
+    stalled: run.stalled,
+  })
+  return {
+    state: { ...state, run: null },
+    events: [
+      {
+        _tag: "TurnEnded",
+        turnId: run.turnId,
+        outcome,
+        usage: turnUsageOf(state, run),
+        cost: costOf(input.price, state),
+        raw: input.raw,
+      },
+    ],
+  }
+}
+
+/**
+ * app-server died: the running turn ends `dead` (or `Stalled`, if the watchdog killed it).
+ *
+ * @internal
+ */
+export const stepExit = (
+  state: State,
+  dead: ProcessKilled,
+  exit: ProcessExit,
+  price: Pricing.ModelPrice | undefined,
+): { readonly state: State; readonly events: ReadonlyArray<AgentEvent> } => {
+  const run = state.run
+  if (run === null || run.turnId === null) return { state: { ...state, run: null }, events: [] }
+  const outcome = run.stalled !== null ? Events.stalledFailure(run.stalled) : dead
+  return {
+    state: { ...state, run: null },
+    events: [
+      { _tag: "TurnEnded", turnId: run.turnId, outcome, usage: turnUsageOf(state, run), cost: costOf(price, state), raw: { exit } },
+    ],
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
 
+/** A message waiting for its turn: `started` is the turn it started or landed in, or why it never did. */
 interface Queued {
   readonly messageId: MessageId
   readonly input: string
-  /** The turn the message started or landed in. */
-  readonly started: Deferred.Deferred<TurnId, AgentError>
-  readonly outcome: Deferred.Deferred<TurnOutcome, AgentError>
+  readonly started: Deferred.Deferred<TurnId, AgentError | TurnFailure>
 }
 
-interface RunningTurn {
-  turnId: TurnId | null
-  readonly messages: Array<Queued>
-  /** Messages whose `userMessage` item hasn't arrived yet. */
-  readonly unlanded: Array<MessageId>
-  announced: boolean
-  interruptRequested: boolean
-  spendCap: { readonly capUsd: number; readonly spentUsd: number } | null
-  /** The watchdog stopped this turn. */
-  stalled: { readonly idleMs: number; readonly inTool: boolean } | null
-  readonly agentMessages: Array<{ readonly text: string; readonly phase: string | null }>
-  /** commandExecution items started in this turn. */
-  readonly commandItems: Set<string>
-  readonly usageAtStart: TokenUsage
-  sawUsage: boolean
-  readonly ended: Deferred.Deferred<void>
+/** A message that never reached a turn, as `send` and `steer` report it. */
+const asAgentError = (e: AgentError | TurnFailure): AgentError => (e._tag === "AgentError" ? e : agentError(e.message, e))
+
+/** A failed request's cause as an `AgentError`. */
+const causeError = (what: string, cause: Cause.Cause<CodexRpcError | AgentError>): AgentError => {
+  const error = Cause.findErrorOption(cause)
+  return Option.isSome(error) ? toAgentError(what)(error.value) : agentError(`${what}: ${Cause.pretty(cause)}`, Cause.squash(cause))
 }
 
-type Published =
-  | { readonly _tag: "event"; readonly event: AgentEvent }
-  | { readonly _tag: "end" }
-  | { readonly _tag: "fail"; readonly error: AgentError }
-
-let messageCounter = 0
-const messagePrefix = Math.random().toString(36).slice(2, 10)
-const nextMessageId = () => MessageId.make(`ea-${messagePrefix}-${++messageCounter}`)
-
-const openSession = Effect.fnUntraced(function* (
+const openSession = Effect.fn("CodexAgent.open")(function* (
   server: CodexAppServer["Service"],
   agentOptions: CodexAgentOptions,
   options: RunOptions,
@@ -261,46 +592,50 @@ const openSession = Effect.fnUntraced(function* (
   const hooksRefused = hooksError(options)
   if (hooksRefused !== null) return yield* agentError(hooksRefused)
   const pricing = agentOptions.pricing
-  const cap = options.spendCapUsd
-  if (cap !== undefined) {
+  const capUsd = options.spendCapUsd
+  if (capUsd !== undefined) {
     if (pricing === undefined) return yield* agentError("spendCapUsd needs CodexAgent.layer({ pricing }) on Codex")
     if (options.model !== undefined && Pricing.priceFor(pricing, options.model) === undefined) {
       return yield* agentError(`spendCapUsd: no price for model ${options.model}`)
     }
   }
 
-  const conn: Connection = yield* server.connect({ cwd: options.cwd, env: sessionEnv(hostEnv(), options.env) })
+  const conn: Connection = yield* server.connect({ cwd: options.cwd, env: Env.overrides(Env.host(), options.env) })
   const version = parseUserAgentVersion(conn.initialize.userAgent)
   // A failed open must not leave app-server running until the caller's scope closes.
   const closeOnError = <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.tapError(self, () => conn.close)
 
   const resumed = options.resume !== undefined
   const started: P.ThreadStartResponse = resumed
-    ? yield* conn
-        .request("thread/resume", { threadId: options.resume!, excludeTurns: true, ...built.overrides })
-        .pipe(
-          Effect.catchTag("CodexRpcError", (e) =>
-            Effect.fail(
-              isSessionNotFoundError(e)
-                ? new SessionNotFound({ message: e.message, sessionId: options.resume! })
-                : agentError(`thread/resume failed: ${e.message}`, e),
-            ),
+    ? yield* timed("thread/resume", conn.request("thread/resume", { threadId: options.resume!, excludeTurns: true, ...built.overrides })).pipe(
+        Effect.catchTag("CodexRpcError", (e) =>
+          Effect.fail(
+            isSessionNotFoundError(e)
+              ? new SessionNotFound({ message: e.message, sessionId: options.resume! })
+              : agentError(`thread/resume failed: ${e.message}`, e),
           ),
-          closeOnError,
-        )
-    : yield* conn
-        .request("thread/start", { ...built.overrides, ephemeral: false })
-        .pipe(Effect.mapError(toAgentError("thread/start failed")), closeOnError)
+        ),
+        closeOnError,
+      )
+    : yield* timed("thread/start", conn.request("thread/start", { ...built.overrides, ephemeral: false })).pipe(
+        Effect.mapError(toAgentError("thread/start failed")),
+        closeOnError,
+      )
 
   const threadId = started.thread.id
+  yield* Effect.annotateCurrentSpan({ provider, sessionId: threadId, resume: resumed })
   const model = started.model ?? started.thread.model ?? null
   const price = pricing !== undefined ? Pricing.priceFor(pricing, model) : undefined
-  if (cap !== undefined && price === undefined) {
+  if (capUsd !== undefined && price === undefined) {
     yield* conn.close
     return yield* agentError(`spendCapUsd: no price for model ${model ?? "(unknown)"}`)
   }
+  const cap = capUsd !== undefined && price !== undefined ? { capUsd, price } : null
 
-  const sessionStarted: AgentEvent = {
+  const runtime = yield* Session.make({ provider, watchdog: options.watchdog, stallGrace: agentOptions.stallGrace })
+  const { turns } = runtime
+  const scope = yield* Effect.scope
+  yield* runtime.emit({
     _tag: "SessionStarted",
     sessionId: SessionId.make(threadId),
     provider,
@@ -308,453 +643,275 @@ const openSession = Effect.fnUntraced(function* (
     model,
     resumed,
     raw: { method: resumed ? "thread/resume" : "thread/start", result: started },
-  }
+  })
 
-  // ---- state (owned by this session's fibers; JS runs them one at a time) ----
-  const pubsub = yield* PubSub.unbounded<Published>()
-  const lock = yield* Semaphore.make(1)
+  // ---- state: changed only synchronously, so no lock is needed (or held across a request) ----
   const mapState = Events.makeMapState()
+  let state = initialState
+  /** Messages waiting for the running turn to end. */
   const queue: Array<Queued> = []
-  const state = {
-    running: null as RunningTurn | null,
-    ending: false,
-    closed: false,
-    dead: null as ProcessKilled | null,
-    finished: null as Published | null,
-    /** Thread total before this session's first model call (resumed threads carry history). */
-    usageBase: null as TokenUsage | null,
-    sessionUsage: Events.zeroUsage,
-    capReached: null as number | null,
+  /** `end` was called: no new messages. */
+  let ending = false
+  /** The connection was closed (by `end`, or the scope). */
+  let closed = false
+  let dead: ProcessKilled | null = null
+  /** Completed (and replaced) whenever a turn ends or the queue empties; `end` waits on it. */
+  let changed = Deferred.makeUnsafe<void>()
+  const notify = () => {
+    Deferred.doneUnsafe(changed, Exit.void)
+    changed = Deferred.makeUnsafe<void>()
   }
-
-  const dog = options.watchdog !== undefined ? yield* Watchdog.make(options.watchdog) : null
-  const stallGrace = options.watchdog?.grace ?? agentOptions.stallGrace ?? Duration.seconds(10)
-  const publish = (event: AgentEvent) =>
-    dog === null
-      ? PubSub.publish(pubsub, { _tag: "event", event })
-      : Effect.andThen(dog.observe(event), PubSub.publish(pubsub, { _tag: "event", event }))
-  const finish = (item: Published) =>
-    Effect.suspend(() => {
-      if (state.finished !== null) return Effect.void
-      state.finished = item
-      return PubSub.publish(pubsub, item)
-    })
-  const costNow = () =>
-    price !== undefined ? { usd: Pricing.costOf(price, state.sessionUsage), source: "estimated" as const } : null
-
-  const unavailable = (): AgentError | null =>
-    state.dead !== null
-      ? agentError(`session is gone: ${state.dead.message}`)
-      : state.closed || state.ending
-        ? agentError("session has ended")
-        : null
-
-  const makeQueued = (input: string): Queued => ({
-    messageId: nextMessageId(),
-    input,
-    started: Deferred.makeUnsafe(),
-    outcome: Deferred.makeUnsafe(),
-  })
-
-  const newRun = (messages: Array<Queued>): RunningTurn => ({
-    turnId: null,
-    messages,
-    unlanded: messages.map((m) => m.messageId),
-    announced: false,
-    interruptRequested: false,
-    spendCap: null,
-    stalled: null,
-    agentMessages: [],
-    commandItems: new Set(),
-    usageAtStart: state.sessionUsage,
-    sawUsage: false,
-    ended: Deferred.makeUnsafe(),
-  })
 
   const capFailure = (spent: number) =>
     new SpendCapReached({
-      message: `estimated spend $${spent.toFixed(4)} reached the cap of $${cap}`,
-      capUsd: cap ?? 0,
+      message: `estimated spend $${spent.toFixed(4)} reached the cap of $${capUsd}`,
+      capUsd: capUsd ?? null,
       spentUsd: spent,
       estimated: true,
     })
 
-  /** Start the next queued message if idle. Run with `lock` held. */
-  const startNext: Effect.Effect<void> = Effect.gen(function* () {
-    while (state.running === null && queue.length > 0 && state.dead === null && !state.closed) {
-      if (state.capReached !== null) {
-        const failure = capFailure(state.capReached)
-        for (const q of queue.splice(0)) {
-          yield* Deferred.fail(q.started, agentError(failure.message))
-          yield* Deferred.succeed(q.outcome, failure)
-        }
-        return
-      }
-      const q = queue.shift()!
-      const run = newRun([q])
-      state.running = run
-      const exit = yield* conn
-        .request("turn/start", {
-          threadId,
-          input: textInput(q.input),
-          clientUserMessageId: q.messageId,
-          ...(options.effort !== undefined ? { effort: codexEffort(options.effort) } : {}),
-        })
-        .pipe(Effect.exit)
-      if (Exit.isFailure(exit)) {
-        if (state.running === run) state.running = null
-        const error = toAgentError("turn/start failed")(Cause.squash(exit.cause) as CodexRpcError | AgentError)
-        yield* Deferred.fail(q.started, error)
-        yield* Deferred.fail(q.outcome, error)
-        yield* Deferred.succeed(run.ended, undefined)
-        continue
-      }
-      run.turnId ??= TurnId.make(exit.value.turn.id)
-      yield* Deferred.succeed(q.started, run.turnId)
+  const unavailable = (): AgentError | null =>
+    dead !== null ? agentError(`session is gone: ${dead.message}`) : closed || ending ? agentError("session has ended") : null
+
+  /**
+   * Take the next queued message as the running turn, if nothing is running.
+   * Synchronous, so two callers can't both start one; `startTurn` sends it.
+   */
+  const claimNext = (): { readonly q: Queued; readonly seq: number } | null => {
+    if (state.run !== null || dead !== null || closed) return null
+    if (state.capReached !== null) {
+      const failure = capFailure(state.capReached)
+      for (const q of queue.splice(0)) Deferred.doneUnsafe(q.started, Exit.fail(failure))
     }
+    const q = queue.shift()
+    if (q === undefined) {
+      notify()
+      return null
+    }
+    state = startRun(state, q.messageId)
+    return { q, seq: state.nextSeq - 1 }
+  }
+
+  /** `turn/start` for a claimed message; on failure, the next one goes. Runs in the session's scope, not the caller's. */
+  const startTurn = ({ q, seq }: { readonly q: Queued; readonly seq: number }): Effect.Effect<void> =>
+    timed(
+      "turn/start",
+      conn.request("turn/start", {
+        threadId,
+        input: textInput(q.input),
+        clientUserMessageId: q.messageId,
+        ...(options.effort !== undefined ? { effort: codexEffort(options.effort) } : {}),
+      }),
+    ).pipe(
+      Effect.matchCauseEffect({
+        onFailure: (cause) =>
+          Effect.suspend(() => {
+            state = runFailed(state, seq)
+            Deferred.doneUnsafe(q.started, Exit.fail(causeError("turn/start failed", cause)))
+            return startNext
+          }),
+        onSuccess: (response) =>
+          Effect.sync(() => {
+            state = runStarted(state, seq, response.turn.id)
+            Deferred.doneUnsafe(q.started, Exit.succeed(TurnId.make(response.turn.id)))
+          }),
+      }),
+    )
+
+  const startNext: Effect.Effect<void> = Effect.suspend(() => {
+    const claimed = claimNext()
+    return claimed === null ? Effect.void : startTurn(claimed).pipe(Effect.forkIn(scope), Effect.asVoid)
   })
 
   /** Kill the commands an interrupted turn left running (app-server doesn't). */
-  const killTurnCommands = (run: RunningTurn) =>
+  const killTurnCommands = (run: Run) =>
     Effect.gen(function* () {
-      if (run.commandItems.size === 0) return
-      const list = yield* conn.request("thread/backgroundTerminals/list", { threadId }).pipe(Effect.option)
+      const list = yield* timed("thread/backgroundTerminals/list", conn.request("thread/backgroundTerminals/list", { threadId })).pipe(
+        Effect.option,
+      )
       if (Option.isNone(list)) return
       for (const terminal of list.value.data) {
         if (!run.commandItems.has(terminal.itemId)) continue
-        yield* Effect.ignore(
+        yield* timed(
+          "thread/backgroundTerminals/terminate",
           conn.request("thread/backgroundTerminals/terminate", { threadId, processId: terminal.processId }),
+        ).pipe(Effect.ignore)
+      }
+    })
+
+  const command = (c: Command): Effect.Effect<void> => {
+    switch (c._tag) {
+      case "Interrupt":
+        return timed("turn/interrupt", conn.request("turn/interrupt", { threadId, turnId: c.turnId })).pipe(
+          Effect.ignore,
+          Effect.forkIn(scope),
+          Effect.asVoid,
         )
-      }
-    })
+      case "Complete":
+        return Effect.gen(function* () {
+          const run = state.run
+          if (run === null) return
+          const needs = completionNeeds(run, c.turn)
+          if (needs.killCommands) yield* killTurnCommands(run)
+          const rateLimits = needs.rateLimits
+            ? Option.getOrNull(yield* timed("account/rateLimits/read", conn.request("account/rateLimits/read", undefined)).pipe(Effect.option))
+            : null
+          const processExit = needs.processExit ? Option.getOrNull(yield* conn.exit.pipe(Effect.timeoutOption(Duration.seconds(1)))) : null
+          const done = completeTurn({ cap }, state, { turn: c.turn, raw: c.raw, price, rateLimits, processExit })
+          state = done.state
+          yield* runtime.emitAll(done.events)
+          yield* startNext
+        })
+    }
+  }
 
-  const resolveRun = (run: RunningTurn, outcome: TurnOutcome) =>
+  const handle = (msg: P.Incoming) =>
     Effect.gen(function* () {
-      for (const q of run.messages) {
-        if (run.turnId !== null) yield* Deferred.succeed(q.started, run.turnId)
-        else yield* Deferred.fail(q.started, agentError("turn never started"))
-        yield* Deferred.succeed(q.outcome, outcome)
-      }
-      yield* Deferred.succeed(run.ended, undefined)
-    })
-
-  const onTokenUsage = (n: P.TokenUsageNotification) =>
-    Effect.gen(function* () {
-      const total = Events.toTokenUsage(n.tokenUsage.total)
-      state.usageBase ??= Events.subtractUsage(total, Events.toTokenUsage(n.tokenUsage.last))
-      state.sessionUsage = Events.subtractUsage(total, state.usageBase)
-      const run = state.running
-      if (run !== null) run.sawUsage = true
-      if (cap === undefined || price === undefined) return
-      const spent = Pricing.costOf(price, state.sessionUsage)
-      if (spent < cap) return
-      state.capReached ??= spent
-      if (run !== null && run.turnId !== null && run.spendCap === null && run.stalled === null && !run.interruptRequested) {
-        run.spendCap = { capUsd: cap, spentUsd: spent }
-        yield* conn
-          .request("turn/interrupt", { threadId, turnId: run.turnId })
-          .pipe(Effect.ignore, Effect.forkScoped)
-      }
-    })
-
-  const finishTurn = (msg: P.Notification) =>
-    Effect.gen(function* () {
-      const turn: P.Turn = msg.params.turn
-      const run = state.running
-      if (run === null || (run.turnId !== null && run.turnId !== turn.id)) return yield* publish({ _tag: "Other", raw: msg })
-      run.turnId ??= TurnId.make(turn.id)
-      if (!run.announced) {
-        run.announced = true
-        yield* publish({ _tag: "TurnStarted", turnId: run.turnId, raw: msg })
-      }
-      if (turn.status === "interrupted") yield* killTurnCommands(run)
-      const kind = Events.errorKind(turn.error?.codexErrorInfo)
-      const rateLimits =
-        turn.status === "failed" && kind === "usageLimitExceeded"
-          ? Option.getOrNull(yield* conn.request("account/rateLimits/read", undefined).pipe(Effect.option))
-          : null
-      // An interrupt we didn't ask for usually means app-server is shutting down.
-      const processExit =
-        turn.status === "interrupted" && !run.interruptRequested && run.spendCap === null && run.stalled === null
-          ? Option.getOrNull(yield* conn.exit.pipe(Effect.timeoutOption(Duration.seconds(1))))
-          : null
-      const messages =
-        run.agentMessages.length > 0
-          ? run.agentMessages
-          : turn.items.flatMap((i) => (i.type === "agentMessage" ? [{ text: (i as any).text ?? "", phase: (i as any).phase ?? null }] : []))
-      const outcome = Events.classifyOutcome(turn, {
-        interruptRequested: run.interruptRequested,
-        spendCap: run.spendCap,
-        capUsd: cap ?? null,
-        processExit,
-        finalText: Events.finalTextOf(messages),
-        rateLimits,
-        stalled: run.stalled,
-      })
-      yield* publish({
-        _tag: "TurnEnded",
-        turnId: run.turnId,
-        outcome,
-        usage: run.sawUsage ? Events.subtractUsage(state.sessionUsage, run.usageAtStart) : null,
-        cost: costNow(),
-        raw: msg,
-      })
-      state.running = null
-      yield* resolveRun(run, outcome)
-      yield* lock.withPermit(startNext).pipe(Effect.forkScoped)
-    })
-
-  const handle = (msg: P.Incoming): Effect.Effect<void, never, Scope.Scope> =>
-    Effect.gen(function* () {
-      const params: any = msg.params ?? {}
-      // Subagent threads share the connection; their turns aren't ours.
-      if (typeof params.threadId === "string" && params.threadId !== threadId) {
-        return yield* publish({ _tag: "Other", raw: msg })
-      }
-      const run = state.running
-      const item: P.ThreadItem | undefined = params.item
-      if (!("id" in msg && msg.id !== undefined)) {
-        switch (msg.method as P.NotificationMethod) {
-          case "turn/started": {
-            const turnId = TurnId.make(params.turn.id)
-            const current = run ?? (state.running = newRun([]))
-            current.turnId ??= turnId
-            if (current.turnId !== turnId || current.announced) return yield* publish({ _tag: "Other", raw: msg })
-            current.announced = true
-            return yield* publish({ _tag: "TurnStarted", turnId, raw: msg })
-          }
-          case "turn/completed":
-            return yield* finishTurn(msg)
-          case "thread/tokenUsage/updated":
-            yield* onTokenUsage(params)
-            break
-          case "item/started":
-            if (item?.type === "userMessage") {
-              const clientId = (item as any).clientId as string | null
-              const messageId =
-                run === null
-                  ? undefined
-                  : clientId !== null && run.unlanded.includes(clientId as MessageId)
-                    ? (clientId as MessageId)
-                    : run.unlanded[0]
-              if (run === null || messageId === undefined || run.turnId === null) {
-                return yield* publish({ _tag: "Other", raw: msg })
-              }
-              run.unlanded.splice(run.unlanded.indexOf(messageId), 1)
-              return yield* publish({ _tag: "MessageLanded", messageId, turnId: run.turnId, raw: msg })
-            }
-            if (item?.type === "commandExecution") run?.commandItems.add(item.id)
-            break
-          case "item/completed":
-            if (item?.type === "agentMessage") {
-              run?.agentMessages.push({ text: (item as any).text ?? "", phase: (item as any).phase ?? null })
-            }
-            break
-        }
-      }
-      const now = yield* Clock.currentTimeMillis
-      for (const event of Events.mapNotification(msg, mapState, now)) yield* publish(event)
+      const nowMs = yield* Clock.currentTimeMillis
+      const result = step({ threadId, nowMs, mapState, cap }, state, msg)
+      state = result.state
+      yield* runtime.emitAll(result.events)
+      for (const c of result.commands) yield* command(c)
     })
 
   /** After app-server's output ends: either we closed it, or it died. */
   const onTransportEnd = Effect.gen(function* () {
     const exit: ProcessExit = yield* conn.exit
-    if (state.closed) return yield* finish({ _tag: "end" })
-    const dead = new ProcessKilled({
+    if (closed) return yield* runtime.end(null)
+    dead = new ProcessKilled({
       message: `codex app-server exited (${exit.signal ?? `code ${exit.exitCode}`})`,
       signal: exit.signal,
       exitCode: exit.exitCode,
     })
-    state.dead = dead
-    const run = state.running
-    state.running = null
-    if (run !== null) {
-      // A stalled turn whose app-server we killed ended Stalled, not ProcessKilled.
-      const outcome = run.stalled !== null ? Events.stalledFailure(run.stalled) : dead
-      if (run.turnId !== null) {
-        yield* publish({
-          _tag: "TurnEnded",
-          turnId: run.turnId,
-          outcome,
-          usage: run.sawUsage ? Events.subtractUsage(state.sessionUsage, run.usageAtStart) : null,
-          cost: costNow(),
-          raw: { exit },
-        })
-      }
-      yield* resolveRun(run, outcome)
-    }
-    for (const q of queue.splice(0)) {
-      yield* Deferred.fail(q.started, agentError(dead.message))
-      yield* Deferred.succeed(q.outcome, dead)
-    }
-    yield* finish({ _tag: "fail", error: agentError(dead.message) })
+    const ended = stepExit(state, dead, exit, price)
+    state = ended.state
+    yield* runtime.emitAll(ended.events)
+    for (const q of queue.splice(0)) Deferred.doneUnsafe(q.started, Exit.fail(dead))
+    notify()
+    yield* runtime.end(agentError(dead.message))
   })
 
   // Closing the session's scope without `end`: release everyone still waiting.
   yield* Effect.addFinalizer(() =>
-    Effect.gen(function* () {
-      if (state.finished !== null) return
-      state.closed = true
+    Effect.suspend(() => {
+      if (runtime.ended() !== null) return Effect.void
+      closed = true
       const error = agentError("session closed")
-      const run = state.running
-      state.running = null
-      for (const q of [...(run?.messages ?? []), ...queue.splice(0)]) {
-        yield* Deferred.fail(q.started, error)
-        yield* Deferred.fail(q.outcome, error)
-      }
-      if (run !== null) yield* Deferred.succeed(run.ended, undefined)
-      yield* finish({ _tag: "end" })
+      for (const q of queue.splice(0)) Deferred.doneUnsafe(q.started, Exit.fail(error))
+      notify()
+      return runtime.end(null, error)
     }),
   )
 
-  yield* conn.incoming.pipe(
-    Stream.runForEach(handle),
-    Effect.andThen(onTransportEnd),
-    Effect.forkScoped,
-  )
+  yield* conn.incoming.pipe(Stream.runForEach(handle), Effect.andThen(onTransportEnd), Effect.forkScoped)
 
-  /**
-   * Watchdog expiry: mark the turn stalled and interrupt it (`finishTurn`
-   * then terminates its commands, as for any interrupt). If it hasn't ended
-   * within `stallGrace`, app-server is unresponsive: kill it, which ends the
-   * turn (still `Stalled`) and the session.
-   */
-  const onStall = (expiry: Watchdog.Expiry) =>
-    Effect.gen(function* () {
-      const run = state.running
-      if (run === null || run.turnId !== expiry.turnId || run.stalled !== null) return
-      run.stalled = { idleMs: expiry.idleMs, inTool: expiry.inTool }
-      yield* conn.request("turn/interrupt", { threadId, turnId: expiry.turnId }).pipe(Effect.ignore, Effect.forkScoped)
-      const ended = yield* Deferred.await(run.ended).pipe(Effect.timeoutOption(stallGrace))
-      if (Option.isNone(ended)) yield* conn.kill
-    })
-  if (dog !== null) yield* dog.expirations.pipe(Stream.runForEach(onStall), Effect.forkScoped)
+  // A stalled turn is interrupted (`Complete` then terminates its commands, as
+  // for any interrupt). If it hasn't ended within the grace period, app-server
+  // is unresponsive: kill it, which ends the turn (still `Stalled`) and the session.
+  yield* runtime.supervise({
+    stall: (expiry) =>
+      Effect.sync(() => {
+        const marked = markStalled(state, expiry.turnId, expiry)
+        state = marked.state
+        return marked.marked
+      }),
+    interrupt: (expiry) => timed("turn/interrupt", conn.request("turn/interrupt", { threadId, turnId: expiry.turnId })),
+    kill: conn.kill,
+  })
 
   // ---- public API ----
 
-  // `sessionStarted` is never published live, only replayed first to every subscription.
-  const subscribe = Effect.gen(function* () {
-    const subscription = yield* PubSub.subscribe(pubsub)
-    const finished = state.finished
-    if (finished !== null) {
-      return finished._tag === "fail" ? Stream.fail(finished.error) : Stream.empty
-    }
-    const prefix: Published = { _tag: "event", event: sessionStarted }
-    return Stream.concat(Stream.make(prefix), Stream.fromSubscription(subscription)).pipe(
-      Stream.mapEffect((item) => (item._tag === "fail" ? Effect.fail(item.error) : Effect.succeed(item))),
-      Stream.takeWhile((item) => item._tag === "event"),
-      Stream.map((item) => (item as Extract<Published, { _tag: "event" }>).event),
-    )
-  })
-  const events: Stream.Stream<AgentEvent, AgentError> = Stream.unwrap(subscribe)
-
-  const submit = (q: Queued, front: boolean) =>
-    Effect.gen(function* () {
+  /** Queue a message (at the front for a steer) and start it if nothing is running. */
+  const enqueue = (input: string, front: boolean) =>
+    Effect.suspend(() => {
+      const error = unavailable()
+      if (error !== null) return Effect.fail(error)
+      const q: Queued = { messageId: Session.newMessageId(), input, started: Deferred.makeUnsafe() }
       if (front) queue.unshift(q)
       else queue.push(q)
-      yield* startNext
+      return Effect.as(startNext, q)
     })
 
-  const send = (input: string): Effect.Effect<MessageId, AgentError> =>
-    Effect.gen(function* () {
-      const error = unavailable()
-      if (error !== null) return yield* error
-      if (state.capReached !== null) return yield* agentError(capFailure(state.capReached).message)
-      const q = makeQueued(input)
-      yield* lock.withPermit(submit(q, false))
-      // turn/start failures surface here; a queued message returns at once.
-      const failed = yield* Deferred.isDone(q.started)
-      if (failed) yield* Effect.asVoid(Deferred.await(q.started))
-      return q.messageId
-    })
-
-  const turn = (input: string): Effect.Effect<TurnSucceeded, TurnFailure | AgentError> =>
-    Effect.gen(function* () {
-      const error = unavailable()
-      if (error !== null) return yield* error
-      if (state.capReached !== null) return yield* capFailure(state.capReached)
-      const q = makeQueued(input)
-      yield* lock.withPermit(submit(q, false))
-      const outcome = yield* Deferred.await(q.outcome)
-      if (outcome._tag === "Succeeded") return outcome
-      return yield* Effect.fail(outcome)
-    })
-
-  const steer = (input: string): Effect.Effect<SteerOutcome, AgentError> =>
-    Effect.gen(function* () {
-      const error = unavailable()
-      if (error !== null) return yield* error
-      if (state.capReached !== null) return yield* agentError(capFailure(state.capReached).message)
-      const q = makeQueued(input)
-      const landed = yield* lock.withPermit(
-        Effect.gen(function* () {
-          const run = state.running
-          if (run !== null && run.turnId !== null && !run.interruptRequested && run.spendCap === null && run.stalled === null) {
-            const turnId = run.turnId
-            run.messages.push(q)
-            run.unlanded.push(q.messageId)
-            const exit = yield* conn
-              .request("turn/steer", { threadId, input: textInput(input), expectedTurnId: turnId, clientUserMessageId: q.messageId })
-              .pipe(Effect.exit)
-            if (Exit.isSuccess(exit)) {
-              return Option.some<SteerOutcome>({ _tag: "Landed", messageId: q.messageId, turnId: TurnId.make(exit.value.turnId) })
-            }
-            run.messages.splice(run.messages.indexOf(q), 1)
-            if (run.unlanded.includes(q.messageId)) run.unlanded.splice(run.unlanded.indexOf(q.messageId), 1)
-            const e = Cause.squash(exit.cause) as CodexRpcError | AgentError
-            if (e._tag !== "CodexRpcError" || !isStaleSteerError(e)) return yield* toAgentError("turn/steer failed")(e)
-            // The turn ended first: this message starts the next turn, ahead of anything queued.
-          }
-          yield* submit(q, true)
-          return Option.none<SteerOutcome>()
-        }),
-      )
-      if (Option.isSome(landed)) return landed.value
-      const turnId = yield* Deferred.await(q.started)
-      return { _tag: "StartedNewTurn", messageId: q.messageId, turnId } satisfies SteerOutcome
-    })
-
-  const interrupt: Effect.Effect<void, AgentError> = Effect.gen(function* () {
-    if (state.dead !== null) return yield* agentError(`session is gone: ${state.dead.message}`)
-    if (state.closed) return yield* agentError("session has ended")
-    const run = yield* lock.withPermit(
-      Effect.gen(function* () {
-        const run = state.running
-        if (run === null || run.turnId === null) return null
-        if (!run.interruptRequested) {
-          run.interruptRequested = true
-          yield* conn.request("turn/interrupt", { threadId, turnId: run.turnId }).pipe(
-            // Already finished: the turn ends on its own.
-            Effect.catchTag("CodexRpcError", () => Effect.void),
-          )
-        }
-        return run
-      }),
-    )
-    if (run !== null) yield* Deferred.await(run.ended)
-  })
-
-  const end: Effect.Effect<void, AgentError> = Effect.gen(function* () {
-    if (state.closed || state.dead !== null) return
-    state.ending = true
-    while (state.dead === null) {
-      const run = state.running
-      if (run !== null) yield* Deferred.await(run.ended)
-      else if (queue.length > 0) yield* Effect.sleep(Duration.millis(10))
-      else break
+  const send = Effect.fn("CodexAgent.send")(function* (input: string) {
+    if (state.capReached !== null && unavailable() === null) return yield* agentError(capFailure(state.capReached).message)
+    const q = yield* enqueue(input, false)
+    // A message that started a turn reports a failed `turn/start`; a queued one returns at once.
+    if (state.run?.unlanded[0] === q.messageId || (yield* Deferred.isDone(q.started))) {
+      yield* Deferred.await(q.started).pipe(Effect.mapError(asAgentError))
     }
-    state.closed = true
-    yield* conn.close
-    yield* finish({ _tag: "end" })
+    return q.messageId
   })
+
+  const turn = Effect.fn("CodexAgent.turn")(function* (input: string) {
+    if (state.capReached !== null && unavailable() === null) return yield* capFailure(state.capReached)
+    const q = yield* enqueue(input, false)
+    const turnId = yield* Deferred.await(q.started)
+    const outcome = yield* turns.outcome(turnId)
+    if (outcome._tag === "Succeeded") return outcome satisfies TurnSucceeded
+    return yield* Effect.fail(outcome)
+  })
+
+  const steer = Effect.fn("CodexAgent.steer")(function* (input: string) {
+    const error = unavailable()
+    if (error !== null) return yield* error
+    if (state.capReached !== null) return yield* agentError(capFailure(state.capReached).message)
+    const run = state.run
+    if (steerable(run)) {
+      const messageId = Session.newMessageId()
+      state = addSteer(state, run.seq, messageId)
+      const exit = yield* timed(
+        "turn/steer",
+        conn.request("turn/steer", { threadId, input: textInput(input), expectedTurnId: run.turnId, clientUserMessageId: messageId }),
+      ).pipe(Effect.exit)
+      if (Exit.isSuccess(exit)) {
+        return { _tag: "Landed", messageId, turnId: TurnId.make(exit.value.turnId) } satisfies SteerOutcome
+      }
+      state = removeSteer(state, run.seq, messageId)
+      const failure = Cause.findErrorOption(exit.cause)
+      const stale = Option.isSome(failure) && failure.value._tag === "CodexRpcError" && isStaleSteerError(failure.value)
+      if (!stale) return yield* causeError("turn/steer failed", exit.cause)
+      // The turn ended first: this message starts the next turn, ahead of anything queued.
+    }
+    const q = yield* enqueue(input, true)
+    const turnId = yield* Deferred.await(q.started).pipe(Effect.mapError(asAgentError))
+    return { _tag: "StartedNewTurn", messageId: q.messageId, turnId } satisfies SteerOutcome
+  })
+
+  const interrupt = Effect.gen(function* () {
+    if (dead !== null) return yield* agentError(`session is gone: ${dead.message}`)
+    if (closed) return yield* agentError("session has ended")
+    const run = state.run
+    if (run === null || run.turnId === null) return
+    if (!run.interruptRequested) {
+      state = markInterrupt(state, run.seq)
+      yield* timed("turn/interrupt", conn.request("turn/interrupt", { threadId, turnId: run.turnId })).pipe(
+        // Already finished: the turn ends on its own.
+        Effect.catchTag("CodexRpcError", () => Effect.void),
+      )
+    }
+    yield* turns.outcome(run.turnId).pipe(Effect.ignore)
+  }).pipe(Effect.withSpan("CodexAgent.interrupt"))
+
+  // Ending an ended session reports how it ended.
+  const end: Effect.Effect<void, AgentError> = Effect.gen(function* () {
+    if (dead === null && !closed) {
+      ending = true
+      while (dead === null && (state.run !== null || queue.length > 0)) yield* Deferred.await(changed)
+    }
+    if (dead !== null) return yield* agentError(`session is gone: ${dead.message}`)
+    if (closed) return
+    closed = true
+    yield* conn.close
+    yield* runtime.end(null)
+  }).pipe(Effect.withSpan("CodexAgent.end"))
 
   return {
     sessionId: SessionId.make(threadId),
     provider,
     location: Option.fromNullishOr(started.thread.path),
     pid: Effect.map(conn.exited, (exited) => (Option.isSome(exited) ? Option.none() : Option.fromNullishOr(conn.pid))),
-    subscribe,
-    events,
+    subscribe: runtime.subscribe,
+    events: Stream.unwrap(runtime.subscribe),
     send,
     turn,
     steer,
@@ -767,15 +924,8 @@ const openSession = Effect.fnUntraced(function* (
 // status and history: short-lived app-servers
 // ---------------------------------------------------------------------------
 
-const requestTimeout = Duration.seconds(60)
-
 /** Where to run app-server when there's no session cwd: a neutral directory, not the caller's project. */
-const neutralCwd = () => hostEnv()["TMPDIR"] ?? "/tmp"
-
-const timed = <A, E>(what: string, self: Effect.Effect<A, E>) =>
-  self.pipe(
-    Effect.timeoutOrElse({ duration: requestTimeout, orElse: () => Effect.fail(agentError(`${what} timed out`)) }),
-  )
+const neutralCwd = () => Env.host()["TMPDIR"] ?? "/tmp"
 
 /**
  * `Agent.status`: `account/read` and `account/rateLimits/read` on a short-lived app-server.
@@ -788,7 +938,7 @@ export const readStatus = (
 ): Effect.Effect<AccountStatus, AgentError> =>
   Effect.scoped(
     Effect.gen(function* () {
-      const conn = yield* server.connect({ cwd: neutralCwd(), env: sessionEnv(hostEnv(), env) })
+      const conn = yield* server.connect({ cwd: neutralCwd(), env: Env.overrides(Env.host(), env) })
       const account = yield* timed("account/read", conn.request("account/read", {})).pipe(
         Effect.mapError(toAgentError("account/read failed")),
       )
@@ -818,7 +968,7 @@ export const readHistory = (
 ): Effect.Effect<ReadonlyArray<AgentEvent>, SessionNotFound | AgentError> =>
   Effect.scoped(
     Effect.gen(function* () {
-      const conn = yield* server.connect({ cwd: options.cwd, env: sessionEnv(hostEnv()) })
+      const conn = yield* server.connect({ cwd: options.cwd, env: Env.overrides(Env.host()) })
       const turns: Array<P.Turn> = []
       let cursor: string | null = null
       for (let page = 0; page < 10_000; page++) {

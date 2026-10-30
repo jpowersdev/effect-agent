@@ -17,7 +17,7 @@
 // The unix-socket server Effect's Node and Bun platforms both use.
 import * as NodeSocket from "@effect/platform-node-shared/NodeSocket"
 import * as NodeSocketServer from "@effect/platform-node-shared/NodeSocketServer"
-import { Cause, Context, DateTime, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, PubSub, Schema, Scope, Stream } from "effect"
+import { Cause, Clock, Context, DateTime, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, PubSub, Schedule, Schema, Scope, Stream } from "effect"
 import { RpcSerialization, RpcServer } from "effect/rpc"
 import { SocketServer } from "effect/socket"
 import type { Socket as NetSocket } from "node:net"
@@ -25,6 +25,7 @@ import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { Agent, type AgentSession, type Hooks, type RunOptions } from "../Agent.ts"
 import { AgentError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnOutcome, TurnSucceeded } from "../AgentEvent.ts"
+import * as TurnTracker from "../internal/turnTracker.ts"
 import * as EventFile from "./EventFile.ts"
 import * as HookBridge from "./HookBridge.ts"
 import {
@@ -168,64 +169,18 @@ export const makeLog = (
     let next = 0
     let sessionStarted: SeqEvent | null = null
     let ended: { readonly error: AgentError | null } | null = null
-    let running: string | null = null
-    let lastActivity = Date.now()
+    let lastActivity = yield* Clock.currentTimeMillis
     const pubsub = yield* PubSub.unbounded<SeqEvent | typeof End>()
-    const outcomes = new Map<string, TurnOutcome>()
-    const waiters = new Map<string, Deferred.Deferred<TurnOutcome, AgentError>>()
-    /** Messages sent through this host that haven't landed or been dropped. */
-    const unlanded = new Set<string>()
-    /** Where each message landed, or why it was dropped; and who is waiting to find out. */
-    const landedIn = new Map<string, string>()
-    const droppedMessages = new Map<string, string>()
-    const messageWaiters = new Map<string, Deferred.Deferred<string, AgentError>>()
-
-    const droppedError = (messageId: string, reason: string) =>
-      new AgentError({ message: `message ${messageId} was ${reason} before it reached a turn`, provider })
-    const neverLanded = (messageId: string) =>
-      new AgentError({ message: `the session ended before message ${messageId} reached a turn`, provider })
-
-    /** Keep the maps that `awaitTurn` / `awaitMessage` read up to date. */
-    const index = (event: AgentEvent) => {
-      switch (event._tag) {
-        case "TurnStarted":
-          running = event.turnId
-          unlanded.delete(event.turnId)
-          break
-        case "MessageLanded": {
-          unlanded.delete(event.messageId)
-          landedIn.set(event.messageId, event.turnId)
-          const waiter = messageWaiters.get(event.messageId)
-          messageWaiters.delete(event.messageId)
-          if (waiter !== undefined) Deferred.doneUnsafe(waiter, Exit.succeed(event.turnId))
-          break
-        }
-        case "MessageDropped": {
-          unlanded.delete(event.messageId)
-          droppedMessages.set(event.messageId, event.reason)
-          const waiter = messageWaiters.get(event.messageId)
-          messageWaiters.delete(event.messageId)
-          if (waiter !== undefined) Deferred.doneUnsafe(waiter, Exit.fail(droppedError(event.messageId, event.reason)))
-          break
-        }
-        case "TurnEnded": {
-          if (running === event.turnId) running = null
-          outcomes.set(event.turnId, event.outcome)
-          const waiter = waiters.get(event.turnId)
-          waiters.delete(event.turnId)
-          if (waiter !== undefined) Deferred.doneUnsafe(waiter, Exit.succeed(event.outcome))
-          break
-        }
-      }
-    }
+    /** Where messages sent through this host landed, and how turns ended: for `AwaitTurn` / `AwaitMessage`. */
+    const turns = TurnTracker.make({ provider, owner: "host" })
 
     // A resumed session's earlier hosts may have left events: number on from them.
     let file: EventFile.Writer | null = null
     if (persist !== null) {
-      file = EventFile.openWriter(persist.path, persist.resumed ? (entry) => index(entry.event) : null)
+      file = EventFile.openWriter(persist.path, persist.resumed ? (entry) => turns.observe(entry.event) : null)
       next = file.next
       // Those hosts are gone: nothing of theirs is still running.
-      running = null
+      turns.clearRunning()
     }
     /** The first seq this host logged; the ring never holds anything older. */
     const firstOwn = next
@@ -249,7 +204,7 @@ export const makeLog = (
       })
 
     const append = (event: AgentEvent) =>
-      Effect.suspend(() => {
+      Effect.flatMap(Clock.currentTimeMillis, (now) => {
         const entry: SeqEvent = { seq: next++, event }
         let failure: { readonly error: unknown } | null = null
         if (file !== null) {
@@ -260,9 +215,9 @@ export const makeLog = (
           }
         }
         buffer[entry.seq % max] = entry
-        lastActivity = Date.now()
+        lastActivity = now
         if (event._tag === "SessionStarted" && sessionStarted === null) sessionStarted = entry
-        index(event)
+        turns.observe(event)
         const publish = PubSub.publish(pubsub, entry)
         return failure !== null ? Effect.andThen(fileFailed(failure.error), publish) : publish
       })
@@ -280,19 +235,8 @@ export const makeLog = (
             written = fileFailed(e)
           }
         }
-        running = null
-        for (const [turnId, waiter] of waiters) {
-          Deferred.doneUnsafe(
-            waiter,
-            Exit.fail(error ?? new AgentError({ message: `the session ended before turn ${turnId} did`, provider })),
-          )
-        }
-        waiters.clear()
-        for (const [messageId, waiter] of messageWaiters) {
-          Deferred.doneUnsafe(waiter, Exit.fail(error ?? neverLanded(messageId)))
-        }
-        messageWaiters.clear()
-        return Effect.andThen(written, PubSub.publish(pubsub, End))
+        turns.end(error)
+        return Effect.andThen(written, PubSub.end(pubsub, End))
       })
 
     const tail = Stream.suspend(() => (ended?.error ? Stream.fail(ended.error) : Stream.empty))
@@ -329,39 +273,9 @@ export const makeLog = (
         }),
       )
 
-    const awaitTurn = (turnId: string): Effect.Effect<TurnOutcome, AgentError> =>
-      Effect.suspend(() => {
-        const outcome = outcomes.get(turnId)
-        if (outcome !== undefined) return Effect.succeed(outcome)
-        if (ended !== null) {
-          return Effect.fail(ended.error ?? new AgentError({ message: `turn ${turnId} did not end in this session`, provider }))
-        }
-        let waiter = waiters.get(turnId)
-        if (waiter === undefined) {
-          waiter = Deferred.makeUnsafe<TurnOutcome, AgentError>()
-          waiters.set(turnId, waiter)
-        }
-        return Deferred.await(waiter)
-      })
-
     /** The ending of the turn a message landed in, found by the `MessageId` that `send` returned. */
     const awaitMessage = (messageId: string): Effect.Effect<TurnOutcome, AgentError> =>
-      Effect.suspend(() => {
-        const turnId = landedIn.get(messageId)
-        if (turnId !== undefined) return awaitTurn(turnId)
-        const reason = droppedMessages.get(messageId)
-        if (reason !== undefined) return Effect.fail(droppedError(messageId, reason))
-        if (ended !== null) return Effect.fail(ended.error ?? neverLanded(messageId))
-        if (!unlanded.has(messageId)) {
-          return Effect.fail(new AgentError({ message: `message ${messageId} was not sent through this host`, provider }))
-        }
-        let waiter = messageWaiters.get(messageId)
-        if (waiter === undefined) {
-          waiter = Deferred.makeUnsafe<string, AgentError>()
-          messageWaiters.set(messageId, waiter)
-        }
-        return Deferred.await(waiter).pipe(Effect.flatMap(awaitTurn))
-      })
+      Effect.flatMap(turns.landing(messageId), turns.outcome)
 
     return {
       append,
@@ -375,20 +289,18 @@ export const makeLog = (
           // Best effort.
         }
       },
-      awaitTurn,
+      awaitTurn: turns.outcome,
       awaitMessage,
       lastSeq: () => next - 1,
       oldest,
       ended: () => ended,
       /** Something is running or waiting to run. */
-      busy: () => running !== null || unlanded.size > 0,
+      busy: turns.busy,
       lastActivity: () => lastActivity,
-      touch: () => {
-        lastActivity = Date.now()
-      },
-      sent: (messageId: string) => {
-        unlanded.add(messageId)
-      },
+      touch: Effect.map(Clock.currentTimeMillis, (now) => {
+        lastActivity = now
+      }),
+      sent: turns.expect,
     }
   })
 
@@ -657,16 +569,19 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
 
       // ---- orphan timeout ----
       const tick = Math.max(10, Math.min(1000, Math.floor(orphanTimeout / 4)))
-      yield* Effect.gen(function* () {
-        while (true) {
-          yield* Effect.sleep(Duration.millis(tick))
-          if ((yield* clients) > 0 || log.busy()) log.touch()
-          else if (Date.now() - log.lastActivity() >= orphanTimeout) {
-            yield* Effect.logInfo(`orphaned: no client and idle for ${orphanTimeout} ms`)
-            return yield* Deferred.succeed(shutdown, "orphan")
-          }
+      const orphaned = Effect.gen(function* () {
+        if ((yield* clients) > 0 || log.busy()) {
+          yield* log.touch
+          return false
         }
-      }).pipe(Effect.forkScoped)
+        return (yield* Clock.currentTimeMillis) - log.lastActivity() >= orphanTimeout
+      })
+      yield* orphaned.pipe(
+        Effect.repeat({ schedule: Schedule.spaced(Duration.millis(tick)), until: (orphan) => orphan }),
+        Effect.andThen(Effect.logInfo(`orphaned: no client and idle for ${orphanTimeout} ms`)),
+        Effect.andThen(Deferred.succeed(shutdown, "orphan")),
+        Effect.forkScoped,
+      )
 
       // ---- shutdown ----
       let closing = false
@@ -695,14 +610,18 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       // Linger so connected clients read the last events and replies; a
       // restarting client also gets a short window to reattach.
       if (reason === "ended" || reason === "stop") {
-        const deadline = Date.now() + linger
-        let hadClients = (yield* clients) > 0
-        while (Date.now() < deadline) {
-          const n = yield* clients
-          if (n > 0) hadClients = true
-          else if (hadClients) break
-          yield* Effect.sleep(Duration.millis(25))
-        }
+        // Until the clients that were connected have gone (or none came), at most `linger`.
+        let hadClients = false
+        yield* clients.pipe(
+          Effect.repeat({
+            schedule: Schedule.spaced(Duration.millis(25)),
+            until: (n) => {
+              if (n > 0) hadClients = true
+              return n === 0 && hadClients
+            },
+          }),
+          Effect.timeoutOption(Duration.millis(linger)),
+        )
       }
       cleanup()
       yield* Effect.logInfo("exiting")

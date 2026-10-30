@@ -315,6 +315,8 @@ for (const provider of [claude, codex, remote(claude), remote(codex)]) {
         expect(failure?._tag).toBe("ProcessKilled")
         expect(failureOf(yield* session.send("hello?").pipe(Effect.exit))?._tag).toBe("AgentError")
         expect(failureOf(yield* session.interrupt.pipe(Effect.exit))?._tag).toBe("AgentError")
+        // Ending a session that died reports that it died.
+        expect(failureOf(yield* session.end.pipe(Effect.exit))?._tag).toBe("AgentError")
         expect(failureOf(yield* Fiber.join(fiber))?._tag).toBe("AgentError")
         checkStream(events, session.sessionId)
         expect(outcomes(events)).toEqual(["ProcessKilled"])

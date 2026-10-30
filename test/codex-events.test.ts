@@ -1,6 +1,6 @@
 import { describe, expect, it } from "@effect/vitest"
 import { DateTime, Option, Schema } from "effect"
-import { AccountStatus, AgentEvent } from "../src/index.ts"
+import { AccountStatus, AgentEvent, MessageId, ProcessKilled, TurnId } from "../src/index.ts"
 import { CodexAgent, CodexAppServer, CodexEvents } from "../src/codex/index.ts"
 import type * as P from "../src/codex/protocol.ts"
 
@@ -438,5 +438,93 @@ describe("hooks", () => {
     expect(CodexAgent.hooksError({ cwd: "/w" })).toBeNull()
     expect(CodexAgent.hooksError({ cwd: "/w", hooks: {} })).toBeNull()
     expect(CodexAgent.hooksError({ cwd: "/w", hooks: { afterTool: () => null as any } })).toMatch(/afterTool.*config-only/)
+  })
+})
+
+describe("CodexAgent.step", () => {
+  const threadId = "th-1"
+  const price = { input: 1_000_000, output: 1_000_000 }
+  const stepCtx = (cap: CodexAgent.StepContext["cap"] = null): CodexAgent.StepContext => ({
+    threadId,
+    nowMs: 0,
+    mapState: CodexEvents.makeMapState(),
+    cap,
+  })
+  const note = (method: string, params: unknown): P.Incoming => ({ method, params })
+  const messageId = MessageId.make("m-1")
+  const running = (state = CodexAgent.initialState) => {
+    const claimed = CodexAgent.startRun(state, messageId)
+    return CodexAgent.runStarted(claimed, claimed.run!.seq, "t-1")
+  }
+  const usage = (input: number) => ({
+    total: { totalTokens: input, inputTokens: input, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+    last: { totalTokens: input, inputTokens: input, cachedInputTokens: 0, outputTokens: 0, reasoningOutputTokens: 0 },
+  })
+
+  it("announces the turn once and lands its message from the userMessage item", () => {
+    const ctx = stepCtx()
+    const started = CodexAgent.step(ctx, running(), note("turn/started", { threadId, turn: turn("inProgress") }))
+    expect(started.events).toMatchObject([{ _tag: "TurnStarted", turnId: "t-1" }])
+    const again = CodexAgent.step(ctx, started.state, note("turn/started", { threadId, turn: turn("inProgress") }))
+    expect(again.events).toMatchObject([{ _tag: "Other" }])
+    const item = { type: "userMessage", id: "i-1", clientId: messageId, content: [] }
+    const landed = CodexAgent.step(ctx, started.state, note("item/started", { threadId, turnId: "t-1", item }))
+    expect(landed.events).toMatchObject([{ _tag: "MessageLanded", messageId, turnId: "t-1" }])
+    expect(landed.state.run?.unlanded).toEqual([])
+  })
+
+  it("ignores other threads' frames", () => {
+    const result = CodexAgent.step(stepCtx(), running(), note("turn/completed", { threadId: "sub", turn: turn("completed") }))
+    expect(result.events).toMatchObject([{ _tag: "Other" }])
+    expect(result.commands).toEqual([])
+  })
+
+  it("asks to complete our turn, and completeTurn ends it", () => {
+    const state = running()
+    const completed = CodexAgent.step(stepCtx(), state, note("turn/completed", { threadId, turn: turn("completed") }))
+    expect(completed.commands).toMatchObject([{ _tag: "Complete" }])
+    // Not announced yet: the TurnStarted comes first.
+    expect(completed.events).toMatchObject([{ _tag: "TurnStarted", turnId: "t-1" }])
+    const done = CodexAgent.completeTurn({ cap: null }, completed.state, {
+      turn: turn("completed"),
+      raw: null as never,
+      price: undefined,
+      rateLimits: null,
+      processExit: null,
+    })
+    expect(done.state.run).toBeNull()
+    expect(done.events).toMatchObject([{ _tag: "TurnEnded", turnId: "t-1", outcome: { _tag: "Succeeded" } }])
+  })
+
+  it("interrupts the turn once the estimated spend reaches the cap", () => {
+    const ctx = stepCtx({ capUsd: 1, price })
+    const under = CodexAgent.step(ctx, running(), note("thread/tokenUsage/updated", { threadId, turnId: "t-1", tokenUsage: usage(0) }))
+    expect(under.commands).toEqual([])
+    const over = CodexAgent.step(ctx, under.state, note("thread/tokenUsage/updated", { threadId, turnId: "t-1", tokenUsage: usage(2) }))
+    expect(over.commands).toEqual([{ _tag: "Interrupt", turnId: "t-1" }])
+    expect(over.state.capReached).toBeGreaterThanOrEqual(1)
+    expect(CodexAgent.steerable(over.state.run)).toBe(false)
+    // Only once.
+    const later = CodexAgent.step(ctx, over.state, note("thread/tokenUsage/updated", { threadId, turnId: "t-1", tokenUsage: usage(3) }))
+    expect(later.commands).toEqual([])
+  })
+
+  it("a stall marks the running turn once; app-server dying then ends it Stalled", () => {
+    const state = running()
+    const stall = { idleMs: 5_000, inTool: true }
+    const marked = CodexAgent.markStalled(state, TurnId.make("t-1"), stall)
+    expect(marked.marked).toBe(true)
+    expect(CodexAgent.markStalled(marked.state, TurnId.make("t-1"), stall).marked).toBe(false)
+    expect(CodexAgent.markStalled(state, TurnId.make("other"), stall).marked).toBe(false)
+    const dead = new ProcessKilled({ message: "gone", signal: "SIGKILL", exitCode: null })
+    const exited = CodexAgent.stepExit(marked.state, dead, { exitCode: null, signal: "SIGKILL" }, undefined)
+    expect(exited.events).toMatchObject([{ _tag: "TurnEnded", outcome: { _tag: "Stalled", inTool: true } }])
+  })
+
+  it("a failed turn/start frees the run only if it is still that run", () => {
+    const claimed = CodexAgent.startRun(CodexAgent.initialState, messageId)
+    const seq = claimed.run!.seq
+    expect(CodexAgent.runFailed(claimed, seq).run).toBeNull()
+    expect(CodexAgent.runFailed(claimed, seq + 1).run).not.toBeNull()
   })
 })

@@ -197,6 +197,10 @@ export type ThreadItem =
   | { readonly type: "contextCompaction"; readonly id: string }
   | { readonly type: string & {}; readonly id: string; readonly [key: string]: unknown }
 
+/** A `ThreadItem` of a type named above (the open variant keeps `item.type === ...` from narrowing). */
+export const isItem = <T extends ThreadItem["type"]>(item: ThreadItem, type: T): item is Extract<ThreadItem, { readonly type: T }> =>
+  item.type === type
+
 export interface TokenUsageBreakdown {
   readonly totalTokens: number
   readonly inputTokens: number

@@ -7,7 +7,7 @@
  *
  * @since 0.1.0
  */
-import { Clock, Duration, Effect, Queue, type Scope, Stream } from "effect"
+import { Clock, Duration, Effect, Option, Queue, Schedule, type Scope, Stream } from "effect"
 import type { AgentEvent } from "./AgentEvent.ts"
 import type { TurnId } from "./Domain.ts"
 
@@ -97,7 +97,48 @@ export const make = (options: Options): Effect.Effect<Watchdog, never, Scope.Sco
       return Queue.offer(expired, { turnId: state.turn, idleMs: quietMs, inTool })
     })
 
-    yield* Effect.sleep(Duration.millis(checkMs)).pipe(Effect.andThen(check), Effect.forever, Effect.forkScoped)
+    yield* check.pipe(Effect.repeat(Schedule.spaced(Duration.millis(checkMs))), Effect.forkScoped)
 
     return { observe, expirations: Stream.fromQueue(expired) }
   })
+
+/**
+ * How a provider stops a stalled turn, for `supervise`.
+ *
+ * @since 0.2.0
+ * @category models
+ */
+export interface Supervisor {
+  /** How long an interrupted turn has to end before the agent process is killed. */
+  readonly grace: Duration.Input
+  /** Mark the turn as stalled (so it ends `Stalled`). False if it is no longer running: nothing to do. */
+  readonly stall: (expiry: Expiry) => Effect.Effect<boolean>
+  readonly interrupt: (expiry: Expiry) => Effect.Effect<unknown, unknown>
+  /** Waits for the turn to end (failing counts: the session ended). */
+  readonly turnEnded: (turnId: TurnId) => Effect.Effect<unknown, unknown>
+  /** Kill the agent process, which ends the turn (and the session). */
+  readonly kill: Effect.Effect<void>
+}
+
+/**
+ * The stall policy every provider follows, until the Scope closes: a turn
+ * that goes quiet is interrupted; if it hasn't ended `grace` later, the agent
+ * process is killed. The interrupt runs on its own, so one that hangs (the
+ * process is wedged) can't hold up the kill.
+ *
+ * @since 0.2.0
+ * @category constructors
+ */
+export const supervise = (watchdog: Watchdog, supervisor: Supervisor): Effect.Effect<void, never, Scope.Scope> =>
+  watchdog.expirations.pipe(
+    Stream.runForEach((expiry) =>
+      Effect.gen(function* () {
+        if (!(yield* supervisor.stall(expiry))) return
+        yield* supervisor.interrupt(expiry).pipe(Effect.ignore, Effect.forkScoped)
+        const ended = yield* supervisor.turnEnded(expiry.turnId).pipe(Effect.exit, Effect.timeoutOption(supervisor.grace))
+        if (Option.isNone(ended)) yield* supervisor.kill
+      }),
+    ),
+    Effect.forkScoped,
+    Effect.asVoid,
+  )
