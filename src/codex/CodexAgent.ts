@@ -662,6 +662,8 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
   let state = initialState
   /** Messages waiting for the running turn to end. */
   const queue: Array<Queued> = []
+  /** Messages whose turn/start was sent, by run, until their start is settled. */
+  const claimed = new Map<number, Queued>()
   /** `end` was called: no new messages. */
   let ending = false
   /** The connection was closed (by `end`, or the scope). */
@@ -709,10 +711,30 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
       return null
     }
     state = startRun(state, q.messageId)
-    return { q, seq: state.nextSeq - 1 }
+    const seq = state.nextSeq - 1
+    claimed.set(seq, q)
+    return { q, seq }
   }
 
-  /** `turn/start` for a claimed message; on failure, the next one goes. Runs in the session's scope, not the caller's. */
+  /**
+   * Settle the start of run `seq`'s message, from whichever comes first: the
+   * `turn/start` answer, or app-server announcing the turn. False if it was
+   * already settled.
+   */
+  const settleStart = (seq: number, exit: Exit.Exit<TurnId, AgentError | SessionClosed | TurnFailure>): boolean => {
+    const q = claimed.get(seq)
+    if (q === undefined) return false
+    claimed.delete(seq)
+    Deferred.doneUnsafe(q.started, exit)
+    return true
+  }
+
+  /** Every message still waiting to start (queued, or with its turn/start in flight) fails with `error`. */
+  const failWaiting = (error: AgentError | SessionClosed | TurnFailure) => {
+    for (const q of queue.splice(0)) Deferred.doneUnsafe(q.started, Exit.fail(error))
+    for (const seq of [...claimed.keys()]) settleStart(seq, Exit.fail(error))
+  }
+
   /**
    * `turn/start` for a claimed message. Runs in the session's scope, not the caller's.
    *
@@ -738,18 +760,14 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
             if (Exit.isSuccess(exit) && Option.isSome(exit.value)) {
               const turnId = exit.value.value.turn.id
               state = runStarted(state, seq, turnId)
-              Deferred.doneUnsafe(q.started, Exit.succeed(TurnId.make(turnId)))
+              settleStart(seq, Exit.succeed(TurnId.make(turnId)))
               return Effect.void
             }
-            const failed = runFailed(state, seq)
-            state = failed.state
-            // The answer was lost, but the turn is running: it ends as any turn does.
-            if (failed.running !== null) {
-              Deferred.doneUnsafe(q.started, Exit.succeed(failed.running))
-              return Effect.void
-            }
+            // `turn/started` already settled it: the turn ran (or runs), whatever this answer is.
+            if (!claimed.has(seq)) return Effect.void
+            state = runFailed(state, seq).state
             if (Exit.isFailure(exit)) {
-              Deferred.doneUnsafe(q.started, Exit.fail(causeError("turn/start failed", exit.cause)))
+              settleStart(seq, Exit.fail(causeError("turn/start failed", exit.cause)))
               return startNext
             }
             stuck = true
@@ -757,7 +775,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
             const error = agentError(
               `turn/start: no answer within ${Duration.format(Session.requestTimeout)}; stopping codex app-server`,
             )
-            Deferred.doneUnsafe(q.started, Exit.fail(error))
+            settleStart(seq, Exit.fail(error))
             return Effect.andThen(Effect.logError(error.message), conn.kill)
           }),
         ),
@@ -816,6 +834,9 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
       const result = step({ threadId, nowMs, mapState, cap }, state, msg)
       state = result.state
       yield* runtime.emitAll(result.events)
+      // app-server announced the turn: its message has started, answer or not.
+      const run = state.run
+      if (run !== null && run.announced && run.turnId !== null) settleStart(run.seq, Exit.succeed(run.turnId))
       for (const c of result.commands) yield* command(c)
     })
 
@@ -831,7 +852,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
     const ended = stepExit(state, dead, exit, price)
     state = ended.state
     yield* runtime.emitAll(ended.events)
-    for (const q of queue.splice(0)) Deferred.doneUnsafe(q.started, Exit.fail(dead))
+    failWaiting(dead)
     notify()
     yield* runtime.end(agentError(dead.message))
   })
@@ -842,7 +863,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
       if (runtime.ended() !== null) return Effect.void
       closed = true
       const error = sessionClosed("session closed")
-      for (const q of queue.splice(0)) Deferred.doneUnsafe(q.started, Exit.fail(error))
+      failWaiting(error)
       notify()
       return runtime.end(null, error)
     }),

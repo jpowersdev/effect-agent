@@ -130,11 +130,14 @@ export const kill = (
     const inGroup = new Set(options.pid !== undefined ? before.filter((p) => processGroupOf(p) === options.pid) : [])
     const groupAlive = group !== undefined && signal(group, "SIGTERM")
     if (!terminateNew(inGroup) && !groupAlive) return
-    // Until all are gone. Whenever the known ones have, sweep again for any they started
-    // (with the marker) while stopping: the group may still be alive because of one.
+    // Until all are gone, sweeping /proc again for any they start (with the marker) while
+    // stopping: every fourth check while some are alive (a sweep reads every process's
+    // environ), and every time the known ones have gone (the group may live on through one).
+    let checks = 0
     const done = yield* Effect.sync(() => {
-      if (signalAll(known, 0)) return false
-      if (terminateNew()) return false
+      const knownAlive = signalAll(known, 0)
+      const swept = (!knownAlive || ++checks % 4 === 0) && terminateNew()
+      if (knownAlive || swept) return false
       return !(group !== undefined && signal(group, 0))
     }).pipe(
       Effect.repeat({ schedule: Schedule.spaced("50 millis"), until: (gone) => gone }),

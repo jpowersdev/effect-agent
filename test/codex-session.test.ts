@@ -6,7 +6,7 @@
  * answered.
  */
 import { describe, expect, it } from "@effect/vitest"
-import { Deferred, Effect, Exit, Fiber, Layer, Option, Queue } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Option, Queue, Scope } from "effect"
 import { TestClock } from "effect/testing"
 import { Agent, type AgentSession, SessionClosed } from "../src/index.ts"
 import { CodexAgent, CodexAppServer } from "../src/codex/index.ts"
@@ -152,6 +152,44 @@ describe("CodexAgent session races", () => {
       expect(yield* session.interrupt.pipe(Effect.flip)).toBeInstanceOf(SessionClosed)
       expect(yield* session.end.pipe(Effect.flip)).toMatchObject({ _tag: "AgentError", message: expect.stringMatching(/stopped answering/) })
       yield* server.releaseStop
+    }).pipe(Effect.scoped),
+  )
+
+  it.effect("a turn/start whose turn already ran doesn't time out the session later", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted()
+      const session = yield* open(server)
+      const first = yield* session.turn("first").pipe(Effect.exit, Effect.forkScoped)
+      const start = yield* server.next("turn/start")
+      // Its answer never comes, but the turn runs and ends.
+      yield* server.started("t-1")
+      yield* server.landed("t-1", start.params.clientUserMessageId as string)
+      yield* server.completed("t-1")
+      const done = yield* Fiber.join(first)
+      expect(Exit.isSuccess(done) && done.value).toMatchObject({ _tag: "Succeeded", turnId: "t-1" })
+      const second = yield* startTurn(server, session, "second", "t-2")
+      // The first request's timeout passes while the second turn runs: nothing happens.
+      yield* TestClock.adjust("61 seconds")
+      expect(server.stops()).toBe(0)
+      yield* server.completed("t-2")
+      const outcome = yield* Fiber.join(second.turn)
+      expect(Exit.isSuccess(outcome) && outcome.value).toMatchObject({ _tag: "Succeeded", turnId: "t-2" })
+    }).pipe(Effect.scoped),
+  )
+
+  it.effect("closing the session releases a turn() whose turn/start is in flight", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted()
+      const sessionScope = yield* Scope.make()
+      const session = yield* open(server).pipe(Scope.provide(sessionScope))
+      // The caller outlives the session's scope.
+      const turn = yield* session.turn("hello").pipe(Effect.exit, Effect.forkScoped)
+      yield* server.next("turn/start")
+      yield* Scope.close(sessionScope, Exit.void)
+      const result = yield* Fiber.join(turn).pipe(Effect.timeoutOption("1 second"), Effect.forkChild)
+      yield* TestClock.adjust("2 seconds")
+      const exit = yield* Fiber.join(result)
+      expect(Option.isSome(exit) && Exit.isFailure(exit.value) && Option.getOrUndefined(Exit.findErrorOption(exit.value))).toBeInstanceOf(SessionClosed)
     }).pipe(Effect.scoped),
   )
 

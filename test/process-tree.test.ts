@@ -111,6 +111,46 @@ describe.skipIf(process.platform !== "linux")("ProcessTree.kill", () => {
     }),
   )
 
+  it.live("a process started while its parent is still stopping gets a SIGTERM too", () =>
+    Effect.gen(function* () {
+      const marker = ProcessTree.newMarker()
+      const log = join(mkdtempSync(join(tmpdir(), "ea-pt-")), "terms")
+      const child = `
+        process.on("SIGTERM", () => {
+          require("node:fs").appendFileSync(${JSON.stringify(log)}, "child\\n")
+          process.exit(0)
+        })
+        setInterval(() => {}, 1000)
+        process.send("ready")
+      `
+      // On SIGTERM, the parent starts a cleanup child a little later and waits for it to exit.
+      const script = `
+        process.on("SIGTERM", () => setTimeout(() => {
+          const c = require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(child)}], { stdio: ["ignore", "ignore", "ignore", "ipc"], detached: true })
+          c.once("exit", (_code, signal) => {
+            require("node:fs").appendFileSync(${JSON.stringify(log)}, "exit:" + signal + "\\n")
+            process.exit(0)
+          })
+        }, 150))
+        setInterval(() => {}, 1000)
+        process.send?.("ready")
+      `
+      const parent = spawn(process.execPath, ["-e", script], {
+        env: { ...process.env, [ProcessTree.markerVariable]: marker },
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+      })
+      yield* Effect.callback<void>((resume) => {
+        parent.once("message", () => resume(Effect.void))
+      })
+      const started = Date.now()
+      yield* ProcessTree.kill(marker, { grace: "3 seconds" })
+      expect(Date.now() - started).toBeLessThan(2_000)
+      // A SIGTERM of its own: handled, or (while it was still starting) its default action.
+      expect(readFileSync(log, "utf8")).toMatch(/^(child\n)?exit:(null|SIGTERM)\n$/)
+      expect(ProcessTree.markedProcesses(marker)).toEqual([])
+    }),
+  )
+
   it.live("is a no-op when nothing carries the marker", () =>
     Effect.gen(function* () {
       yield* ProcessTree.kill(ProcessTree.newMarker())
