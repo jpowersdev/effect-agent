@@ -24,7 +24,8 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AgentError, type AgentEvent, type MessageId, SessionId, SessionNotFound, TurnId } from "../src/index.ts"
-import { AgentHosts, Host, HostSpec, RemoteAgent, type SeqEvent } from "../src/host/index.ts"
+import { AgentHosts, HostSpec, RemoteAgent, type SeqEvent } from "../src/host/index.ts"
+import * as Host from "../src/host/Host.ts"
 import { host } from "./support/hostCommand.ts"
 
 const root = mkdtempSync(join(tmpdir(), "ea-hostd-"))

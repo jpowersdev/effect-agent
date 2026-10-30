@@ -8,21 +8,13 @@
  *
  * @since 0.1.0
  */
-import { Duration, Layer, Schema } from "effect"
-import type { ChildProcessSpawner } from "effect/process"
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, statSync } from "node:fs"
+import { Duration, Schema } from "effect"
+import { chmodSync, mkdirSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Agent, RunSettings } from "../Agent.ts"
+import { RunSettings } from "../Agent.ts"
 import { AgentError, SessionNotFound } from "../AgentError.ts"
 import { DurationInput, EnvOverrides, SessionId } from "../Domain.ts"
-import * as ClaudeAgent from "../claude/ClaudeAgent.ts"
-import * as ClaudeReplay from "../claude/ClaudeReplay.ts"
-import * as ClaudeSdk from "../claude/ClaudeSdk.ts"
-import * as CodexAgent from "../codex/CodexAgent.ts"
-import * as CodexAppServer from "../codex/CodexAppServer.ts"
-import * as CodexReplay from "../codex/CodexReplay.ts"
-import type { JsonValue } from "../codex/protocol.ts"
 
 /**
  * A duration: `Duration` input text (`"30 seconds"`) or millis. Encoded as millis.
@@ -301,50 +293,3 @@ export type ReadyLine = typeof ReadyLine.Type
  * @internal
  */
 export const toDuration = (spec: DurationSpec): Duration.Duration => Duration.fromInputUnsafe(spec)
-
-const claudeOptions = (spec: ClaudeOptionsSpec = {}): ClaudeAgent.ClaudeAgentOptions => ({
-  ...(spec.settingSources !== undefined && { settingSources: spec.settingSources }),
-  ...(spec.pathToClaudeCodeExecutable !== undefined && { pathToClaudeCodeExecutable: spec.pathToClaudeCodeExecutable }),
-  ...(spec.model !== undefined && { model: spec.model }),
-  ...(spec.checkResume !== undefined && { checkResume: spec.checkResume }),
-  ...(spec.env !== undefined && { env: spec.env }),
-  ...(spec.stallGrace !== undefined && { stallGrace: toDuration(spec.stallGrace) }),
-})
-
-/**
- * The real (or replayed) provider `Agent` layer for a spec, with no
- * `Launcher`. Codex spawns its app-server through the platform's
- * `ChildProcessSpawner` (`NodeServices.layer`, `BunServices.layer`).
- *
- * @internal
- */
-export const providerLayer = (spec: ProviderSpec): Layer.Layer<Agent, never, ChildProcessSpawner.ChildProcessSpawner> => {
-  const replay = spec.replay
-  if (spec.provider === "claude") {
-    const sdk =
-      replay !== undefined
-        ? ClaudeReplay.layerFile(replay, {
-            ...(spec.replayKnownSessions !== undefined && { knownSessions: spec.replayKnownSessions }),
-            ...(spec.replayHookLog !== undefined && {
-              onHook: (call: ClaudeReplay.ReplayedHook) => appendFileSync(spec.replayHookLog!, `${JSON.stringify(call)}\n`),
-            }),
-          })
-        : ClaudeSdk.layer()
-    return ClaudeAgent.layer(claudeOptions(spec.claude)).pipe(Layer.provide(sdk))
-  }
-  const codex = spec.codex ?? {}
-  const server =
-    replay !== undefined
-      ? Layer.suspend(() => CodexReplay.layer(readFileSync(replay, "utf8")))
-      : CodexAppServer.layer({
-          ...(codex.codexPath !== undefined && { codexPath: codex.codexPath }),
-          ...(codex.args !== undefined && { args: codex.args }),
-          ...(codex.forceKillAfter !== undefined && { forceKillAfter: toDuration(codex.forceKillAfter) }),
-        })
-  return CodexAgent.layer({
-    ...(codex.pricing !== undefined && { pricing: codex.pricing }),
-    // Decoded from the JSON spec, so the values are JSON.
-    ...(codex.config !== undefined && { config: codex.config as Readonly<Record<string, JsonValue>> }),
-    ...(codex.stallGrace !== undefined && { stallGrace: toDuration(codex.stallGrace) }),
-  }).pipe(Layer.provide(server))
-}

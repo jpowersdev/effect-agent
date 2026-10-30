@@ -68,11 +68,11 @@ import {
   HostSpec,
   type Manifest,
   manifestPath,
-  providerLayer,
   type ProviderSpec,
   ReadyLine,
   socketPath,
 } from "./HostSpec.ts"
+import { providerLayer } from "./providers.ts"
 import { type EventsTrimmed, type HookName, type HookRequest, type HostInfo, HostRpcs, type SeqEvent } from "./protocol.ts"
 
 /**

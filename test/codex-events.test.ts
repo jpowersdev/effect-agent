@@ -1,7 +1,8 @@
 import { describe, expect, it } from "@effect/vitest"
 import { DateTime, Option, Schema } from "effect"
 import { AccountStatus, AgentEvent, MessageId, ProcessKilled, TurnId } from "../src/index.ts"
-import { CodexAgent, CodexAppServer, CodexEvents } from "../src/codex/index.ts"
+import { CodexAgent, CodexAppServer } from "../src/codex/index.ts"
+import * as CodexEvents from "../src/codex/CodexEvents.ts"
 import type * as P from "../src/codex/protocol.ts"
 
 const turn = (status: P.TurnStatus, error: P.TurnError | null = null): P.Turn => ({ id: "t-1", items: [], status, error })

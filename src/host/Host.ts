@@ -34,11 +34,11 @@ import {
   type HostSpec,
   Manifest,
   manifestPath,
-  providerLayer,
   type ReadyLine,
   socketPath,
   toDuration,
 } from "./HostSpec.ts"
+import { providerLayer } from "./providers.ts"
 import { EventsTrimmed, HostRpcs, type SeqEvent } from "./protocol.ts"
 
 /**
