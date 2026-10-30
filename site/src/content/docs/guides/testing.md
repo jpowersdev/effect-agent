@@ -12,7 +12,7 @@ ClaudeAgent.layer().pipe(Layer.provide(ClaudeReplay.layerFile("session.jsonl")))
 CodexAgent.layer().pipe(Layer.provide(CodexReplay.layer(recordingText)))
 ```
 
-Record with the transports' `record` option. Claude recordings also capture SDK hook calls (the event, the CLI's input, what the hooks returned, and where in the frame stream they came). `ClaudeReplay` calls the session's own hooks at those points and reports what they answered to `onHook`. `test/conformance.test.ts` runs the same programs against both providers.
+Record with the transports' `record` option. A Codex connection truncates the file and records until it closes; one that starts while another is recording (a `status` call during a session, say) isn't recorded. Claude recordings also capture SDK hook calls (the event, the CLI's input, what the hooks returned, and where in the frame stream they came). `ClaudeReplay` calls the session's own hooks at those points and reports what they answered to `onHook`. `test/conformance.test.ts` runs the same programs against both providers.
 
 ```sh
 pnpm typecheck && pnpm test

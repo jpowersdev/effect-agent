@@ -15,4 +15,4 @@ sidebar:
 - `subscribe` / `events`: the normalized event stream; every subscription starts with `SessionStarted`.
 - `sessionId`, `location` (the transcript file), `pid`.
 
-`RunOptions` covers `cwd`, `env` (`undefined` removes a variable; nesting markers such as `CLAUDECODE` are always removed), `model`, `effort`, `appendSystemPrompt` (added to the default, never replacing it), `disable`, `spendCapUsd`, `resume`, `watchdog` and `hooks`. Permissions are always off, and MCP servers are never inherited (no user servers, claude.ai connectors or ChatGPT apps).
+`RunOptions` covers `cwd`, `env` (`undefined` removes a variable; nesting markers such as `CLAUDECODE` are always removed), `model`, `effort`, `appendSystemPrompt` (added to the default, never replacing it), `disable`, `spendCapUsd`, `resume`, `watchdog` and `hooks`. Permissions are always off, and MCP servers are never inherited (no user servers, claude.ai connectors or ChatGPT apps). `RunSettings` is `RunOptions` without `hooks` as a Schema, for storing options or sending them to another process (durations encode as millis); `settingsOf` drops the hooks.

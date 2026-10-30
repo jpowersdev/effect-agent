@@ -133,6 +133,7 @@ const local: Readonly<Record<string, string>> = {
   isResponse: "JSON-RPC framing",
   isServerRequest: "JSON-RPC framing",
   isNotification: "JSON-RPC framing",
+  isItem: "a type guard over ThreadItem; the ThreadItem tags themselves are checked",
   METHOD_NOT_FOUND: "JSON-RPC error code",
   INVALID_REQUEST: "JSON-RPC error code (its messages are covered by the steer-stale fixture)",
   UserInput: "alias of TextInput",
