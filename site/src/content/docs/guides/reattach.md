@@ -151,7 +151,7 @@ RemoteAgent.layer({
   host: { command, args },
   dir: "/run/user/1000/effect-agent", // default: $XDG_RUNTIME_DIR/effect-agent
   maxEvents: 50_000, // events kept in memory; older ones are read from the file
-  persistEvents: true, // false: no events file, and no catching up past maxEvents
+  persistEvents: true, // false: no events file, no catching up past maxEvents, and no awaitTurn past the last 10 000 turns
   retainEvents: "24 hours", // how long the events file outlives the host
   orphanTimeout: "30 minutes",
   hookTimeout: "5 seconds",

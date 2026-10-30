@@ -23,7 +23,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { AgentError, type AgentEvent, ConnectionLost, type MessageId, SessionId, SessionNotFound, TurnId } from "../src/index.ts"
+import { AgentError, type AgentEvent, ConnectionLost, MessageId, SessionId, SessionNotFound, TurnId } from "../src/index.ts"
 import { AgentHosts, HostSpec, RemoteAgent, type SeqEvent } from "../src/host/index.ts"
 import * as Host from "../src/host/Host.ts"
 import { host } from "./support/hostCommand.ts"
@@ -550,7 +550,24 @@ describe("host events file: resumed sessions", () => {
     raw: null,
   })
 
-  it.live("AwaitTurn on a turn too old to remember fails at once instead of waiting", () =>
+  it.live("AwaitTurn and AwaitMessage answer for turns past the 10 000 kept in memory, from the events file", () =>
+    Effect.gen(function* () {
+      const path = HostSpec.eventsPath(root, "long-session")
+      const log = yield* Host.makeLog(2, "test", { path, resumed: false })
+      yield* log.append(started(false))
+      for (let i = 0; i <= 10_000; i++) {
+        log.sent(`m${i}`)
+        yield* log.append({ _tag: "MessageLanded", messageId: MessageId.make(`m${i}`), turnId: TurnId.make(`t${i}`), raw: null })
+        for (const event of turn(`t${i}`)) yield* log.append(event)
+      }
+      expect(yield* log.awaitTurn("t0")).toMatchObject({ _tag: "Succeeded", finalText: "t0" })
+      expect(yield* log.awaitMessage("m0")).toMatchObject({ _tag: "Succeeded", finalText: "t0" })
+      expect(yield* log.awaitTurn("t10000")).toMatchObject({ _tag: "Succeeded", finalText: "t10000" })
+      log.closeFile()
+    }),
+  )
+
+  it.live("without an events file, AwaitTurn on a turn too old to remember fails at once instead of waiting", () =>
     Effect.gen(function* () {
       // In memory only, with a ring of 2: the host keeps 10 000 turn endings either way.
       const log = yield* Host.makeLog(2, "test")

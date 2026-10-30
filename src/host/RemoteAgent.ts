@@ -92,8 +92,9 @@ export interface RemoteAgentOptions extends ProviderSpec {
   readonly maxEvents?: number
   /**
    * Hosts append every event to `<dir>/<sessionId>.events.jsonl` (mode 0600),
-   * so `subscribeFrom` can serve any seq, and `AgentHosts.events` can read a
-   * session's log after its host has exited. Default true.
+   * so `subscribeFrom` can serve any seq, `awaitTurn` and `awaitMessage` any
+   * turn, and `AgentHosts.events` can read a session's log after its host has
+   * exited. Default true.
    */
   readonly persistEvents?: boolean
   /**
@@ -175,7 +176,12 @@ export interface RemoteSession extends AgentSession {
   /** The last event's sequence number (-1 before any). */
   readonly lastSeq: Effect.Effect<number, SessionError>
   readonly info: Effect.Effect<HostInfo, SessionError>
-  /** That turn's ending: at once if it already ended (even before a reattach), otherwise when it does. */
+  /**
+   * That turn's ending: at once if it already ended (even before a reattach),
+   * otherwise when it does. The host keeps the last 10 000 endings in memory
+   * and finds older ones in the events file; with `persistEvents: false`, an
+   * older one fails with `AgentError`.
+   */
   readonly awaitTurn: (turnId: TurnId) => Effect.Effect<TurnSucceeded, TurnFailure | SessionError>
   /**
    * The ending of the turn a message landed in, by the `MessageId` that `send`

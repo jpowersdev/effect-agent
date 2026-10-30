@@ -84,11 +84,23 @@ export const markedProcesses = (marker: string): Array<number> => {
   return found
 }
 
+/** A process's group id (Linux, from /proc); undefined if it is gone or unknown. */
+const processGroupOf = (pid: number): number | undefined => {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "latin1")
+    // `pid (comm) state ppid pgrp ...`; comm may hold spaces and parentheses.
+    const pgrp = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2])
+    return Number.isInteger(pgrp) ? pgrp : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * SIGTERM the process group of `pid` (when given) and every process carrying
- * `marker`, then SIGKILL whatever is left after `grace`. Processes they start
- * while stopping (carrying the marker) are found and stopped too. A no-op once
- * they are all gone.
+ * `marker` (each process gets one SIGTERM), then SIGKILL whatever is left
+ * after `grace`. Processes they start while stopping (carrying the marker)
+ * are found and stopped too. A no-op once they are all gone.
  *
  * @since 0.1.0
  * @category utils
@@ -99,33 +111,37 @@ export const kill = (
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
     const group = options.pid !== undefined ? -options.pid : undefined
-    /** Marked processes signalled so far. /proc is swept only when they have all gone. */
-    const known = new Set(markedProcesses(marker))
-    const send = (sig: NodeJS.Signals | 0) => {
-      let alive = group !== undefined ? signal(group, sig) : false
-      for (const p of known) alive = signal(p, sig) || alive
+    /** Marked processes found so far; each is sent SIGTERM once, when found. */
+    const known = new Set<number>()
+    const signalAll = (pids: Iterable<number>, sig: NodeJS.Signals | 0) => {
+      let alive = false
+      for (const p of pids) alive = signal(p, sig) || alive
       return alive
     }
-    /** Look again: a process may have started more (with the marker) while it was stopping. */
-    const sweep = () => {
+    /**
+     * Sweep /proc for marked processes not seen yet, and SIGTERM those the
+     * group signal didn't reach. Whether any is alive.
+     */
+    const terminateNew = () => {
       const found = markedProcesses(marker).filter((p) => !known.has(p))
       for (const p of found) known.add(p)
-      return found.length > 0
+      const inGroup = (p: number) => options.pid !== undefined && processGroupOf(p) === options.pid
+      return signalAll(found.filter((p) => !inGroup(p)), "SIGTERM") || found.some(isAlive)
     }
-    if (!send("SIGTERM") && !sweep()) return
-    send("SIGTERM")
+    const groupAlive = group !== undefined && signal(group, "SIGTERM")
+    if (!terminateNew() && !groupAlive) return
+    // Until all are gone; then sweep again, for any they started (with the marker) while stopping.
     const done = yield* Effect.sync(() => {
-      if (send(0)) return false
-      if (!sweep()) return true
-      send("SIGTERM")
-      return false
+      if ((group !== undefined && signal(group, 0)) || signalAll(known, 0)) return false
+      return !terminateNew()
     }).pipe(
       Effect.repeat({ schedule: Schedule.spaced("50 millis"), until: (gone) => gone }),
       Effect.timeoutOption(options.grace ?? Duration.seconds(3)),
     )
     if (done._tag === "Some") return
-    sweep()
-    send("SIGKILL")
+    for (const p of markedProcesses(marker)) known.add(p)
+    if (group !== undefined) signal(group, "SIGKILL")
+    signalAll(known, "SIGKILL")
   })
 
 /**

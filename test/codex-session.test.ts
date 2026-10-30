@@ -6,7 +6,7 @@
  * answered.
  */
 import { describe, expect, it } from "@effect/vitest"
-import { Effect, Exit, Fiber, Layer, Option, Queue } from "effect"
+import { Deferred, Effect, Exit, Fiber, Layer, Option, Queue } from "effect"
 import { TestClock } from "effect/testing"
 import { Agent, type AgentSession, SessionClosed } from "../src/index.ts"
 import { CodexAgent, CodexAppServer } from "../src/codex/index.ts"
@@ -37,16 +37,26 @@ const scripted = Effect.gen(function* () {
       : Effect.void
   core = yield* CodexAppServer.makeRpcCore(write)
   const rpc = core
-  const stop = Effect.andThen(rpc.failPending("closed"), rpc.endIncoming)
+  /** How many times the session stopped app-server (`close` or `kill`). */
+  let stops = 0
+  const stop = (signal: string) =>
+    Effect.suspend(() => {
+      stops++
+      return rpc.failPending("closed").pipe(
+        Effect.andThen(rpc.endIncoming),
+        Effect.andThen(Deferred.succeed(rpc.exitSignal, { exitCode: null, signal })),
+        Effect.asVoid,
+      )
+    })
   const connection: CodexAppServer.Connection = {
     pid: null,
     initialize: { userAgent: "effect_agent/0.162.1 (test)" },
     request: rpc.request,
     incoming: rpc.incomingStream,
-    exit: Effect.never,
-    exited: Effect.succeedNone,
-    close: stop,
-    kill: stop,
+    exit: Deferred.await(rpc.exitSignal),
+    exited: Effect.map(Deferred.isDone(rpc.exitSignal), (done) => (done ? Option.some({ exitCode: null, signal: "SIGTERM" }) : Option.none())),
+    close: stop("SIGTERM"),
+    kill: stop("SIGKILL"),
   }
 
   /** The next request the client sent; it must be `method`. */
@@ -72,7 +82,7 @@ const scripted = Effect.gen(function* () {
       Layer.succeed(CodexAppServer.CodexAppServer, CodexAppServer.CodexAppServer.of({ connect: () => Effect.succeed(connection), version: Effect.succeed("0.162.1") })),
     ),
   )
-  return { next, idle, notify, started, completed, landed, layer }
+  return { next, idle, notify, started, completed, landed, layer, stops: () => stops }
 })
 
 type Server = Effect.Success<typeof scripted>
@@ -99,24 +109,43 @@ const startTurn = (server: Server, session: AgentSession, input: string, turnId:
   })
 
 describe("CodexAgent session races", () => {
-  it.effect("a turn/start that doesn't answer blocks neither send nor interrupt, and times out", () =>
+  it.effect("a turn/start that never answers blocks neither send nor interrupt; then app-server is stopped", () =>
     Effect.gen(function* () {
       const server = yield* scripted
       const session = yield* open(server)
       const first = yield* session.send("first").pipe(Effect.exit, Effect.forkScoped)
-      const stuck = yield* server.next("turn/start")
+      yield* server.next("turn/start")
       // Nothing holds a lock across that request: these return at once.
-      const queued = yield* session.send("second")
+      const second = yield* session.turn("second").pipe(Effect.exit, Effect.forkScoped)
+      yield* Effect.yieldNow
       yield* session.interrupt
-      expect(queued).toBeTypeOf("string")
       expect(yield* server.idle).toBe(true)
-      // After the request timeout the first message fails, and the queued one goes.
+      // No answer, and no turn/started: whether that turn will run can't be known, so
+      // rather than start "second" alongside it, the session stops app-server.
       yield* TestClock.adjust("61 seconds")
       const failed = yield* Fiber.join(first)
-      expect(Exit.isFailure(failed) && failed.cause.toString()).toMatch(/turn\/start.*no answer/)
-      const nextStart = yield* server.next("turn/start")
-      expect(nextStart.params.clientUserMessageId).toBe(queued)
-      expect(stuck.method).toBe("turn/start")
+      expect(Exit.isFailure(failed) && failed.cause.toString()).toMatch(/turn\/start: no answer.*stopping codex app-server/)
+      expect(Exit.isFailure(yield* Fiber.join(second))).toBe(true)
+      expect(server.stops()).toBe(1)
+      expect(yield* server.idle).toBe(true)
+      expect(yield* session.send("third").pipe(Effect.flip)).toBeInstanceOf(SessionClosed)
+    }).pipe(Effect.scoped),
+  )
+
+  it.effect("a turn/start answered with an error lets the next message go", () =>
+    Effect.gen(function* () {
+      const server = yield* scripted
+      const session = yield* open(server)
+      const first = yield* session.send("first").pipe(Effect.exit, Effect.forkScoped)
+      const start = yield* server.next("turn/start")
+      const second = yield* session.send("second").pipe(Effect.forkScoped)
+      // "second" is queued behind "first".
+      yield* Effect.yieldNow
+      yield* start.fail(-32600, "nope")
+      expect(Exit.isFailure(yield* Fiber.join(first))).toBe(true)
+      const next = yield* server.next("turn/start")
+      yield* next.reply({ turn: { id: "t-2", items: [], status: "inProgress", error: null } } satisfies P.TurnStartResponse)
+      expect(next.params.clientUserMessageId).toBe(yield* Fiber.join(second))
     }).pipe(Effect.scoped),
   )
 

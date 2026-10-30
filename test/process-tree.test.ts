@@ -4,6 +4,9 @@
 import { describe, expect, it } from "@effect/vitest"
 import { Effect } from "effect"
 import { spawn } from "node:child_process"
+import { mkdtempSync, readFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { ProcessTree } from "../src/index.ts"
 
 /** A marked process that, on SIGTERM, starts a detached child (which inherits the marker) and exits. */
@@ -34,6 +37,33 @@ describe.skipIf(process.platform !== "linux")("ProcessTree.kill", () => {
       yield* ProcessTree.kill(marker, { grace: "3 seconds" })
       expect(ProcessTree.isAlive(pid)).toBe(false)
       expect(ProcessTree.markedProcesses(marker)).toEqual([])
+    }),
+  )
+
+  it.live("sends each process one SIGTERM", () =>
+    Effect.gen(function* () {
+      const marker = ProcessTree.newMarker()
+      const log = join(mkdtempSync(join(tmpdir(), "ea-pt-")), "terms")
+      // Counts its SIGTERMs, and takes a moment to exit, as a process cleaning up would.
+      const script = `
+        process.on("SIGTERM", () => {
+          require("node:fs").appendFileSync(${JSON.stringify(log)}, "term\\n")
+          setTimeout(() => process.exit(0), 200)
+        })
+        setInterval(() => {}, 1000)
+        process.send?.("ready")
+      `
+      const child = spawn(process.execPath, ["-e", script], {
+        env: { ...process.env, [ProcessTree.markerVariable]: marker },
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
+        detached: true,
+      })
+      yield* Effect.callback<void>((resume) => {
+        child.once("message", () => resume(Effect.void))
+      })
+      // Its own group too, as the providers pass it: still one SIGTERM.
+      yield* ProcessTree.kill(marker, { pid: child.pid!, grace: "3 seconds" })
+      expect(readFileSync(log, "utf8")).toBe("term\n")
     }),
   )
 

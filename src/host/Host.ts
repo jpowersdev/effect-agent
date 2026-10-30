@@ -269,9 +269,53 @@ export const makeLog = (
         }),
       )
 
+    /**
+     * The first event in the events file that `pick` takes: for a turn or
+     * message the tracker has forgotten (it keeps the last 10 000). None
+     * without a file, or if the file can't be read.
+     */
+    const fromFile = <A>(pick: (event: AgentEvent) => A | undefined): Effect.Effect<Option.Option<A>> =>
+      Effect.suspend(() =>
+        file === null
+          ? Effect.succeedNone
+          : EventFile.read(file.path, 0).pipe(
+              Stream.map((entry) => pick(entry.event)),
+              Stream.filter((found): found is A => found !== undefined),
+              Stream.runHead,
+              Effect.orElseSucceed(Option.none),
+            ),
+      )
+
+    /** A turn's ending: from memory, else (if it was forgotten) from the events file. */
+    const awaitTurn = (turnId: string): Effect.Effect<TurnOutcome, AgentError | SessionClosed> =>
+      Effect.suspend(() =>
+        turns.isForgotten(turnId)
+          ? fromFile((e) => (e._tag === "TurnEnded" && e.turnId === turnId ? e.outcome : undefined)).pipe(
+              Effect.flatMap(Option.match({ onNone: () => turns.outcome(turnId), onSome: Effect.succeed })),
+            )
+          : turns.outcome(turnId),
+      )
+
     /** The ending of the turn a message landed in, found by the `MessageId` that `send` returned. */
     const awaitMessage = (messageId: string): Effect.Effect<TurnOutcome, AgentError | SessionClosed> =>
-      Effect.flatMap(turns.landing(messageId), turns.outcome)
+      Effect.suspend(() => {
+        const landing = turns.isForgotten(messageId)
+          ? fromFile((e) =>
+              (e._tag === "MessageLanded" || e._tag === "MessageDropped") && e.messageId === messageId ? e : undefined,
+            ).pipe(
+              Effect.flatMap(
+                Option.match({
+                  onNone: () => turns.landing(messageId),
+                  onSome: (e) =>
+                    e._tag === "MessageLanded"
+                      ? Effect.succeed(e.turnId)
+                      : Effect.fail(new AgentError({ message: `message ${messageId} was ${e.reason} before it reached a turn`, provider })),
+                }),
+              ),
+            )
+          : turns.landing(messageId)
+        return Effect.flatMap(landing, awaitTurn)
+      })
 
     return {
       append,
@@ -285,7 +329,7 @@ export const makeLog = (
           // Best effort.
         }
       },
-      awaitTurn: turns.outcome,
+      awaitTurn,
       awaitMessage,
       lastSeq: () => next - 1,
       oldest,

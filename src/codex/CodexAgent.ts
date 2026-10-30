@@ -667,6 +667,8 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
   /** The connection was closed (by `end`, or the scope). */
   let closed = false
   let dead: ProcessKilled | null = null
+  /** app-server stopped answering `turn/start`: it is being stopped, and nothing more is sent. */
+  let stuck = false
   /** Completed (and replaced) whenever a turn ends or the queue empties; `end` waits on it. */
   let changed = Deferred.makeUnsafe<void>()
   const notify = () => {
@@ -683,14 +685,20 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
     })
 
   const unavailable = (): SessionClosed | null =>
-    dead !== null ? sessionClosed(`session is gone: ${dead.message}`) : closed || ending ? sessionClosed("session has ended") : null
+    dead !== null
+      ? sessionClosed(`session is gone: ${dead.message}`)
+      : stuck
+        ? sessionClosed("session is gone: codex app-server stopped answering")
+        : closed || ending
+          ? sessionClosed("session has ended")
+          : null
 
   /**
    * Take the next queued message as the running turn, if nothing is running.
    * Synchronous, so two callers can't both start one; `startTurn` sends it.
    */
   const claimNext = (): { readonly q: Queued; readonly seq: number } | null => {
-    if (state.run !== null || dead !== null || closed) return null
+    if (state.run !== null || dead !== null || closed || stuck) return null
     if (state.capReached !== null) {
       const failure = capFailure(state.capReached)
       for (const q of queue.splice(0)) Deferred.doneUnsafe(q.started, Exit.fail(failure))
@@ -705,19 +713,34 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
   }
 
   /** `turn/start` for a claimed message; on failure, the next one goes. Runs in the session's scope, not the caller's. */
+  /**
+   * `turn/start` for a claimed message. Runs in the session's scope, not the caller's.
+   *
+   * An error answer means the turn didn't start: the next message goes. No
+   * answer at all leaves it unknown whether the turn will start, unless
+   * `turn/started` already said so; starting another message then could run
+   * two turns at once, so app-server, which has stopped answering, is stopped
+   * and the session ends.
+   */
   const startTurn = ({ q, seq }: { readonly q: Queued; readonly seq: number }): Effect.Effect<void> =>
-    timed(
-      "turn/start",
-      conn.request("turn/start", {
+    conn
+      .request("turn/start", {
         threadId,
         input: textInput(q.input),
         clientUserMessageId: q.messageId,
         ...(options.effort !== undefined ? { effort: codexEffort(options.effort) } : {}),
-      }),
-    ).pipe(
-      Effect.matchCauseEffect({
-        onFailure: (cause) =>
+      })
+      .pipe(
+        Effect.timeoutOption(Session.requestTimeout),
+        Effect.exit,
+        Effect.flatMap((exit) =>
           Effect.suspend(() => {
+            if (Exit.isSuccess(exit) && Option.isSome(exit.value)) {
+              const turnId = exit.value.value.turn.id
+              state = runStarted(state, seq, turnId)
+              Deferred.doneUnsafe(q.started, Exit.succeed(TurnId.make(turnId)))
+              return Effect.void
+            }
             const failed = runFailed(state, seq)
             state = failed.state
             // The answer was lost, but the turn is running: it ends as any turn does.
@@ -725,16 +748,19 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
               Deferred.doneUnsafe(q.started, Exit.succeed(failed.running))
               return Effect.void
             }
-            Deferred.doneUnsafe(q.started, Exit.fail(causeError("turn/start failed", cause)))
-            return startNext
+            if (Exit.isFailure(exit)) {
+              Deferred.doneUnsafe(q.started, Exit.fail(causeError("turn/start failed", exit.cause)))
+              return startNext
+            }
+            stuck = true
+            const error = agentError(
+              `turn/start: no answer within ${Duration.format(Session.requestTimeout)}; stopping codex app-server`,
+            )
+            Deferred.doneUnsafe(q.started, Exit.fail(error))
+            return Effect.andThen(Effect.logError(error.message), conn.kill)
           }),
-        onSuccess: (response) =>
-          Effect.sync(() => {
-            state = runStarted(state, seq, response.turn.id)
-            Deferred.doneUnsafe(q.started, Exit.succeed(TurnId.make(response.turn.id)))
-          }),
-      }),
-    )
+        ),
+      )
 
   const startNext: Effect.Effect<void> = Effect.suspend(() => {
     const claimed = claimNext()

@@ -33,6 +33,8 @@ export interface TurnTracker {
    * (else `SessionClosed`). Only the first call counts.
    */
   readonly end: (error: AgentError | SessionClosed | null) => void
+  /** Whether a turn or message settled and was then dropped to stay within the limit. */
+  readonly isForgotten: (id: string) => boolean
   readonly running: () => TurnId | null
   /** Nothing is running (after replaying an earlier host's events: that host is gone). */
   readonly clearRunning: () => void
@@ -177,6 +179,7 @@ export const make = (options: {
     landing,
     outcome,
     end,
+    isForgotten: (id) => forgotten.has(id),
     running: () => running,
     clearRunning: () => {
       running = null
