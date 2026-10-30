@@ -337,9 +337,9 @@ const killed: Scenario = Effect.gen(function* () {
   yield* Effect.sleep(Duration.millis(500))
   check(pgrep("sleep 60 && echo effect-agent-killed") === "", "command survived app-server")
   const after = yield* session.send("hello").pipe(Effect.flip)
-  check(after._tag === "AgentError", "later calls fail")
+  check(after._tag === "SessionClosed", `later calls fail SessionClosed (got ${after._tag})`)
   const f = failure as { signal: string | null; exitCode: number | null }
-  return `ProcessKilled signal=${f.signal} exitCode=${f.exitCode}; command gone; later send -> AgentError`
+  return `ProcessKilled signal=${f.signal} exitCode=${f.exitCode}; command gone; later send -> ${after._tag}`
 }).pipe(Effect.provide(agentLayer("killed")))
 
 const alive = (pid: number) => {
