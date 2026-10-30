@@ -12,8 +12,11 @@ Fixes:
 - A bug while reading Claude Code frames now ends the session with an error and stops the CLI. Before, it looked like a clean exit and left the CLI running.
 - A Claude stall whose interrupt hangs is still killed after the grace period.
 - A stalled Codex `turn/start` no longer blocks `send`, `steer` and `interrupt`; every app-server request has a timeout.
-- Claude hooks run with the session's context (logger, tracer).
-- Long sessions no longer keep every turn's bookkeeping.
+- Claude hooks run with the session's context (logger, tracer), not under the span of the `open` that started the session.
+- Long sessions no longer keep every turn's bookkeeping. A host still answers `awaitTurn` and `awaitMessage` for any turn, from its events file once a turn is older than the last 10 000 (with `persistEvents: false`, an older one fails at once).
+- The Codex session's shutdown is reliable: app-server dying, the watchdog's kill, an unanswered `turn/start`, closing the scope and concurrent `end` calls no longer leave a caller waiting forever, report a clean end after a failure, or start a turn alongside another.
+- `ProcessTree.kill` stops processes started while it is stopping their parents, and sends each process one SIGTERM.
+- A remote session that ended keeps failing with `SessionClosed` (and `end` keeps succeeding) after its host exits, instead of `ConnectionLost`.
 
 Changes:
 
