@@ -12,7 +12,7 @@
  * @since 0.1.0
  */
 import { Context, Effect, Option, Schema, Scope, Stream } from "effect"
-import type { AgentError, SessionNotFound, TurnFailure } from "./AgentError.ts"
+import type { AgentError, SessionError, SessionNotFound, TurnFailure } from "./AgentError.ts"
 import type { AgentEvent, TurnSucceeded } from "./AgentEvent.ts"
 import { DurationInput, EnvOverrides, LimitWindowStatus, MessageId, SessionId, TurnId } from "./Domain.ts"
 
@@ -271,7 +271,9 @@ export const SteerOutcome = Schema.Union([
 export type SteerOutcome = typeof SteerOutcome.Type
 
 /**
- * An open session, from `Agent.open`.
+ * An open session, from `Agent.open`. Calls fail with `SessionClosed` once
+ * the session has ended, with `ConnectionLost` when a remote session's host
+ * can't be reached, and with `AgentError` for anything else.
  *
  * @since 0.1.0
  * @category models
@@ -288,19 +290,23 @@ export interface AgentSession {
    * starting with the session's `SessionStarted` once it is known. Use this
    * (then fork the stream) when you must not miss events after a `send`.
    */
-  readonly subscribe: Effect.Effect<Stream.Stream<AgentEvent, AgentError>, never, Scope.Scope>
+  readonly subscribe: Effect.Effect<Stream.Stream<AgentEvent, SessionError>, never, Scope.Scope>
   /** `subscribe`, deferred until the stream runs. Events sent before it runs are missed. */
-  readonly events: Stream.Stream<AgentEvent, AgentError>
+  readonly events: Stream.Stream<AgentEvent, SessionError>
   /** Start a turn now if idle, otherwise after the running turn. */
-  readonly send: (input: Input) => Effect.Effect<MessageId, AgentError>
+  readonly send: (input: Input) => Effect.Effect<MessageId, SessionError>
   /** `send`, then wait for that message's turn to end. */
-  readonly turn: (input: Input) => Effect.Effect<TurnSucceeded, TurnFailure | AgentError>
+  readonly turn: (input: Input) => Effect.Effect<TurnSucceeded, TurnFailure | SessionError>
   /** Deliver into the running turn at its next tool boundary; starts a new turn if none is running. */
-  readonly steer: (input: Input) => Effect.Effect<SteerOutcome, AgentError>
+  readonly steer: (input: Input) => Effect.Effect<SteerOutcome, SessionError>
   /** Stop the running turn (it ends `Interrupted`); the session stays usable. */
-  readonly interrupt: Effect.Effect<void, AgentError>
-  /** No more input: let queued work finish, then end the session. */
-  readonly end: Effect.Effect<void, AgentError>
+  readonly interrupt: Effect.Effect<void, SessionError>
+  /**
+   * No more input: let queued work finish, then end the session. On a
+   * session that already ended, succeeds if it ended cleanly and fails with
+   * what ended it otherwise.
+   */
+  readonly end: Effect.Effect<void, SessionError>
 }
 
 /**

@@ -23,7 +23,7 @@ import { SocketServer } from "effect/socket"
 import type { Socket as NetSocket } from "node:net"
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { Agent, type AgentSession, type Hooks, type RunOptions } from "../Agent.ts"
-import { AgentError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
+import { AgentError, type SessionClosed, SessionNotFound, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnOutcome, TurnSucceeded } from "../AgentEvent.ts"
 import * as TurnTracker from "../internal/turnTracker.ts"
 import * as ProcessTree from "../ProcessTree.ts"
@@ -269,7 +269,7 @@ export const makeLog = (
       )
 
     /** The ending of the turn a message landed in, found by the `MessageId` that `send` returned. */
-    const awaitMessage = (messageId: string): Effect.Effect<TurnOutcome, AgentError> =>
+    const awaitMessage = (messageId: string): Effect.Effect<TurnOutcome, AgentError | SessionClosed> =>
       Effect.flatMap(turns.landing(messageId), turns.outcome)
 
     return {
@@ -417,7 +417,11 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
             log.end(
               Exit.isSuccess(exit)
                 ? null
-                : Option.getOrElse(Cause.findErrorOption(exit.cause), () => agentError(`event stream failed: ${describe(exit.cause)}`)),
+                : Option.match(Cause.findErrorOption(exit.cause), {
+                    onNone: () => agentError(`event stream failed: ${describe(exit.cause)}`),
+                    // A local session's stream fails only with how the session died.
+                    onSome: (e) => (e._tag === "AgentError" ? e : agentError(e.message, e)),
+                  }),
             ),
           ),
         ),

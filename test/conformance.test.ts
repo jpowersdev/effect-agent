@@ -307,14 +307,14 @@ for (const provider of [claude, codex, remote(claude), remote(codex)]) {
       }).pipe(Effect.provide(provider.layer("spendCap"))),
     )
 
-    it.live("process death ends the turn ProcessKilled and fails everything after", () =>
+    it.live("process death ends the turn ProcessKilled; later calls fail SessionClosed", () =>
       Effect.gen(function* () {
         const session = yield* (yield* Agent).open(base)
         const { events, fiber } = yield* collect(session)
         const failure = failureOf(yield* session.turn("sleep").pipe(Effect.exit))
         expect(failure?._tag).toBe("ProcessKilled")
-        expect(failureOf(yield* session.send("hello?").pipe(Effect.exit))?._tag).toBe("AgentError")
-        expect(failureOf(yield* session.interrupt.pipe(Effect.exit))?._tag).toBe("AgentError")
+        expect(failureOf(yield* session.send("hello?").pipe(Effect.exit))?._tag).toBe("SessionClosed")
+        expect(failureOf(yield* session.interrupt.pipe(Effect.exit))?._tag).toBe("SessionClosed")
         // Ending a session that died reports that it died.
         expect(failureOf(yield* session.end.pipe(Effect.exit))?._tag).toBe("AgentError")
         expect(failureOf(yield* Fiber.join(fiber))?._tag).toBe("AgentError")

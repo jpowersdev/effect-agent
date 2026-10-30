@@ -30,7 +30,7 @@ import {
   type RunOptions,
   type SteerOutcome,
 } from "../Agent.ts"
-import { AgentError, ProcessKilled, SessionNotFound, SpendCapReached, type TurnFailure } from "../AgentError.ts"
+import { AgentError, ProcessKilled, type SessionClosed, SessionNotFound, SpendCapReached, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnSucceeded } from "../AgentEvent.ts"
 import { MessageId, SessionId, type TokenUsage, TurnId } from "../Domain.ts"
 import * as Env from "../internal/env.ts"
@@ -190,6 +190,7 @@ export const isStaleSteerError = (e: CodexRpcError): boolean =>
 const textInput = (text: string): ReadonlyArray<P.UserInput> => [{ type: "text", text, text_elements: [] }]
 
 const agentError = Session.agentError(provider)
+const sessionClosed = Session.sessionClosed(provider)
 const timed = Session.timed(provider)
 
 const toAgentError = (what: string) => (e: CodexRpcError | AgentError) =>
@@ -570,11 +571,12 @@ export const stepExit = (
 interface Queued {
   readonly messageId: MessageId
   readonly input: string
-  readonly started: Deferred.Deferred<TurnId, AgentError | TurnFailure>
+  readonly started: Deferred.Deferred<TurnId, AgentError | SessionClosed | TurnFailure>
 }
 
 /** A message that never reached a turn, as `send` and `steer` report it. */
-const asAgentError = (e: AgentError | TurnFailure): AgentError => (e._tag === "AgentError" ? e : agentError(e.message, e))
+const asAgentError = (e: AgentError | SessionClosed | TurnFailure): AgentError | SessionClosed =>
+  e._tag === "AgentError" || e._tag === "SessionClosed" ? e : agentError(e.message, e)
 
 /** A failed request's cause as an `AgentError`. */
 const causeError = (what: string, cause: Cause.Cause<CodexRpcError | AgentError>): AgentError => {
@@ -670,8 +672,8 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
       estimated: true,
     })
 
-  const unavailable = (): AgentError | null =>
-    dead !== null ? agentError(`session is gone: ${dead.message}`) : closed || ending ? agentError("session has ended") : null
+  const unavailable = (): SessionClosed | null =>
+    dead !== null ? sessionClosed(`session is gone: ${dead.message}`) : closed || ending ? sessionClosed("session has ended") : null
 
   /**
    * Take the next queued message as the running turn, if nothing is running.
@@ -796,7 +798,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
     Effect.suspend(() => {
       if (runtime.ended() !== null) return Effect.void
       closed = true
-      const error = agentError("session closed")
+      const error = sessionClosed("session closed")
       for (const q of queue.splice(0)) Deferred.doneUnsafe(q.started, Exit.fail(error))
       notify()
       return runtime.end(null, error)
@@ -878,8 +880,8 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
   })
 
   const interrupt = Effect.gen(function* () {
-    if (dead !== null) return yield* agentError(`session is gone: ${dead.message}`)
-    if (closed) return yield* agentError("session has ended")
+    const error = closed || dead !== null ? unavailable() : null
+    if (error !== null) return yield* error
     const run = state.run
     if (run === null || run.turnId === null) return
     if (!run.interruptRequested) {

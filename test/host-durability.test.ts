@@ -23,7 +23,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { AgentError, type AgentEvent, type MessageId, SessionId, SessionNotFound, TurnId } from "../src/index.ts"
+import { AgentError, type AgentEvent, ConnectionLost, type MessageId, SessionId, SessionNotFound, TurnId } from "../src/index.ts"
 import { AgentHosts, HostSpec, RemoteAgent, type SeqEvent } from "../src/host/index.ts"
 import * as Host from "../src/host/Host.ts"
 import { host } from "./support/hostCommand.ts"
@@ -457,7 +457,7 @@ for (const p of providers) {
     )
 
     it.live(
-      "with the host killed, calls and subscriptions fail AgentError at once",
+      "with the host killed, calls and subscriptions fail ConnectionLost at once",
       () =>
         Effect.gen(function* () {
           const session = yield* (yield* AgentHosts).open({ cwd: p.cwd })
@@ -468,16 +468,16 @@ for (const p of providers) {
           yield* waitUntil(() => !isAlive(session.hostPid), "the host to die")
           const t0 = Date.now()
           const failure = failureOf(yield* session.send("hello?").pipe(Effect.exit))
-          expect(failure).toBeInstanceOf(AgentError)
+          expect(failure).toBeInstanceOf(ConnectionLost)
           expect(failure).toMatchObject({ message: expect.stringMatching(/gone/) })
-          expect(failureOf(yield* Fiber.join(all.fiber).pipe(Effect.flatten, Effect.exit))).toBeInstanceOf(AgentError)
+          expect(failureOf(yield* Fiber.join(all.fiber).pipe(Effect.flatten, Effect.exit))).toBeInstanceOf(ConnectionLost)
           expect(Date.now() - t0).toBeLessThan(2_000) // not the 30 s schedule
         }).pipe(Effect.scoped, Effect.provide(layer(p.simple, { onScopeClose: "detach" }))),
       timeout,
     )
 
     it.live(
-      "when the schedule runs out, calls fail AgentError",
+      "when the schedule runs out, calls fail ConnectionLost",
       () =>
         Effect.gen(function* () {
           const session = yield* (yield* AgentHosts).open({ cwd: p.cwd })
@@ -489,7 +489,7 @@ for (const p of providers) {
           yield* waitUntil(() => drops(dir, session.sessionId) === 1, "the host to drop the connection")
           const t0 = Date.now()
           const failure = failureOf(yield* session.info.pipe(Effect.exit))
-          expect(failure).toBeInstanceOf(AgentError)
+          expect(failure).toBeInstanceOf(ConnectionLost)
           expect(failure).toMatchObject({ message: expect.stringMatching(/could not reconnect/) })
           expect(Date.now() - t0).toBeLessThan(5_000)
           expect(isAlive(session.hostPid)).toBe(true)
@@ -517,8 +517,8 @@ for (const p of providers) {
           const all = yield* collect(session.subscribeFrom(0))
           yield* waitUntil(() => all.items.length > 0, "the first event")
           process.kill(session.hostPid, "SIGUSR2")
-          expect(failureOf(yield* Fiber.join(all.fiber).pipe(Effect.flatten, Effect.exit))).toBeInstanceOf(AgentError)
-          expect(failureOf(yield* session.info.pipe(Effect.exit))).toBeInstanceOf(AgentError)
+          expect(failureOf(yield* Fiber.join(all.fiber).pipe(Effect.flatten, Effect.exit))).toBeInstanceOf(ConnectionLost)
+          expect(failureOf(yield* session.info.pipe(Effect.exit))).toBeInstanceOf(ConnectionLost)
           expect(isAlive(session.hostPid)).toBe(true)
           process.kill(session.hostPid, "SIGTERM")
           yield* waitUntil(() => !isAlive(session.hostPid), "the host to exit")

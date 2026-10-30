@@ -15,4 +15,4 @@ A turn ends `Succeeded`, or fails with one of these `Schema` tagged errors (also
 
 `AgentFailed`, `UsageLimited { window, resetsAt, overageAvailable }`, `Throttled { retriesLeft }`, `AuthFailed`, `SpendCapReached`, `ContextExhausted`, `ProcessKilled { signal, exitCode }`, `Stalled { idleMs, inTool }`, `Interrupted`.
 
-`open` and `history` fail with `SessionNotFound` for an unknown session; infrastructure failures are `AgentError`.
+`open` and `history` fail with `SessionNotFound` for an unknown session; infrastructure failures are `AgentError`. Once a session has ended (`end`, its Scope closed, or its agent process died), its calls fail with `SessionClosed`; `end` itself succeeds if the session ended cleanly and fails with what ended it otherwise.

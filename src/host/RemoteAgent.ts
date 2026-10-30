@@ -54,7 +54,7 @@ import { randomUUID } from "node:crypto"
 import { closeSync, existsSync, openSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { Agent, type AgentSession, type Hooks, type RunOptions, settingsOf } from "../Agent.ts"
-import { AgentError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
+import { AgentError, ConnectionLost, SessionClosed, type SessionError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnSucceeded } from "../AgentEvent.ts"
 import { type MessageId, SessionId, type TurnId } from "../Domain.ts"
 import * as Launcher from "../Launcher.ts"
@@ -106,7 +106,7 @@ export interface RemoteAgentOptions extends ProviderSpec {
    * session ending), re-dial it on this schedule: subscriptions resume from
    * the last seq they delivered, and calls in flight are retried (`send`,
    * `steer` and `turn` carry a request id, so the host acts on them once).
-   * Calls fail with `AgentError` when the schedule gives up, or at once if the
+   * Calls fail with `ConnectionLost` when the schedule gives up, or at once if the
    * host is gone (manifest removed or pid dead). `false`: fail on the first
    * drop. Default `defaultReconnect`.
    */
@@ -150,12 +150,8 @@ export const defaultReconnect: Schedule.Schedule<Duration.Duration> = Schedule.m
   Schedule.during("30 seconds"),
 ])
 
-/** Failures that mean "lost the host" (as opposed to the session's own ending). */
-const connectionErrors = new WeakSet<AgentError>()
-const connectionError = (error: AgentError): AgentError => {
-  connectionErrors.add(error)
-  return error
-}
+/** Why a call can't reach the host: it's gone (or unreachable), or this handle was detached. */
+type Unreachable = ConnectionLost | SessionClosed
 
 /**
  * `AgentSession`, plus what reattaching needs.
@@ -174,23 +170,23 @@ export interface RemoteSession extends AgentSession {
    * than the host's cache and the events file isn't there to read it from
    * (`persistEvents: false`, or the file is missing or unreadable).
    */
-  readonly subscribeFrom: (fromSeq: number) => Stream.Stream<SeqEvent, EventsTrimmed | AgentError>
+  readonly subscribeFrom: (fromSeq: number) => Stream.Stream<SeqEvent, EventsTrimmed | SessionError>
   /** The last event's sequence number (-1 before any). */
-  readonly lastSeq: Effect.Effect<number, AgentError>
-  readonly info: Effect.Effect<HostInfo, AgentError>
+  readonly lastSeq: Effect.Effect<number, SessionError>
+  readonly info: Effect.Effect<HostInfo, SessionError>
   /** That turn's ending: at once if it already ended (even before a reattach), otherwise when it does. */
-  readonly awaitTurn: (turnId: TurnId) => Effect.Effect<TurnSucceeded, TurnFailure | AgentError>
+  readonly awaitTurn: (turnId: TurnId) => Effect.Effect<TurnSucceeded, TurnFailure | SessionError>
   /**
    * The ending of the turn a message landed in, by the `MessageId` that `send`
    * returned: persist that, and a runner restarted mid-turn can pick the result
    * up without knowing the turn id. Fails with `AgentError` if the message was
    * dropped, never reached a turn, or wasn't sent through this host.
    */
-  readonly awaitMessage: (messageId: MessageId) => Effect.Effect<TurnSucceeded, TurnFailure | AgentError>
-  /** Drop the connection and leave the session running. Calls made after it fail with `AgentError`. */
+  readonly awaitMessage: (messageId: MessageId) => Effect.Effect<TurnSucceeded, TurnFailure | SessionError>
+  /** Drop the connection and leave the session running. Calls made after it fail with `SessionClosed`. */
   readonly detach: Effect.Effect<void>
   /** Close the session now (killing its processes) and wait for the host to exit. */
-  readonly stop: Effect.Effect<void, AgentError>
+  readonly stop: Effect.Effect<void, SessionError>
 }
 
 /**
@@ -250,7 +246,7 @@ export class AgentHosts extends Context.Service<
     readonly events: (
       sessionId: SessionId,
       fromSeq?: number,
-    ) => Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | AgentError>
+    ) => Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | SessionError>
   }
 >()("effect-agent/AgentHosts") {}
 
@@ -435,8 +431,8 @@ export const layer = (
 
           type State =
             | { readonly _tag: "Connected"; readonly conn: Conn }
-            | { readonly _tag: "Reconnecting"; readonly next: Deferred.Deferred<Conn, AgentError> }
-            | { readonly _tag: "Failed"; readonly error: AgentError }
+            | { readonly _tag: "Reconnecting"; readonly next: Deferred.Deferred<Conn, Unreachable> }
+            | { readonly _tag: "Failed"; readonly error: Unreachable }
 
           let detached = false
           /** A subscription ran to its end, `Info` said so, or `end`/`stop` returned: a drop after that is the host exiting. */
@@ -446,9 +442,9 @@ export const layer = (
           })
           /** Connections given up on, closed once the next one is up (or when the session's scope closes). */
           const retired = new Set<Conn>()
-          /** Completed by `detach`: calls and streams still running fail with `AgentError` rather than being interrupted. */
+          /** Completed by `detach`: calls and streams still running fail with `SessionClosed` rather than being interrupted. */
           const detachedSignal = Deferred.makeUnsafe<void>()
-          const detachedError = () => agentError("detached from the session")
+          const detachedError = () => new SessionClosed({ message: "detached from the session", provider })
           const whenDetached = Effect.andThen(Deferred.await(detachedSignal), Effect.fail(detachedError()))
 
           const hostGone = (): string | null => {
@@ -457,7 +453,7 @@ export const layer = (
             if (manifest.pid !== target.pid || !isAlive(target.pid)) return `host ${target.pid} is gone`
             return null
           }
-          const lostError = (message: string) => connectionError(agentError(message))
+          const lostError = (message: string) => new ConnectionLost({ message, provider })
 
           /** Dial the host; when this connection drops later, `lost` hears of it at once. */
           const dialTracked = Effect.suspend(() => {
@@ -483,11 +479,11 @@ export const layer = (
           })
 
           /** Re-dial on the schedule; fail at once if the host is clearly gone. */
-          const reconnect = (next: Deferred.Deferred<Conn, AgentError>, schedule: Schedule.Schedule<unknown, AgentError>) =>
+          const reconnect = (next: Deferred.Deferred<Conn, Unreachable>, schedule: Schedule.Schedule<unknown, AgentError>) =>
             Effect.gen(function* () {
               const attempt = Effect.suspend(() => {
                 const gone = hostGone()
-                return gone !== null ? Effect.fail(lostError(gone)) : dialTracked
+                return gone !== null ? Effect.fail(agentError(gone)) : dialTracked
               })
               const exit = yield* attempt.pipe(
                 Effect.retry({ schedule, while: () => !detached && hostGone() === null }),
@@ -528,12 +524,12 @@ export const layer = (
                 state = { _tag: "Failed", error: lostError(`host connection: ${why}`) }
                 return Effect.void
               }
-              const next = Deferred.makeUnsafe<Conn, AgentError>()
+              const next = Deferred.makeUnsafe<Conn, Unreachable>()
               state = { _tag: "Reconnecting", next }
               return reconnect(next, options.reconnect ?? defaultReconnect).pipe(Effect.forkIn(sessionScope), Effect.asVoid)
             })
 
-          const current: Effect.Effect<Conn, AgentError> = Effect.suspend(() => {
+          const current: Effect.Effect<Conn, Unreachable> = Effect.suspend(() => {
             if (detached) return Effect.fail(detachedError())
             switch (state._tag) {
               case "Connected":
@@ -564,7 +560,7 @@ export const layer = (
           /** Run a call on the current connection; after a drop, again on the next one. */
           const call = <A, E>(
             make: (client: Client) => Effect.Effect<A, E>,
-          ): Effect.Effect<A, Exclude<E, RpcClientError.RpcClientError> | AgentError> =>
+          ): Effect.Effect<A, Exclude<E, RpcClientError.RpcClientError> | Unreachable> =>
             Effect.gen(function* () {
               while (true) {
                 const conn = yield* current
@@ -609,10 +605,10 @@ export const layer = (
           /** A streaming call that survives drops: after one, `make` runs again on the next connection. */
           const follow = <A, E>(
             make: (client: Client) => Stream.Stream<A, E>,
-          ): Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | AgentError> =>
+          ): Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | Unreachable> =>
             Stream.suspend(() => {
               if (detached) return Stream.fail(detachedError())
-              const attempt = (): Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | AgentError> =>
+              const attempt = (): Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | Unreachable> =>
                 Stream.unwrap(
                   Effect.map(current, (conn) =>
                     make(conn.client).pipe(
@@ -628,7 +624,7 @@ export const layer = (
             }).pipe(Stream.interruptWhen(whenDetached))
 
           /** `Subscribe`, resumed after a drop from the seq after the last one delivered. */
-          const subscribeFrom = (fromSeq: number, live = false): Stream.Stream<SeqEvent, EventsTrimmed | AgentError> =>
+          const subscribeFrom = (fromSeq: number, live = false): Stream.Stream<SeqEvent, EventsTrimmed | SessionError> =>
             Stream.suspend(() => {
               let next = Math.max(0, Math.floor(fromSeq))
               let delivered = false
@@ -645,11 +641,11 @@ export const layer = (
                 ),
               ).pipe(
                 // The session's own ending error.
-                Stream.tapError((e) => (e._tag === "AgentError" && !connectionErrors.has(e) ? markEnded : Effect.void)),
+                Stream.tapError((e) => (e._tag === "AgentError" || e._tag === "SessionClosed" ? markEnded : Effect.void)),
               )
             })
 
-          const toEvents = (stream: Stream.Stream<SeqEvent, EventsTrimmed | AgentError>): Stream.Stream<AgentEvent, AgentError> =>
+          const toEvents = (stream: Stream.Stream<SeqEvent, EventsTrimmed | SessionError>): Stream.Stream<AgentEvent, SessionError> =>
             stream.pipe(
               Stream.map((entry) => entry.event),
               Stream.mapError((e) => (e._tag === "EventsTrimmed" ? agentError(e.message, e) : e)),
@@ -853,8 +849,8 @@ export const layer = (
           Stream.mapError((e) => (e instanceof AgentError ? e : agentError(e.message, e))),
         )
 
-      const events = (sessionId: SessionId, fromSeq = 0): Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | AgentError> =>
-        Stream.suspend((): Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | AgentError> => {
+      const events = (sessionId: SessionId, fromSeq = 0): Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | SessionError> =>
+        Stream.suspend((): Stream.Stream<SeqEvent, SessionNotFound | EventsTrimmed | SessionError> => {
           prune()
           const file = eventsPath(dir, sessionId)
           const manifest = readManifest(manifestPath(dir, sessionId))
@@ -868,7 +864,7 @@ export const layer = (
           const followed = Stream.unwrap(
             connect(manifest, "detach").pipe(
               Effect.map((session) => session.subscribeFrom(next)),
-              Effect.catchTag("AgentError", (e) => Effect.fail(connectionError(e))),
+              Effect.catchTag("AgentError", (e) => Effect.fail(new ConnectionLost({ message: e.message, provider }))),
             ),
           ).pipe(
             Stream.tap((entry) =>
@@ -877,7 +873,7 @@ export const layer = (
               }),
             ),
             Stream.catchIf(
-              (e): e is AgentError => e._tag === "AgentError" && connectionErrors.has(e) && existsSync(file),
+              (e): e is ConnectionLost => e._tag === "ConnectionLost" && existsSync(file),
               () => Stream.suspend(() => fromFile(sessionId, next)),
             ),
           )

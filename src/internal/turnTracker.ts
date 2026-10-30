@@ -10,7 +10,7 @@
  * @internal
  */
 import { Deferred, Effect, Exit } from "effect"
-import { AgentError } from "../AgentError.ts"
+import { AgentError, SessionClosed } from "../AgentError.ts"
 import type { AgentEvent, TurnOutcome } from "../AgentEvent.ts"
 import type { TurnId } from "../Domain.ts"
 
@@ -22,11 +22,14 @@ export interface TurnTracker {
   readonly forget: (messageId: string) => void
   readonly observe: (event: AgentEvent) => void
   /** The turn a sent message landed in; fails if it was dropped or the session ended first. */
-  readonly landing: (messageId: string) => Effect.Effect<TurnId, AgentError>
+  readonly landing: (messageId: string) => Effect.Effect<TurnId, AgentError | SessionClosed>
   /** How a turn ended; fails if the session ended first. */
-  readonly outcome: (turnId: string) => Effect.Effect<TurnOutcome, AgentError>
-  /** The session ended: whoever is still waiting fails, with `error` if given. Only the first call counts. */
-  readonly end: (error: AgentError | null) => void
+  readonly outcome: (turnId: string) => Effect.Effect<TurnOutcome, AgentError | SessionClosed>
+  /**
+   * The session ended: whoever is still waiting fails, with `error` if given
+   * (else `SessionClosed`). Only the first call counts.
+   */
+  readonly end: (error: AgentError | SessionClosed | null) => void
   readonly running: () => TurnId | null
   /** Nothing is running (after replaying an earlier host's events: that host is gone). */
   readonly clearRunning: () => void
@@ -55,21 +58,22 @@ export const make = (options: {
   const error = (message: string) => new AgentError({ message, provider })
 
   let running: TurnId | null = null
-  let ended: { readonly error: AgentError | null } | null = null
+  let ended: { readonly error: AgentError | SessionClosed | null } | null = null
   /** Sent, not landed or dropped yet (in send order). */
   const unlanded = new Set<string>()
   const landedIn = new Map<string, TurnId>()
   const dropped = new Map<string, string>()
   const outcomes = new Map<string, TurnOutcome>()
-  const messageWaiters = new Map<string, Deferred.Deferred<TurnId, AgentError>>()
-  const turnWaiters = new Map<string, Deferred.Deferred<TurnOutcome, AgentError>>()
+  const messageWaiters = new Map<string, Deferred.Deferred<TurnId, AgentError | SessionClosed>>()
+  const turnWaiters = new Map<string, Deferred.Deferred<TurnOutcome, AgentError | SessionClosed>>()
 
   const droppedError = (messageId: string, reason: string) =>
     error(`message ${messageId} was ${reason} before it reached a turn`)
-  const neverLanded = (messageId: string) => error(`the session ended before message ${messageId} reached a turn`)
-  const neverEnded = (turnId: string) => error(`the session ended before turn ${turnId} did`)
+  const closed = (message: string) => new SessionClosed({ message, provider })
+  const neverLanded = (messageId: string) => closed(`the session ended before message ${messageId} reached a turn`)
+  const neverEnded = (turnId: string) => closed(`the session ended before turn ${turnId} did`)
 
-  const settleMessage = (messageId: string, exit: Exit.Exit<TurnId, AgentError>) => {
+  const settleMessage = (messageId: string, exit: Exit.Exit<TurnId, AgentError | SessionClosed>) => {
     unlanded.delete(messageId)
     const waiter = messageWaiters.get(messageId)
     messageWaiters.delete(messageId)
@@ -105,20 +109,20 @@ export const make = (options: {
     }
   }
 
-  const outcome = (turnId: string): Effect.Effect<TurnOutcome, AgentError> =>
+  const outcome = (turnId: string): Effect.Effect<TurnOutcome, AgentError | SessionClosed> =>
     Effect.suspend(() => {
       const known = outcomes.get(turnId)
       if (known !== undefined) return Effect.succeed(known)
       if (ended !== null) return Effect.fail(ended.error ?? neverEnded(turnId))
       let waiter = turnWaiters.get(turnId)
       if (waiter === undefined) {
-        waiter = Deferred.makeUnsafe<TurnOutcome, AgentError>()
+        waiter = Deferred.makeUnsafe<TurnOutcome, AgentError | SessionClosed>()
         turnWaiters.set(turnId, waiter)
       }
       return Deferred.await(waiter)
     })
 
-  const landing = (messageId: string): Effect.Effect<TurnId, AgentError> =>
+  const landing = (messageId: string): Effect.Effect<TurnId, AgentError | SessionClosed> =>
     Effect.suspend(() => {
       const turnId = landedIn.get(messageId)
       if (turnId !== undefined) return Effect.succeed(turnId)
@@ -130,13 +134,13 @@ export const make = (options: {
       }
       let waiter = messageWaiters.get(messageId)
       if (waiter === undefined) {
-        waiter = Deferred.makeUnsafe<TurnId, AgentError>()
+        waiter = Deferred.makeUnsafe<TurnId, AgentError | SessionClosed>()
         messageWaiters.set(messageId, waiter)
       }
       return Deferred.await(waiter)
     })
 
-  const end = (reason: AgentError | null) => {
+  const end = (reason: AgentError | SessionClosed | null) => {
     if (ended !== null) return
     ended = { error: reason }
     running = null

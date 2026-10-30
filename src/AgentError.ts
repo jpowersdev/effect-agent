@@ -155,3 +155,42 @@ export class AgentError extends Schema.TaggedError<AgentError>()("AgentError", {
   provider: Schema.String,
   cause: Schema.optional(Schema.Defect()),
 }) {}
+
+/**
+ * The session can't take this call: it has ended (`end`, its Scope closed,
+ * or the agent process died, which `message` then says) or, for a remote
+ * session, this handle was detached.
+ *
+ * @since 0.2.0
+ * @category errors
+ */
+export class SessionClosed extends Schema.TaggedError<SessionClosed>()("SessionClosed", {
+  message: Schema.String,
+  provider: Schema.String,
+}) {}
+
+/**
+ * Lost the connection to the process running the session (a `RemoteAgent`
+ * host) and could not get it back. The session itself may still be running:
+ * `AgentHosts.attach` it again.
+ *
+ * @since 0.2.0
+ * @category errors
+ */
+export class ConnectionLost extends Schema.TaggedError<ConnectionLost>()("ConnectionLost", {
+  message: Schema.String,
+  provider: Schema.String,
+}) {}
+
+/**
+ * How an `AgentSession` call can fail, besides a turn's own `TurnFailure`.
+ *
+ * @since 0.2.0
+ * @category errors
+ */
+export const SessionError = Schema.Union([AgentError, SessionClosed, ConnectionLost])
+/**
+ * @since 0.2.0
+ * @category errors
+ */
+export type SessionError = typeof SessionError.Type

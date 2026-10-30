@@ -976,6 +976,7 @@ export const markStalled = (state: State, turnId: TurnId, stall: Stall): State =
 // ---------------------------------------------------------------------------
 
 const agentError = Session.agentError(provider)
+const sessionClosed = Session.sessionClosed(provider)
 const timed = Session.timed(provider)
 
 const fromSdkError = (e: ClaudeSdk.ClaudeSdkError) => agentError(`${e.operation}: ${e.message}`, e)
@@ -1092,7 +1093,8 @@ const openSession = Effect.fn("ClaudeAgent.open")(function* (
     kill: query.kill,
   })
 
-  const unavailable = () => (closed === null ? null : (closed.error ?? agentError("session has ended")))
+  const unavailable = () =>
+    closed === null ? null : sessionClosed(closed.error !== null ? `session has ended: ${closed.error.message}` : "session has ended")
   const ensureOpen = Effect.suspend(() => {
     const error = unavailable()
     return error === null ? Effect.void : Effect.fail(error)

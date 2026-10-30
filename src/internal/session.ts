@@ -9,7 +9,7 @@
 import { Duration, Effect, type Scope, type Stream } from "effect"
 import { randomUUID } from "node:crypto"
 import type { RunOptions } from "../Agent.ts"
-import { AgentError } from "../AgentError.ts"
+import { AgentError, SessionClosed } from "../AgentError.ts"
 import type { AgentEvent } from "../AgentEvent.ts"
 import { MessageId } from "../Domain.ts"
 import * as Watchdog from "../Watchdog.ts"
@@ -25,6 +25,16 @@ export const agentError =
   (provider: string) =>
   (message: string, cause?: unknown): AgentError =>
     new AgentError({ message, provider, ...(cause !== undefined && { cause }) })
+
+/**
+ * A `SessionClosed` from `provider`.
+ *
+ * @internal
+ */
+export const sessionClosed =
+  (provider: string) =>
+  (message: string): SessionClosed =>
+    new SessionClosed({ message, provider })
 
 /**
  * A fresh client-side `MessageId`.
@@ -72,7 +82,7 @@ export interface SessionRuntime {
    * The session ended (null: cleanly): subscriptions end, and waiters fail
    * (with `waiters`, if given, else `error`). Only the first call counts.
    */
-  readonly end: (error: AgentError | null, waiters?: AgentError) => Effect.Effect<void>
+  readonly end: (error: AgentError | null, waiters?: AgentError | SessionClosed) => Effect.Effect<void>
   readonly ended: () => { readonly error: AgentError | null } | null
   readonly subscribe: Effect.Effect<Stream.Stream<AgentEvent, AgentError>, never, Scope.Scope>
   /** Stop stalled turns (`Watchdog.supervise`), when `RunOptions.watchdog` asks for it. */
@@ -99,7 +109,7 @@ export const make = Effect.fnUntraced(function* (options: {
       return watchdog === null ? published : Effect.andThen(watchdog.observe(event), published)
     })
 
-  const end = (error: AgentError | null, waiters?: AgentError) =>
+  const end = (error: AgentError | null, waiters?: AgentError | SessionClosed) =>
     Effect.suspend(() => {
       turns.end(waiters ?? error)
       return hub.end(error)

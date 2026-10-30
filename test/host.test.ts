@@ -10,7 +10,7 @@ import { Cause, DateTime, Duration, Effect, Exit, Fiber, Layer, Option, Stream }
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Agent, AgentError, MessageId, SessionId, SessionNotFound, type TurnId, UsageLimited } from "../src/index.ts"
+import { Agent, AgentError, ConnectionLost, MessageId, SessionClosed, SessionId, SessionNotFound, type TurnId, UsageLimited } from "../src/index.ts"
 import { AgentHosts, EventsTrimmed, HostSpec, RemoteAgent } from "../src/host/index.ts"
 import { host } from "./support/hostCommand.ts"
 
@@ -164,7 +164,7 @@ for (const p of providers) {
     )
 
     it.live(
-      "detaching mid-turn fails the in-flight turn() AgentError; the turn keeps running and a fresh client awaits it",
+      "detaching mid-turn fails the in-flight turn() SessionClosed; the turn keeps running and a fresh client awaits it",
       () =>
         Effect.gen(function* () {
           const opened = yield* Effect.scoped(
@@ -178,8 +178,8 @@ for (const p of providers) {
               expect(turnId).not.toBeNull()
               yield* session.detach
               const failure = failureOf(yield* Fiber.join(inFlight))
-              expect(failure).toBeInstanceOf(AgentError)
-              expect(failureOf(yield* session.send("after detach").pipe(Effect.exit))).toBeInstanceOf(AgentError)
+              expect(failure).toBeInstanceOf(SessionClosed)
+              expect(failureOf(yield* session.send("after detach").pipe(Effect.exit))).toBeInstanceOf(SessionClosed)
               return { sessionId: session.sessionId, hostPid: session.hostPid, turnId: turnId as TurnId }
             }),
           ).pipe(Effect.provide(layer(p.interrupt)))
@@ -287,7 +287,7 @@ for (const p of providers) {
     )
 
     it.live(
-      "when the host dies, calls fail AgentError and attach fails SessionNotFound",
+      "when the host dies, calls fail ConnectionLost and attach fails SessionNotFound",
       () =>
         Effect.gen(function* () {
           const hosts = yield* AgentHosts
@@ -299,10 +299,10 @@ for (const p of providers) {
           process.kill(session.hostPid, "SIGKILL")
           yield* waitUntil(() => !isAlive(session.hostPid), "the host to die")
 
-          expect(failureOf(yield* session.send("hello?").pipe(Effect.exit))).toBeInstanceOf(AgentError)
-          expect(failureOf(yield* session.turn("hello?").pipe(Effect.exit))).toBeInstanceOf(AgentError)
-          expect(failureOf(yield* session.lastSeq.pipe(Effect.exit))).toBeInstanceOf(AgentError)
-          expect(failureOf(yield* Fiber.join(events).pipe(Effect.flatten, Effect.exit))).toBeInstanceOf(AgentError)
+          expect(failureOf(yield* session.send("hello?").pipe(Effect.exit))).toBeInstanceOf(ConnectionLost)
+          expect(failureOf(yield* session.turn("hello?").pipe(Effect.exit))).toBeInstanceOf(ConnectionLost)
+          expect(failureOf(yield* session.lastSeq.pipe(Effect.exit))).toBeInstanceOf(ConnectionLost)
+          expect(failureOf(yield* Fiber.join(events).pipe(Effect.flatten, Effect.exit))).toBeInstanceOf(ConnectionLost)
 
           // Its files were left behind; attach notices the dead pid and removes them.
           const failure = failureOf(yield* hosts.attach(session.sessionId).pipe(Effect.exit))
