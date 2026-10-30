@@ -447,7 +447,7 @@ const groupKill: Scenario = Effect.gen(function* () {
 
 const status: Scenario = Effect.gen(function* () {
   const agent = yield* Agent
-  const s = yield* agent.status
+  const s = yield* agent.status()
   check(s.provider === "codex" && s.plan !== null, `status ${JSON.stringify(s)}`)
   check(s.windows.length > 0, "status windows")
   check(s.usable === (s.reason === null), "usable iff no reason")
@@ -459,16 +459,7 @@ const status: Scenario = Effect.gen(function* () {
 /** Not signed in: CODEX_HOME pointed at an empty directory. */
 const statusSignedOut: Scenario = Effect.gen(function* () {
   const home = mkdtempSync(`${ROOT}/empty-home-`)
-  const previous = process.env.CODEX_HOME
-  process.env.CODEX_HOME = home
-  const s = yield* (yield* Agent).status.pipe(
-    Effect.ensuring(
-      Effect.sync(() => {
-        if (previous === undefined) delete process.env.CODEX_HOME
-        else process.env.CODEX_HOME = previous
-      }),
-    ),
-  )
+  const s = yield* (yield* Agent).status({ env: { CODEX_HOME: home } })
   rmSync(home, { recursive: true, force: true })
   check(!s.usable && s.reason === "unauthenticated" && s.windows.length === 0, `status ${JSON.stringify(s)}`)
   yield* Effect.sleep(Duration.millis(300))

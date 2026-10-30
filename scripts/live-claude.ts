@@ -362,7 +362,7 @@ const scenarios: Record<string, { readonly run: Scenario; readonly options?: Cla
     run: Effect.gen(function* () {
       const before = sdkProcesses().length
       const started = Date.now()
-      const status = yield* (yield* Agent).status
+      const status = yield* (yield* Agent).status()
       const ms = Date.now() - started
       console.log(`  ${ms}ms usable=${status.usable} reason=${status.reason} plan=${status.plan}`)
       for (const w of status.windows) console.log(`   ${w.label} (${w.window}) ${w.usedPercent}% resets ${w.resetsAt?.toString() ?? "-"}`)
@@ -375,17 +375,17 @@ const scenarios: Record<string, { readonly run: Scenario; readonly options?: Cla
   },
 
   "status-unauthenticated": {
-    options: {
-      env: {
-        CLAUDE_CONFIG_DIR: (mkdirSync(root, { recursive: true }), mkdtempSync(join(root, "empty-config-"))),
-        ANTHROPIC_API_KEY: undefined,
-        ANTHROPIC_AUTH_TOKEN: undefined,
-        CLAUDE_CODE_OAUTH_TOKEN: undefined,
-      },
-    },
     run: Effect.gen(function* () {
       const before = sdkProcesses().length
-      const status = yield* (yield* Agent).status
+      // Another account via StatusOptions.env: an empty config dir, no API key.
+      const status = yield* (yield* Agent).status({
+        env: {
+          CLAUDE_CONFIG_DIR: (mkdirSync(root, { recursive: true }), mkdtempSync(join(root, "empty-config-"))),
+          ANTHROPIC_API_KEY: undefined,
+          ANTHROPIC_AUTH_TOKEN: undefined,
+          CLAUDE_CODE_OAUTH_TOKEN: undefined,
+        },
+      })
       console.log(`  usable=${status.usable} reason=${status.reason} windows=${status.windows.length}`)
       check(!status.usable && status.reason === "unauthenticated", "unauthenticated")
       check(sdkProcesses().length === before, "status process gone")

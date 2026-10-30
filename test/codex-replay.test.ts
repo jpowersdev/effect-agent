@@ -229,7 +229,7 @@ describe("CodexAgent over replays", () => {
 
   it.live("status: signed in, with limit windows and plan", () =>
     Effect.gen(function* () {
-      const status = yield* (yield* Agent).status
+      const status = yield* (yield* Agent).status()
       Schema.encodeUnknownSync(AccountStatus)(status)
       expect(status).toMatchObject({ provider: "codex", usable: true, reason: null, plan: "pro" })
       expect(status.windows).toEqual([
@@ -240,7 +240,7 @@ describe("CodexAgent over replays", () => {
 
   it.live("status: not signed in", () =>
     Effect.gen(function* () {
-      const status = yield* (yield* Agent).status
+      const status = yield* (yield* Agent).status()
       expect(status).toMatchObject({ usable: false, reason: "unauthenticated", windows: [], plan: null })
     }).pipe(Effect.provide(agent("status-signed-out"))),
   )

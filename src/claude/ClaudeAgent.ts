@@ -814,6 +814,17 @@ export const stepExit = (ctx: StepContext, state: State, error: ProcessFailure |
   return { ...ended, events: [...state.held, ...ended.events] }
 }
 
+/**
+ * The CLI's exit code reflects its last result, so after a turn that ended in
+ * a failure (an interrupt, a spend cap, ...) even a clean shutdown exits 1.
+ * That is a normal end, not a crash, when we asked for it and no turn was running.
+ */
+export const isCleanExitAfterFailedTurn = (
+  error: { readonly exitCode: number | null; readonly signal: string | null },
+  context: { readonly endRequested: boolean; readonly turnRunning: boolean; readonly lastTurnFailed: boolean },
+): boolean =>
+  context.endRequested && !context.turnRunning && context.lastTurnFailed && error.exitCode === 1 && error.signal === null
+
 /** Mark the running turn as interrupted by us. */
 export const markInterrupt = (state: State): State =>
   state.turn === null ? state : { ...state, turn: { ...state.turn, interruptRequested: true } }
@@ -864,6 +875,9 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
   const pubsub = yield* PubSub.unbounded<AgentEvent | typeof End>()
   /** Replayed to subscriptions made after `init`, so every subscription starts with it. */
   let sessionStarted: AgentEvent | null = null
+  /** For telling a clean `end` after a failed turn from a crash (see `isCleanExitAfterFailedTurn`). */
+  let endRequested = false
+  let lastTurnFailed = false
 
   const turnEnd = (turnId: string) => {
     let d = turnEnds.get(turnId)
@@ -887,6 +901,7 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
         if (watchdog !== null) yield* watchdog.observe(event)
         if (event._tag === "TurnStarted") turnEnd(event.turnId)
         if (event._tag === "SessionStarted") sessionStarted = event
+        if (event._tag === "TurnEnded") lastTurnFailed = event.outcome._tag !== "Succeeded"
         yield* PubSub.publish(pubsub, event)
         if (event._tag === "TurnStarted") yield* land(event.turnId, event.turnId)
         else if (event._tag === "MessageLanded") yield* land(event.messageId, event.turnId)
@@ -906,9 +921,14 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
     | { readonly _tag: "Defect"; readonly cause: unknown }
     | { readonly _tag: "Closed" }
 
-  const finish = (ending: Ending) =>
+  const finish = (reported: Ending) =>
     Effect.gen(function* () {
       if (closed !== null) return
+      const ending: Ending =
+        reported._tag === "Died" &&
+        isCleanExitAfterFailedTurn(reported.error, { endRequested, turnRunning: state.turn !== null, lastTurnFailed })
+          ? { _tag: "Exited" }
+          : reported
       const error =
         ending._tag === "Died"
           ? fromSdkError(ending.error)
@@ -1033,7 +1053,10 @@ const openSession = Effect.fnUntraced(function* (sdk: ClaudeSdk.ClaudeSdk["Servi
     Effect.andThen(query.interrupt.pipe(Effect.mapError(fromSdkError))),
   )
 
-  const end = query.endInput.pipe(
+  const end = Effect.sync(() => {
+    endRequested = true
+  }).pipe(
+    Effect.andThen(query.endInput),
     Effect.andThen(Fiber.await(consumer)),
     Effect.andThen(Effect.suspend(() => (closed?.error ? Effect.fail(closed.error) : Effect.void))),
   )
@@ -1281,10 +1304,12 @@ export const layer = (options: ClaudeAgentOptions = {}): Layer.Layer<Agent, neve
           Effect.map(capabilities),
         ),
         open: (run) => openSession(sdk, options, run),
-        status: Effect.gen(function* () {
+        status: (statusOptions = {}) =>
+          Effect.gen(function* () {
           const cwd = tmpdir()
           const wrap = yield* Launcher.prepare({ provider, cwd })
-          const snapshot = yield* sdk.status(buildStatusOptions(options, cwd), { wrap }).pipe(
+          const config = { ...options, env: { ...options.env, ...statusOptions.env } }
+          const snapshot = yield* sdk.status(buildStatusOptions(config, cwd), { wrap }).pipe(
             Effect.mapError(fromSdkError),
             Effect.timeoutOrElse({
               duration: Duration.seconds(30),

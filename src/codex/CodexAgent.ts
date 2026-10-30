@@ -741,10 +741,13 @@ const timed = <A, E>(what: string, self: Effect.Effect<A, E>) =>
     Effect.timeoutOrElse({ duration: requestTimeout, orElse: () => Effect.fail(agentError(`${what} timed out`)) }),
   )
 
-export const readStatus = (server: CodexAppServer["Service"]): Effect.Effect<AccountStatus, AgentError> =>
+export const readStatus = (
+  server: CodexAppServer["Service"],
+  env?: Readonly<Record<string, string | undefined>>,
+): Effect.Effect<AccountStatus, AgentError> =>
   Effect.scoped(
     Effect.gen(function* () {
-      const conn = yield* server.connect({ cwd: neutralCwd(), env: sessionEnv(hostEnv()) })
+      const conn = yield* server.connect({ cwd: neutralCwd(), env: sessionEnv(hostEnv(), env) })
       const account = yield* timed("account/read", conn.request("account/read", {})).pipe(
         Effect.mapError(toAgentError("account/read failed")),
       )
@@ -821,7 +824,7 @@ export const make = (options: CodexAgentOptions = {}) =>
       provider,
       capabilities,
       open: (runOptions) => openSession(server, options, runOptions),
-      status: readStatus(server),
+      status: (statusOptions = {}) => readStatus(server, statusOptions.env),
       history: (sessionId, historyOptions) => readHistory(server, sessionId, historyOptions),
     })
   })

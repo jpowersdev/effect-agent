@@ -301,7 +301,7 @@ for (const provider of [claude, codex]) {
 
     it.live("status reports sign-in, plan and limit windows without a turn", () =>
       Effect.gen(function* () {
-        const status = yield* (yield* Agent).status
+        const status = yield* (yield* Agent).status()
         Schema.encodeUnknownSync(AccountStatus)(status)
         expect(status).toMatchObject({ provider: provider.name, usable: true, reason: null })
         expect(status.plan).not.toBeNull()
@@ -315,7 +315,7 @@ for (const provider of [claude, codex]) {
 
     it.live("status reports a signed-out account as unusable", () =>
       Effect.gen(function* () {
-        const status = yield* (yield* Agent).status
+        const status = yield* (yield* Agent).status()
         expect(status).toMatchObject({ usable: false, reason: "unauthenticated", windows: [], plan: null })
       }).pipe(Effect.provide(provider.layer("statusSignedOut"))),
     )

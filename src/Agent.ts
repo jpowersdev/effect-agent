@@ -132,6 +132,14 @@ export const usableFor = (status: AccountStatus, model: string): boolean =>
   status.usable &&
   !status.windows.some((w) => Option.isSome(w.model) && appliesTo(w, model) && (w.usedPercent ?? 0) >= 100)
 
+export interface StatusOptions {
+  /**
+   * Applied over the host environment like `RunOptions.env`, e.g. to check
+   * another account: `{ CLAUDE_CONFIG_DIR: "..." }` or `{ CODEX_HOME: "..." }`.
+   */
+  readonly env?: Readonly<Record<string, string | undefined>>
+}
+
 export const SteerOutcome = Schema.Union([
   /** Landed in the turn that was running when `steer` was called. */
   Schema.TaggedStruct("Landed", { messageId: MessageId, turnId: TurnId }),
@@ -174,7 +182,7 @@ export class Agent extends Context.Service<
     readonly capabilities: Effect.Effect<Capabilities, AgentError>
     readonly open: (options: RunOptions) => Effect.Effect<AgentSession, SessionNotFound | AgentError, Scope.Scope>
     /** Sign-in and usage-limit status, without running a turn. */
-    readonly status: Effect.Effect<AccountStatus, AgentError>
+    readonly status: (options?: StatusOptions) => Effect.Effect<AccountStatus, AgentError>
     /**
      * A stored session's history as events: `UserMessage`, `Text`, `ToolCall`,
      * `ToolResult`, `Compacted`, grouped by `TurnStarted`, with `TurnEnded`

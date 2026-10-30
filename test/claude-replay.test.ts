@@ -214,7 +214,7 @@ describe("ClaudeAgent over recordings", () => {
 
   it.effect("status: signed in, with plan windows", () =>
     Effect.gen(function* () {
-      const status = yield* (yield* Agent).status
+      const status = yield* (yield* Agent).status()
       Schema.encodeUnknownSync(AccountStatus)(status)
       expect(status).toMatchObject({ provider: "claude", usable: true, reason: null, plan: "max" })
       expect(status.windows.map((w) => w.window)).toEqual(["five_hour", "weekly", "other"])
@@ -229,13 +229,13 @@ describe("ClaudeAgent over recordings", () => {
 
   it.effect("status: signed out", () =>
     Effect.gen(function* () {
-      expect(yield* (yield* Agent).status).toMatchObject({ usable: false, reason: "unauthenticated", windows: [], plan: null })
+      expect(yield* (yield* Agent).status()).toMatchObject({ usable: false, reason: "unauthenticated", windows: [], plan: null })
     }).pipe(Effect.provide(replay("status-unauthenticated"))),
   )
 
   it.effect("status without a recorded answer fails with AgentError", () =>
     Effect.gen(function* () {
-      expect(failureOf(yield* (yield* Agent).status.pipe(Effect.exit))).toMatchObject({ _tag: "AgentError", provider: "claude" })
+      expect(failureOf(yield* (yield* Agent).status().pipe(Effect.exit))).toMatchObject({ _tag: "AgentError", provider: "claude" })
     }).pipe(Effect.provide(replay("simple-turn"))),
   )
 

@@ -759,3 +759,17 @@ describe("ClaudeAgent.modelOfLabel", () => {
   })
 })
 
+describe("ClaudeAgent.isCleanExitAfterFailedTurn", () => {
+  const ctx = { endRequested: true, turnRunning: false, lastTurnFailed: true }
+  it("treats exit code 1 after a failed last turn as a clean end we asked for", () => {
+    expect(ClaudeAgent.isCleanExitAfterFailedTurn({ exitCode: 1, signal: null }, ctx)).toBe(true)
+  })
+  it("is still a failure when we didn't ask to end, a turn was running, the last turn succeeded, or it was a signal", () => {
+    const exit = { exitCode: 1, signal: null }
+    expect(ClaudeAgent.isCleanExitAfterFailedTurn(exit, { ...ctx, endRequested: false })).toBe(false)
+    expect(ClaudeAgent.isCleanExitAfterFailedTurn(exit, { ...ctx, turnRunning: true })).toBe(false)
+    expect(ClaudeAgent.isCleanExitAfterFailedTurn(exit, { ...ctx, lastTurnFailed: false })).toBe(false)
+    expect(ClaudeAgent.isCleanExitAfterFailedTurn({ exitCode: 2, signal: null }, ctx)).toBe(false)
+    expect(ClaudeAgent.isCleanExitAfterFailedTurn({ exitCode: null, signal: "SIGKILL" }, ctx)).toBe(false)
+  })
+})
