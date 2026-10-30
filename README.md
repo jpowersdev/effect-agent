@@ -100,6 +100,39 @@ Without one, processes are still stopped when the session ends, and as soon as a
 
 `watchdog: { idle, toolIdle, grace }` ends a quiet turn `Stalled`. Heartbeats count as activity, so a model that is thinking is not idle; `toolIdle` applies while a tool call runs.
 
+## Reattach
+
+`RemoteAgent.layer` runs each session in its own host process, so it survives the process that opened it (e.g. a runner restarting to deploy). Another process can reattach by id, catch up on what it missed, and keep controlling it.
+
+```ts
+import { AgentHosts, RemoteAgent } from "effect-agent/host"
+
+const layer = RemoteAgent.layer({ provider: "claude", claude: { model }, onScopeClose: "detach" })
+
+// before the restart: persist the session id and the MessageId
+const session = yield* (yield* Agent).open({ cwd })   // Agent works unchanged; capabilities.reattach is true
+const messageId = yield* session.send("Fix the failing test")
+
+// after it
+const session = yield* (yield* AgentHosts).attach(sessionId)    // SessionNotFound if no live host
+yield* session.subscribeFrom(lastPersistedSeq + 1).pipe(Stream.runForEach(persist), Effect.forkScoped)
+const result = yield* session.awaitMessage(messageId)         // even if the turn ended while nobody was attached
+```
+
+A `RemoteSession` is an `AgentSession` plus `subscribeFrom(seq)` (a stream of `{ seq, event }` that fails with `EventsTrimmed` if `seq` is older than the host keeps, `maxEvents`, default 50 000), `lastSeq`, `awaitTurn` / `awaitMessage` (by turn id, or by the `MessageId` that `send` returned), `detach` and `stop`. `subscribe`/`events` are live from now, as for a local session. `onScopeClose` is `"stop"` by default (closing the scope ends the session, as locally); set `"detach"` to leave it running. `AgentHosts.list` lists live hosts. `status` and `history` run locally. Hooks are refused: functions can't cross processes.
+
+Each host serves one session over effect/rpc on a unix socket in `dir` (default `$XDG_RUNTIME_DIR/effect-agent`), next to a manifest `<sessionId>.json` and a log `<sessionId>.log`. It exits when the session ends (`end`, `stop`, the agent dying, SIGTERM), lingering a few seconds so clients get the last events, and when no client has been attached to an idle session for `orphanTimeout` (default 30 minutes). Stale manifests (dead pid) are removed by `list` and `attach`.
+
+**Process supervisors:** hosts are started detached, so they outlive the process that opened them, but whatever supervises that process may still stop them. The `Launcher` applies to the host command (so the host and the agent it runs share whatever it sets up); use it to place hosts outside the supervisor's reach. For example:
+
+- **systemd:** with the default `KillMode=control-group`, stopping or restarting the runner's unit kills every process in its cgroup, hosts included. Wrap hosts in their own scope with `systemd-run --user --scope ...` (as above).
+- **launchd:** a job's process group is killed when it exits unless `AbandonProcessGroup` is set.
+- **Containers:** everything in a container stops with it; hosts need to run somewhere that outlives the runner's container.
+
+A host killed with SIGKILL can't stop its agent either (Node has no parent-death signal); a cgroup launcher such as a systemd scope covers that.
+
+`node scripts/live-reattach.ts` checks this end to end with the real CLIs: process A starts a slow turn and exits mid-turn; process B attaches, catches up, gets the turn's result, runs another turn and ends the session.
+
 ## Testing
 
 Swap the transport for a replay of a recorded session, so the real event mapping runs with no process:

@@ -2,12 +2,14 @@
  * The same programs against both providers (over their recorded sessions),
  * checking the guarantees `Agent` makes regardless of provider.
  */
-import { describe, expect, it } from "@effect/vitest"
+import { afterAll, describe, expect, it } from "@effect/vitest"
 import { Cause, Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect"
-import { readFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ClaudeAgent, ClaudeReplay } from "../src/claude/index.ts"
 import { CodexAgent, CodexReplay } from "../src/codex/index.ts"
+import { RemoteAgent } from "../src/host/index.ts"
 import { AccountStatus, Agent, AgentEvent, type AgentSession, type RunOptions, SessionId } from "../src/index.ts"
 
 type Scenario =
@@ -28,6 +30,10 @@ type Scenario =
 
 interface Provider {
   readonly name: string
+  /** The underlying provider (`claude` / `codex`); differs from `name` for remote providers. */
+  readonly kind: "claude" | "codex"
+  /** Per-test timeout (remote sessions start a host process). */
+  readonly timeout?: number
   readonly cwd: string
   readonly missingId: string
   readonly spendCapUsd: number
@@ -38,8 +44,46 @@ interface Provider {
 
 const fixture = (provider: string, name: string) => join(import.meta.dirname, "fixtures", provider, `${name}.jsonl`)
 
+const claudeFixtures: Record<Scenario, string> = {
+  simple: "simple-turn",
+  tool: "bash-tool",
+  steer: "steer",
+  interrupt: "interrupt-then-turn",
+  queue: "queue",
+  spendCap: "spend-cap",
+  killed: "process-killed",
+  usageLimit: "usage-limit",
+  resumeMissing: "resume-missing",
+  status: "status",
+  statusSignedOut: "status-unauthenticated",
+  history: "history",
+  historyMissing: "history",
+  stall: "watchdog",
+}
+
+const codexFixtures: Record<Scenario, string> = {
+  simple: "simple",
+  tool: "command",
+  steer: "steer-landed",
+  interrupt: "interrupt",
+  queue: "queue",
+  spendCap: "spend-cap",
+  killed: "process-killed",
+  usageLimit: "usage-limit",
+  resumeMissing: "resume-missing",
+  status: "status",
+  statusSignedOut: "status-signed-out",
+  history: "history",
+  historyMissing: "history-missing",
+  stall: "stall",
+}
+
+/** Codex prices that make the spend-cap recording hit its cap. */
+const codexPricing = (scenario: Scenario) => (scenario === "spendCap" ? { "*": { input: 1000, output: 1000 } } : undefined)
+
 const claude: Provider = {
   name: "claude",
+  kind: "claude",
   cwd: "/tmp/effect-agent-replay",
   missingId: "33333333-3333-4333-8333-333333333333",
   spendCapUsd: 0.0001,
@@ -49,22 +93,7 @@ const claude: Provider = {
     return { sessionId: line.sessionId, cwd: line.cwd }
   },
   layer: (scenario) => {
-    const name = {
-      simple: "simple-turn",
-      tool: "bash-tool",
-      steer: "steer",
-      interrupt: "interrupt-then-turn",
-      queue: "queue",
-      spendCap: "spend-cap",
-      killed: "process-killed",
-      usageLimit: "usage-limit",
-      resumeMissing: "resume-missing",
-      status: "status",
-      statusSignedOut: "status-unauthenticated",
-      history: "history",
-      historyMissing: "history",
-      stall: "watchdog",
-    }[scenario]
+    const name = claudeFixtures[scenario]
     // Skip the transcript precheck so the CLI's own "not found" path is exercised.
     const options = scenario === "resumeMissing" ? { knownSessions: "all" as const } : undefined
     return ClaudeAgent.layer().pipe(Layer.provide(ClaudeReplay.layerFile(fixture("claude", name), options)))
@@ -73,33 +102,46 @@ const claude: Provider = {
 
 const codex: Provider = {
   name: "codex",
+  kind: "codex",
   cwd: "/tmp/effect-agent-live/codex/work",
   missingId: "019a0000-0000-7000-8000-000000000000",
   spendCapUsd: 0.01,
   stored: { sessionId: "01a1896b-e054-7371-b868-b778fad6ea05", cwd: "/tmp/effect-agent-live/codex/work" },
   layer: (scenario) => {
-    const name = {
-      simple: "simple",
-      tool: "command",
-      steer: "steer-landed",
-      interrupt: "interrupt",
-      queue: "queue",
-      spendCap: "spend-cap",
-      killed: "process-killed",
-      usageLimit: "usage-limit",
-      resumeMissing: "resume-missing",
-      status: "status",
-      statusSignedOut: "status-signed-out",
-      history: "history",
-      historyMissing: "history-missing",
-      stall: "stall",
-    }[scenario]
-    const pricing = scenario === "spendCap" ? { "*": { input: 1000, output: 1000 } } : undefined
+    const name = codexFixtures[scenario]
+    const pricing = codexPricing(scenario)
     return CodexAgent.layer(pricing ? { pricing } : {}).pipe(
       Layer.provide(CodexReplay.layer(readFileSync(fixture("codex", name), "utf8"))),
     )
   },
 }
+
+/**
+ * The same recordings, each session in its own host process (src/host/main.ts)
+ * behind a unix socket. `status` and `history` delegate to a local provider.
+ */
+const hostDir = mkdtempSync(join(tmpdir(), "ea-conf-"))
+afterAll(() => {
+  for (const host of RemoteAgent.listHosts(hostDir)) process.kill(host.pid, "SIGKILL")
+  rmSync(hostDir, { recursive: true, force: true })
+})
+
+const remote = (local: Provider): Provider => ({
+  ...local,
+  name: `remote-${local.kind}`,
+  timeout: 30_000,
+  layer: (scenario) => {
+    const fixtures = local.kind === "claude" ? claudeFixtures : codexFixtures
+    const pricing = local.kind === "codex" ? codexPricing(scenario) : undefined
+    return RemoteAgent.layer({
+      provider: local.kind,
+      replay: fixture(local.kind, fixtures[scenario]),
+      dir: hostDir,
+      ...(local.kind === "claude" && scenario === "resumeMissing" && { replayKnownSessions: "all" as const }),
+      ...(pricing !== undefined && { codex: { pricing } }),
+    })
+  },
+})
 
 const failureOf = <A, E>(exit: Exit.Exit<A, E>) =>
   Exit.isFailure(exit) ? Option.getOrUndefined(Cause.findErrorOption(exit.cause)) : undefined
@@ -168,10 +210,10 @@ const checkStream = (events: ReadonlyArray<AgentEvent>, sessionId: string) => {
 const outcomes = (events: ReadonlyArray<AgentEvent>) =>
   events.flatMap((e) => (e._tag === "TurnEnded" ? [e.outcome._tag] : []))
 
-for (const provider of [claude, codex]) {
+for (const provider of [claude, codex, remote(claude), remote(codex)]) {
   const base: RunOptions = { cwd: provider.cwd }
 
-  describe(`conformance: ${provider.name}`, () => {
+  describe(`conformance: ${provider.name}`, { timeout: provider.timeout ?? 5_000 }, () => {
     it.live("a turn succeeds, with a landed message, usage and cost-or-null", () =>
       Effect.gen(function* () {
         const session = yield* (yield* Agent).open(base)
@@ -303,7 +345,7 @@ for (const provider of [claude, codex]) {
       Effect.gen(function* () {
         const status = yield* (yield* Agent).status()
         Schema.encodeUnknownSync(AccountStatus)(status)
-        expect(status).toMatchObject({ provider: provider.name, usable: true, reason: null })
+        expect(status).toMatchObject({ provider: provider.kind, usable: true, reason: null })
         expect(status.plan).not.toBeNull()
         expect(status.windows.length).toBeGreaterThan(0)
         for (const w of status.windows) {
@@ -344,7 +386,7 @@ for (const provider of [claude, codex]) {
 
     it.live("history of an unknown session fails SessionNotFound", () =>
       Effect.gen(function* () {
-        const id = SessionId.make(provider.name === "claude" ? "44444444-4444-4444-8444-444444444444" : provider.missingId)
+        const id = SessionId.make(provider.kind === "claude" ? "44444444-4444-4444-8444-444444444444" : provider.missingId)
         const failure = failureOf(yield* (yield* Agent).history(id, { cwd: provider.cwd }).pipe(Effect.exit))
         expect(failure).toMatchObject({ _tag: "SessionNotFound", sessionId: id })
       }).pipe(Effect.provide(provider.layer("historyMissing"))),
@@ -374,7 +416,8 @@ for (const provider of [claude, codex]) {
     it.live("capabilities decode as Capabilities", () =>
       Effect.gen(function* () {
         const caps = yield* (yield* Agent).capabilities
-        expect(caps.provider).toBe(provider.name)
+        expect(caps.provider).toBe(provider.kind)
+        expect(caps.reattach).toBe(provider.name.startsWith("remote-"))
         expect(caps.version).toMatch(/^\d+\.\d+\.\d+/)
       }).pipe(Effect.provide(provider.layer("simple"))),
     )
