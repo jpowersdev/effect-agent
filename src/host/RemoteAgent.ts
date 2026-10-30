@@ -686,9 +686,12 @@ export const layer = (
                     result = Deferred.makeUnsafe<string | null>()
                     runs.set(request.hookId, result)
                     if (runs.size > 1_000) runs.delete(runs.keys().next().value!)
-                    // As locally: a failure, defect or timeout adds nothing.
+                    // As locally: a failure, defect or timeout adds nothing. The host's timer
+                    // decides (and logs) a timeout; this one, a second later, only stops a hook
+                    // that is still running. With the same deadline, a busy host could take
+                    // this "nothing" as the answer and never log the timeout.
                     yield* Effect.suspend(() => runHook(request)).pipe(
-                      Effect.timeoutOption(timeout),
+                      Effect.timeoutOption(Duration.sum(timeout, Duration.seconds(1))),
                       Effect.map((text) => (Option.isSome(text) && Option.isSome(text.value) && text.value.value !== "" ? text.value.value : null)),
                       Effect.catchCause(() => Effect.succeed(null)),
                       Effect.flatMap((text) => Deferred.succeed(result!, text)),
