@@ -144,7 +144,7 @@ Some changes have no mechanical answer. Raise them before committing:
 
 ### 8. Commit
 
-One commit per CLI, holding the pin, `protocol.ts` and the surface snapshot, the fixtures, and the test and comment updates. Name the versions in the message (`Codex 0.162.1 -> 0.166.0`) and summarize what the reports showed.
+One commit per CLI, holding the pin, `protocol.ts` and the surface snapshot, the fixtures, and the test and comment updates. Name the versions in the message (`Codex 0.162.1 -> 0.166.0`) and summarize what the reports showed. Add a changeset with it (`pnpm changeset`: patch, or minor if behaviour changed, naming the new versions); a Claude bump changes the CLI users get, so it always needs a release.
 
 ## Why `protocol.ts` is hand-picked, not generated
 
