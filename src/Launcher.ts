@@ -12,7 +12,7 @@
  *
  * @since 0.1.0
  */
-import { Context, Effect, Layer, type Scope } from "effect"
+import { Context, Effect, Layer, Option, type Scope } from "effect"
 import type { AgentError } from "./AgentError.ts"
 
 /**
@@ -77,8 +77,23 @@ const identity: Wrap = (command) => command
  * @category utils
  */
 export const prepare = (context: LaunchContext): Effect.Effect<Wrap, AgentError, Scope.Scope> =>
-  Effect.serviceOption(Launcher).pipe(
-    Effect.flatMap((launcher) =>
-      launcher._tag === "Some" ? launcher.value.prepare(context) : Effect.succeed(identity),
-    ),
+  Effect.flatMap(
+    Effect.serviceOption(Launcher),
+    Option.match({ onNone: () => Effect.succeed(identity), onSome: (launcher) => launcher.prepare(context) }),
   )
+
+/**
+ * `prepare` for a layer that captured a `Launcher` when it was built: the
+ * caller's `Launcher` if it provides one, else the layer's, else none.
+ *
+ * @since 0.2.0
+ * @category utils
+ */
+export const prepareWithFallback =
+  (fallback: Option.Option<Launcher["Service"]>) =>
+  (context: LaunchContext): Effect.Effect<Wrap, AgentError, Scope.Scope> =>
+    Effect.flatMap(Effect.serviceOption(Launcher), (caller) =>
+      Option.isNone(caller) && Option.isSome(fallback)
+        ? Effect.provideService(prepare(context), Launcher, fallback.value)
+        : prepare(context),
+    )

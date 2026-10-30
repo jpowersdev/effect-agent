@@ -3,7 +3,11 @@
  */
 import { describe, expect, it } from "@effect/vitest"
 import { Effect, Exit, Fiber, Stream } from "effect"
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import * as EventHub from "../src/internal/eventHub.ts"
+import * as Recorder from "../src/internal/recorder.ts"
 import * as TurnTracker from "../src/internal/turnTracker.ts"
 import { type AgentEvent, AgentError, MessageId, SessionId, TurnId } from "../src/index.ts"
 
@@ -100,4 +104,26 @@ describe("TurnTracker", () => {
     const known = (id: string) => Exit.isSuccess(Effect.runSyncExit(turns.outcome(id)))
     expect(["a", "b", "c"].map(known)).toEqual([false, true, true])
   })
+})
+
+describe("Recorder", () => {
+  it.live("writes lines in order, truncating first, and flushes when its scope closes", () =>
+    Effect.gen(function* () {
+      const path = join(mkdtempSync(join(tmpdir(), "ea-rec-")), "nested", "rec.jsonl")
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const recorder = yield* Recorder.make(path, { truncate: true })
+          for (let i = 0; i < 100; i++) recorder.record({ i })
+          yield* recorder.flush
+          recorder.record({ i: 100 })
+        }),
+      )
+      const lines = readFileSync(path, "utf8").trim().split("\n").map((l) => JSON.parse(l).i)
+      expect(lines).toEqual(Array.from({ length: 101 }, (_, i) => i))
+      // Truncated by the next recorder; appended to without `truncate`.
+      writeFileSync(path, '{"i":-1}\n')
+      yield* Effect.scoped(Effect.map(Recorder.make(path, { truncate: false }), (r) => r.record({ i: 0 })))
+      expect(readFileSync(path, "utf8")).toBe('{"i":-1}\n{"i":0}\n')
+    }),
+  )
 })

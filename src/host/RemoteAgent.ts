@@ -58,6 +58,7 @@ import { AgentError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnSucceeded } from "../AgentEvent.ts"
 import { type MessageId, SessionId, type TurnId } from "../Domain.ts"
 import * as Launcher from "../Launcher.ts"
+import * as ProcessTree from "../ProcessTree.ts"
 import * as EventFile from "./EventFile.ts"
 import { defaults as hostDefaults, isLive, pruneEvents, readManifest } from "./Host.ts"
 import {
@@ -254,15 +255,6 @@ export class AgentHosts extends Context.Service<
   }
 >()("effect-agent/AgentHosts") {}
 
-const isAlive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM"
-  }
-}
-
 const removeHostFiles = (dir: string, sessionId: string) => {
   rmSync(manifestPath(dir, sessionId), { force: true })
   rmSync(socketPath(dir, sessionId), { force: true })
@@ -291,23 +283,15 @@ export const listHosts = (dir: string): Array<Manifest> => {
   return live
 }
 
-const waitForExit = (pid: number, timeout: Duration.Input) =>
-  Effect.gen(function* () {
-    const deadline = Date.now() + Duration.toMillis(Duration.fromInputUnsafe(timeout))
-    while (Date.now() < deadline) {
-      if (!isAlive(pid)) return true
-      yield* Effect.sleep(Duration.millis(25))
-    }
-    return !isAlive(pid)
-  })
+/** Whether `pid` exits within `timeout`. */
+const waitForExit = (pid: number, timeout: Duration.Input): Effect.Effect<boolean> =>
+  Effect.sync(() => !isAlive(pid)).pipe(
+    Effect.repeat({ schedule: Schedule.spaced("25 millis"), until: (gone) => gone }),
+    Effect.timeoutOption(timeout),
+    Effect.map((exited) => exited._tag === "Some" || !isAlive(pid)),
+  )
 
-const signal = (pid: number, sig: NodeJS.Signals) => {
-  try {
-    process.kill(pid, sig)
-  } catch {
-    // Already gone.
-  }
-}
+const { isAlive, signal } = ProcessTree
 
 /**
  * `Agent` and `AgentHosts`, running each session in its own host process.
@@ -328,7 +312,7 @@ export const layer = (
       const readyTimeout = options.readyTimeout ?? Duration.seconds(60)
       const hostCommand = options.host
       const local = Context.get(yield* Layer.build(providerLayer(options)), Agent)
-      const layerLauncher = yield* Effect.serviceOption(Launcher.Launcher)
+      const prepareWithLayer = Launcher.prepareWithFallback(yield* Effect.serviceOption(Launcher.Launcher))
 
       const agentError = (message: string, cause?: unknown) =>
         new AgentError({ message, provider, ...(cause !== undefined && { cause }) })
@@ -336,13 +320,7 @@ export const layer = (
         new SessionNotFound({ message: `no live host for session ${sessionId}: ${why}`, sessionId })
       const fromClient = (e: RpcClientError.RpcClientError) => agentError(`host connection: ${e.message}`, e)
 
-      const prepareWrap = (cwd: string) =>
-        Effect.flatMap(Effect.serviceOption(Launcher.Launcher), (caller) => {
-          const prepare = Launcher.prepare({ provider, cwd })
-          return Option.isNone(caller) && Option.isSome(layerLauncher)
-            ? Effect.provideService(prepare, Launcher.Launcher, layerLauncher.value)
-            : prepare
-        })
+      const prepareWrap = (cwd: string) => prepareWithLayer({ provider, cwd })
 
       // ---- starting a host ----
 

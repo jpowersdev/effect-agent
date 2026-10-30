@@ -26,6 +26,7 @@ import { Agent, type AgentSession, type Hooks, type RunOptions } from "../Agent.
 import { AgentError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnOutcome, TurnSucceeded } from "../AgentEvent.ts"
 import * as TurnTracker from "../internal/turnTracker.ts"
+import * as ProcessTree from "../ProcessTree.ts"
 import * as EventFile from "./EventFile.ts"
 import * as HookBridge from "./HookBridge.ts"
 import {
@@ -112,15 +113,6 @@ export interface HostIO {
 
 type Reason = "ended" | "stop" | "sigterm" | "orphan"
 
-const isAlive = (pid: number): boolean => {
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === "EPERM"
-  }
-}
-
 /**
  * Read a manifest file; undefined if missing or unreadable.
  *
@@ -141,7 +133,7 @@ export const readManifest = (path: string): Manifest | undefined => {
  * @since 0.1.0
  * @category predicates
  */
-export const isLive = (manifest: Manifest): boolean => isAlive(manifest.pid)
+export const isLive = (manifest: Manifest): boolean => ProcessTree.isAlive(manifest.pid)
 
 // ---------------------------------------------------------------------------
 // Event log

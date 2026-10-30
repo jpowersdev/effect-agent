@@ -49,10 +49,11 @@ import {
 } from "@anthropic-ai/claude-agent-sdk"
 import { Cause, Context, Duration, Effect, Exit, Fiber, Layer, Option, Queue, Schema, Scope, Stream } from "effect"
 import { type ChildProcess, spawn as nodeSpawn } from "node:child_process"
-import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
+import * as Recorder from "../internal/recorder.ts"
 import type * as Launcher from "../Launcher.ts"
 import * as ProcessTree from "../ProcessTree.ts"
 
@@ -207,12 +208,6 @@ export type RecordLine =
         readonly exitCode: number | null
       }
     }
-
-const recorder = (path: string | undefined) => {
-  if (path === undefined) return (_line: RecordLine) => {}
-  mkdirSync(dirname(path), { recursive: true })
-  return (line: RecordLine) => appendFileSync(path, JSON.stringify(line) + "\n")
-}
 
 /**
  * The recording line for a transport error.
@@ -552,9 +547,10 @@ const recordHooks = (
 const openQuery = Effect.fnUntraced(function* (
   options: Options,
   launch: Launch,
-  record: (line: RecordLine) => void,
-  recording: boolean,
+  recorder: Recorder.Recorder | null,
 ) {
+  const record = (line: RecordLine) => recorder?.record(line)
+  const recording = recorder !== null
   const spawner = makeSpawner(launch)
   /** `in` frames so far: where a hook call happened, for `hook` lines. */
   let frames = 0
@@ -633,6 +629,7 @@ const openQuery = Effect.fnUntraced(function* (
         Effect.andThen(Fiber.await(pump).pipe(Effect.timeoutOption(Duration.seconds(10)))),
         Effect.andThen(Fiber.interrupt(pump)),
         Effect.andThen(reap(spawner, Duration.seconds(5), Duration.seconds(3))),
+        Effect.andThen(recorder?.flush ?? Effect.void),
       ),
   )
 
@@ -740,22 +737,32 @@ const readHistory = ({ sessionId, cwd, transcript }: SessionLookup) =>
  * @category layers
  */
 export const layer = (options: LayerOptions = {}): Layer.Layer<ClaudeSdk> =>
-  Layer.sync(ClaudeSdk, () => {
-    const record = recorder(options.record)
-    return ClaudeSdk.of({
-      open: (sdkOptions, launch = noLaunch) => openQuery(sdkOptions, launch, record, options.record !== undefined),
-      sessionExists: ({ sessionId, cwd, transcript }) =>
-        Effect.promise(() => getSessionInfo(sessionId, { dir: cwd }).catch(() => undefined)).pipe(
-          Effect.map((info) => info !== undefined || existsSync(transcript)),
-        ),
-      version: bundledVersion,
-      status: (sdkOptions, launch = noLaunch) =>
-        statusQuery(sdkOptions, launch).pipe(Effect.tap((status) => Effect.sync(() => record({ dir: "status", status })))),
-      history: (lookup) =>
-        readHistory(lookup).pipe(
-          Effect.tap((history) =>
-            Effect.sync(() => record({ dir: "history", sessionId: lookup.sessionId, cwd: lookup.cwd, history })),
+  Layer.effect(
+    ClaudeSdk,
+    Effect.gen(function* () {
+      const recorder =
+        options.record !== undefined
+          ? yield* Recorder.make(options.record, { truncate: false }).pipe(
+              // A recording that can't even start is a bug in the caller's setup.
+              Effect.orDie,
+            )
+          : null
+      const record = (line: RecordLine) => recorder?.record(line)
+      return ClaudeSdk.of({
+        open: (sdkOptions, launch = noLaunch) => openQuery(sdkOptions, launch, recorder),
+        sessionExists: ({ sessionId, cwd, transcript }) =>
+          Effect.promise(() => getSessionInfo(sessionId, { dir: cwd }).catch(() => undefined)).pipe(
+            Effect.map((info) => info !== undefined || existsSync(transcript)),
           ),
-        ),
-    })
-  })
+        version: bundledVersion,
+        status: (sdkOptions, launch = noLaunch) =>
+          statusQuery(sdkOptions, launch).pipe(Effect.tap((status) => Effect.sync(() => record({ dir: "status", status })))),
+        history: (lookup) =>
+          readHistory(lookup).pipe(
+            Effect.tap((history) =>
+              Effect.sync(() => record({ dir: "history", sessionId: lookup.sessionId, cwd: lookup.cwd, history })),
+            ),
+          ),
+      })
+    }),
+  )

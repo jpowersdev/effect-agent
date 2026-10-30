@@ -11,7 +11,7 @@
  */
 import { randomUUID } from "node:crypto"
 import { readdirSync, readFileSync } from "node:fs"
-import { Duration, Effect } from "effect"
+import { Duration, Effect, Schedule } from "effect"
 
 /**
  * The environment variable that marks an agent process and everything it starts.
@@ -29,8 +29,13 @@ export const markerVariable = "EFFECT_AGENT_PROCESS"
  */
 export const newMarker = (): string => randomUUID()
 
-/** Send a signal to a process (or, with a negative id, a process group). False when it is gone. */
-const signal = (pid: number, sig: NodeJS.Signals | 0): boolean => {
+/**
+ * Send a signal to a process (or, with a negative id, a process group). False when it is gone.
+ *
+ * @since 0.2.0
+ * @category utils
+ */
+export const signal = (pid: number, sig: NodeJS.Signals | 0): boolean => {
   try {
     process.kill(pid, sig)
     return true
@@ -39,6 +44,14 @@ const signal = (pid: number, sig: NodeJS.Signals | 0): boolean => {
     return (e as NodeJS.ErrnoException).code === "EPERM"
   }
 }
+
+/**
+ * Whether a process is running (ours or not).
+ *
+ * @since 0.2.0
+ * @category predicates
+ */
+export const isAlive = (pid: number): boolean => signal(pid, 0)
 
 /**
  * Live processes whose environment carries `EFFECT_AGENT_PROCESS=<marker>` (Linux; elsewhere none).
@@ -80,18 +93,22 @@ export const kill = (
   options: { readonly pid?: number | undefined; readonly grace?: Duration.Input } = {},
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const send = (sig: NodeJS.Signals | 0) => {
-      let alive = options.pid !== undefined ? signal(-options.pid, sig) : false
-      for (const p of markedProcesses(marker)) alive = signal(p, sig) || alive
+    const group = options.pid !== undefined ? -options.pid : undefined
+    // One sweep of /proc to find them; after that, only those pids are checked.
+    const marked = markedProcesses(marker)
+    const send = (pids: ReadonlyArray<number>, sig: NodeJS.Signals | 0) => {
+      let alive = group !== undefined ? signal(group, sig) : false
+      for (const p of pids) alive = signal(p, sig) || alive
       return alive
     }
-    if (!send("SIGTERM")) return
-    const deadline = Date.now() + Duration.toMillis(Duration.fromInputUnsafe(options.grace ?? Duration.seconds(3)))
-    while (Date.now() < deadline) {
-      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 50)))
-      if (!send(0)) return
-    }
-    send("SIGKILL")
+    if (!send(marked, "SIGTERM")) return
+    const exited = yield* Effect.sync(() => !send(marked, 0)).pipe(
+      Effect.repeat({ schedule: Schedule.spaced("50 millis"), until: (gone) => gone }),
+      Effect.timeoutOption(options.grace ?? Duration.seconds(3)),
+    )
+    if (exited._tag === "Some") return
+    // Sweep again for the SIGKILL: anything started during the grace period goes too.
+    send([...new Set([...marked, ...markedProcesses(marker)])], "SIGKILL")
   })
 
 /**
