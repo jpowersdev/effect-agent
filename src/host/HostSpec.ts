@@ -124,6 +124,19 @@ export const HostSpec = Schema.Struct({
    * to the first call of each of these RPCs (after the host has acted on it).
    */
   testDropBeforeReply: Schema.optionalKey(Schema.Array(Schema.String)),
+  /**
+   * Which `RunOptions.hooks` the session was opened with. The functions stay
+   * in the clients; the host forwards each call to an attached client.
+   */
+  hooks: Schema.optionalKey(
+    Schema.Struct({
+      beforeTool: Schema.optionalKey(Schema.Boolean),
+      afterTool: Schema.optionalKey(Schema.Boolean),
+      beforeStop: Schema.optionalKey(Schema.Boolean),
+    }),
+  ),
+  /** Internal, tests only: serve the `TestInvokeHook` RPC. */
+  testInvokeHook: Schema.optionalKey(Schema.Boolean),
   /** End an idle session no client has been attached to for this long. Default 30 minutes. */
   orphanTimeout: Schema.optionalKey(DurationSpec),
   /** How long to keep serving after the session ends, for clients to read the last events. Default 5 seconds. */

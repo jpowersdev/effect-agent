@@ -36,7 +36,7 @@ Each provider is two layers: a transport (`ClaudeSdk`, `CodexAppServer`) and an 
 | Cost | reported | estimated from a `pricing` table you supply |
 | Spend cap | native (`maxBudgetUsd`) | estimated, enforced by interrupting |
 | Usage-limit reset times | yes | yes |
-| Hooks | yes | no (`open` fails if hooks are set) |
+| Hooks | yes (also remote: see Reattach) | no (`open` fails if hooks are set) |
 | `disable.subagents` | yes | **no**: Codex can't turn them off per thread |
 | `disable.tools` | any tool | only some tools (others fail `open`) |
 | Account `status` | yes (experimental SDK usage API) | yes |
@@ -119,7 +119,7 @@ yield* session.subscribeFrom(lastPersistedSeq + 1).pipe(Stream.runForEach(persis
 const result = yield* session.awaitMessage(messageId)         // even if the turn ended while nobody was attached
 ```
 
-A `RemoteSession` is an `AgentSession` plus `subscribeFrom(seq)` (a stream of `{ seq, event }` from any seq, then live), `lastSeq`, `awaitTurn` / `awaitMessage` (by turn id, or by the `MessageId` that `send` returned), `detach` and `stop`. `subscribe`/`events` are live from now, as for a local session. `onScopeClose` is `"stop"` by default (closing the scope ends the session, as locally); set `"detach"` to leave it running. `AgentHosts.list` lists live hosts. `status` and `history` run locally. Hooks are refused: functions can't cross processes.
+A `RemoteSession` is an `AgentSession` plus `subscribeFrom(seq)` (a stream of `{ seq, event }` from any seq, then live), `lastSeq`, `awaitTurn` / `awaitMessage` (by turn id, or by the `MessageId` that `send` returned), `detach` and `stop`. `subscribe`/`events` are live from now, as for a local session. `onScopeClose` is `"stop"` by default (closing the scope ends the session, as locally); set `"detach"` to leave it running. `AgentHosts.list` lists live hosts. `status` and `history` run locally.
 
 Each host serves one session over effect/rpc on a unix socket in `dir` (default `$XDG_RUNTIME_DIR/effect-agent`, kept at mode 0700), next to a manifest `<sessionId>.json`, a log `<sessionId>.log` and the events file `<sessionId>.events.jsonl`. It exits when the session ends (`end`, `stop`, the agent dying, SIGTERM), lingering a few seconds so clients get the last events, and when no client has been attached to an idle session for `orphanTimeout` (default 30 minutes). Stale manifests (dead pid) are removed by `list` and `attach`.
 
@@ -132,7 +132,20 @@ When the host exits, the socket and manifest go, but the events file is kept for
 yield* (yield* AgentHosts).events(sessionId, lastPersistedSeq + 1).pipe(Stream.runForEach(persist))
 ```
 
-**Reconnecting.** When the connection to a host drops (other than by `detach`/`stop` or the session ending), the client re-dials it on `reconnect`, by default an exponential backoff from 100 ms, capped at 2 s between attempts, giving up after 30 s (`RemoteAgent.defaultReconnect`). It's transparent: subscriptions resume from the last seq they delivered, and calls in flight are retried. `send`, `steer` and `turn` carry a client-generated request id. The host remembers the last 1 000 results by id and answers a repeat with the original result, so a retried `send` lands once and a retried `turn` waits on the original turn. Calls fail with `AgentError` when the schedule gives up, or at once if the host is gone (manifest removed or pid dead). `reconnect: false` fails on the first drop.
+**Hooks.** `RunOptions.hooks` work on remote sessions where the provider has them (Claude; Codex `open` refuses them, as locally, and `capabilities.hooks` says which). The functions stay in your process. The host only knows which hooks are set, and it forwards each call (Schema-encoded input) to an attached client, then adds that client's answer:
+
+```ts
+const session = yield* (yield* AgentHosts).open({ cwd, hooks: { beforeTool } }, { hookTimeout: "2 seconds" })
+// after a restart, answer them again:
+const session = yield* (yield* AgentHosts).attach(sessionId, { hooks: { beforeTool } })
+```
+
+- **Who answers.** Of the attached clients that have that hook, the one that attached most recently. When it detaches, the one before it answers again. A client attached without hooks never answers.
+- **No answer adds nothing.** With no such client attached, the hook adds nothing at once. A client that doesn't answer within `hookTimeout` (default 5 seconds; set on the layer, or per session in `open`/`attach`) adds nothing either, and the host logs the timeout, so the agent never waits longer. A hook that fails or defects adds nothing, as locally.
+- **Reconnects.** A call still waiting when its client's connection drops is delivered again once the client reconnects, until its timeout. The client runs each call once.
+- **Limits.** A reattaching client can only answer hooks the session was opened with.
+
+**Reconnecting.** When the connection to a host drops (other than by `detach`/`stop` or the session ending), the client re-dials it on `reconnect`, by default an exponential backoff from 100 ms, capped at 2 s between attempts, giving up after 30 s (`RemoteAgent.defaultReconnect`). It's transparent: subscriptions resume from the last seq they delivered, and calls in flight are retried. `send`, `steer`, `turn` and `interrupt` carry a client-generated request id. The host remembers the last 1 000 results by id and answers a repeat with the original result, so a retried `send` lands once, a retried `turn` waits on the original turn, and a retried `interrupt` can't hit the turn after it. Calls fail with `AgentError` when the schedule gives up, or at once if the host is gone (manifest removed or pid dead). `reconnect: false` fails on the first drop.
 
 **Process supervisors:** hosts are started detached, so they outlive the process that opened them, but whatever supervises that process may still stop them. The `Launcher` applies to the host command (so the host and the agent it runs share whatever it sets up); use it to place hosts outside the supervisor's reach. For example:
 

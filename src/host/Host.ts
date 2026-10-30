@@ -18,10 +18,11 @@ import { RpcSerialization, RpcServer } from "effect/rpc"
 import { SocketServer } from "effect/socket"
 import type { Socket as NetSocket } from "node:net"
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
-import { Agent, type AgentSession } from "../Agent.ts"
+import { Agent, type AgentSession, type Hooks, type RunOptions } from "../Agent.ts"
 import { AgentError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnOutcome, TurnSucceeded } from "../AgentEvent.ts"
 import * as EventFile from "./EventFile.ts"
+import * as HookBridge from "./HookBridge.ts"
 import {
   eventsPath,
   type HostSpec,
@@ -350,6 +351,16 @@ const settle = (outcome: TurnOutcome): Effect.Effect<TurnSucceeded, TurnFailure>
 // Host
 // ---------------------------------------------------------------------------
 
+/** `RunOptions.hooks` whose calls go through `bridge` to an attached client. */
+export const remoteHooks = (flags: HostSpec["hooks"], bridge: HookBridge.HookBridge): Hooks | undefined => {
+  if (flags === undefined) return undefined
+  const hooks: { -readonly [K in keyof Hooks]: Hooks[K] } = {}
+  if (flags.beforeTool === true) hooks.beforeTool = (call) => bridge.call("beforeTool", call)
+  if (flags.afterTool === true) hooks.afterTool = (call) => bridge.call("afterTool", call)
+  if (flags.beforeStop === true) hooks.beforeStop = () => bridge.call("beforeStop", null)
+  return Object.keys(hooks).length > 0 ? hooks : undefined
+}
+
 const describe = (cause: Cause.Cause<unknown>): string => {
   const error = Cause.squash(cause)
   return error instanceof Error ? error.message : String(error)
@@ -373,9 +384,16 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
 
       const agent = Context.get(yield* Layer.build(providerLayer(spec)), Agent)
 
+      // ---- hooks: forwarded to an attached client ----
+      /** Bound once connections are tracked (below). */
+      let dropHookDelivery = () => false
+      const hookBridge = yield* HookBridge.make({ dropDelivery: () => dropHookDelivery() })
+      const hooks = remoteHooks(spec.hooks, hookBridge)
+      const runOptions: RunOptions = { ...toRunOptions(spec.run), ...(hooks !== undefined && { hooks }) }
+
       // ---- open ----
       const sessionScope = yield* Scope.make()
-      const opened = yield* agent.open(toRunOptions(spec.run)).pipe(Scope.provide(sessionScope), Effect.exit)
+      const opened = yield* agent.open(runOptions).pipe(Scope.provide(sessionScope), Effect.exit)
       if (Exit.isFailure(opened)) {
         const failure = Cause.findErrorOption(opened.cause)
         const error =
@@ -421,10 +439,13 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
         Stream.runForEach(log.append),
         Effect.exit,
         Effect.flatMap((exit) =>
-          log.end(
-            Exit.isSuccess(exit)
-              ? null
-              : Option.getOrElse(Cause.findErrorOption(exit.cause), () => agentError(`event stream failed: ${describe(exit.cause)}`)),
+          Effect.andThen(
+            hookBridge.close,
+            log.end(
+              Exit.isSuccess(exit)
+                ? null
+                : Option.getOrElse(Cause.findErrorOption(exit.cause), () => agentError(`event stream failed: ${describe(exit.cause)}`)),
+            ),
           ),
         ),
         Effect.andThen(Effect.logInfo("session ended")),
@@ -466,6 +487,11 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       )
       // Internal, tests only: drop them right before replying to the first call of each of these.
       const dropBeforeReply = new Set(spec.testDropBeforeReply ?? [])
+      dropHookDelivery = () => {
+        if (!dropBeforeReply.delete("HookRequest")) return false
+        dropConnections()
+        return true
+      }
       const replyOrDrop = (rpc: string) =>
         Effect.ensuring(
           Effect.sync(() => {
@@ -487,7 +513,7 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
               location: Option.getOrNull(session.location),
               pid: Option.getOrNull(pid),
               hostPid: process.pid,
-              capabilities: { ...capabilities, reattach: true, hooks: false },
+              capabilities: { ...capabilities, reattach: true },
               lastSeq: log.lastSeq(),
               oldestSeq: log.oldest(),
               ended: log.ended() !== null,
@@ -502,13 +528,20 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
           once(requestId, session.steer(input).pipe(Effect.tap((o) => Effect.sync(() => log.sent(o.messageId))))).pipe(
             replyOrDrop("Steer"),
           ),
-        Interrupt: () => session.interrupt,
+        // Deduped like `Send`: a retry after a reconnect must not interrupt a newer turn.
+        Interrupt: ({ requestId }) => once(requestId, session.interrupt).pipe(replyOrDrop("Interrupt")),
         End: () => session.end,
         Stop: () => Deferred.succeed(shutdown, "stop").pipe(Effect.andThen(Deferred.await(sessionClosed))),
         // A retried `Turn` waits on the original turn.
         Turn: ({ input, requestId }) => once(requestId, session.turn(input)).pipe(replyOrDrop("Turn")),
         AwaitTurn: ({ turnId }) => log.awaitTurn(turnId).pipe(Effect.flatMap(settle), replyOrDrop("AwaitTurn")),
         AwaitMessage: ({ messageId }) => log.awaitMessage(messageId).pipe(Effect.flatMap(settle), replyOrDrop("AwaitMessage")),
+        HookRequests: (answerer) => hookBridge.register(answerer),
+        HookResponse: ({ hookId, result }) => hookBridge.respond(hookId, result),
+        TestInvokeHook: ({ requestId, hook, call }) =>
+          spec.testInvokeHook === true
+            ? once(requestId, hookBridge.call(hook, call).pipe(Effect.map(Option.getOrNull)))
+            : Effect.fail(agentError("TestInvokeHook is for tests only")),
       })
 
       const serverContext = yield* Layer.build(NodeSocketServer.layer({ path: socket })).pipe(Effect.exit)
@@ -577,6 +610,7 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       }
       yield* Scope.close(sessionScope, Exit.void)
       const drained = yield* Fiber.await(consumer).pipe(Effect.timeoutOption(Duration.seconds(5)))
+      yield* hookBridge.close
       if (Option.isNone(drained)) yield* log.end(agentError("session closed"))
       else if (log.ended() === null) yield* log.end(null)
       yield* Deferred.succeed(sessionClosed, undefined)

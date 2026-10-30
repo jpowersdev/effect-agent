@@ -332,6 +332,27 @@ for (const p of providers) {
     )
 
     it.live(
+      "an interrupt whose connection drops before its reply acts once (the retry doesn't hit the next turn)",
+      () =>
+        Effect.gen(function* () {
+          const session = yield* (yield* AgentHosts).open({ cwd: p.cwd })
+          started.add(session.hostPid)
+          const all = yield* collect(session.subscribeFrom(0))
+          yield* session.send("sleep for a long time")
+          yield* waitUntil(() => all.items.some((e) => e.event._tag === "ToolCall"), "the tool call")
+          yield* session.interrupt
+          expect(drops(dir, session.sessionId)).toBe(1)
+          const next = yield* session.turn("Reply with just the word: pong")
+          expect(next.finalText.length).toBeGreaterThan(0)
+          yield* session.end
+          yield* Fiber.join(all.fiber)
+          const outcomes = all.items.flatMap((e) => (e.event._tag === "TurnEnded" ? [e.event.outcome._tag] : []))
+          expect(outcomes).toEqual(["Interrupted", "Succeeded"])
+        }).pipe(Effect.scoped, Effect.provide(layer(p.interrupt, { testDropBeforeReply: ["Interrupt"] }))),
+      timeout,
+    )
+
+    it.live(
       "a turn() spanning a drop mid-turn waits on the original turn",
       () =>
         Effect.gen(function* () {

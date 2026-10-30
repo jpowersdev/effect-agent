@@ -3,6 +3,7 @@
  *
  *   node scripts/live-reattach.ts            # claude, then codex
  *   node scripts/live-reattach.ts codex      # one provider
+ *   node scripts/live-reattach.ts hooks      # remote hooks (Claude)
  *
  * For each provider:
  *   1. Process A (a child node process) opens a session with
@@ -20,6 +21,11 @@
  *      `AgentHosts.events` after the host exited) matches it event for event.
  *   5. It checks the host and agent processes are gone.
  *
+ * `hooks`: a remote Claude session whose hooks run in this process. A
+ * `beforeTool` adds a secret word the reply must contain; a `beforeStop`
+ * that answers once keeps the turn going; and with only a hookless client
+ * attached, a hooked turn completes with the hook adding nothing.
+ *
  * Runs in /tmp/effect-agent-live/reattach/ (Claude `claude-haiku-5-5`, Codex at
  * effort `low`); each provider costs two short command turns.
  */
@@ -27,7 +33,7 @@ import { spawn } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { Duration, Effect, Fiber, Option, Stream } from "effect"
+import { Duration, Effect, Fiber, Option, Ref, Stream } from "effect"
 import { type RunOptions, SessionId, TurnId } from "../src/index.ts"
 import { AgentHosts, HostSpec, RemoteAgent, type SeqEvent } from "../src/host/index.ts"
 
@@ -222,6 +228,97 @@ const processB = (provider: Provider) =>
   }).pipe(Effect.provide(RemoteAgent.layer(options(provider))))
 
 // ---------------------------------------------------------------------------
+// Remote hooks (Claude)
+// ---------------------------------------------------------------------------
+
+const secretPrompt =
+  "Use the Bash tool once to run `echo hello`. Context added while the tool runs may tell you a secret word. Then reply with just the secret word, or NONE if you were not told one."
+
+const hooksScenario = Effect.gen(function* () {
+  console.log("\n== claude: remote hooks ==")
+  const t0 = Date.now()
+  const hosts = yield* AgentHosts
+  const base = run("claude")
+  const created: Array<string> = []
+
+  // beforeTool answered from this process.
+  yield* Effect.gen(function* () {
+    const calls: Array<string> = []
+    const session = yield* hosts.open({
+      ...base,
+      hooks: {
+        beforeTool: (call) =>
+          Effect.sync(() => {
+            calls.push(call.name)
+            return Option.some("The secret word is MANGO.")
+          }),
+      },
+    })
+    created.push(session.sessionId)
+    const done = yield* session.turn(secretPrompt).pipe(Effect.timeout(Duration.seconds(120)))
+    console.log(`  beforeTool calls ${calls.join(",")}; reply ${JSON.stringify(done.finalText)}`)
+    check(calls.includes("Bash"), "the remote session's beforeTool ran here, for Bash")
+    check(/MANGO/.test(done.finalText), "the reply has the secret word the hook added")
+    yield* session.stop
+  }).pipe(Effect.scoped)
+
+  // beforeStop answering once keeps the turn going.
+  yield* Effect.gen(function* () {
+    const asked = yield* Ref.make(0)
+    const session = yield* hosts.open({
+      ...base,
+      hooks: {
+        beforeStop: () =>
+          Ref.getAndUpdate(asked, (n) => n + 1).pipe(
+            Effect.map((n) => (n === 0 ? Option.some("Before you finish, reply once more with just the word KIWI.") : Option.none())),
+          ),
+      },
+    })
+    created.push(session.sessionId)
+    const events = yield* session.subscribe
+    const collected = yield* events.pipe(Stream.runCollect, Effect.forkScoped)
+    const done = yield* session.turn("Reply with just: hello").pipe(Effect.timeout(Duration.seconds(120)))
+    yield* session.end
+    const all = yield* Fiber.join(collected)
+    const texts = all.flatMap((e) => (e._tag === "Text" ? [e.text] : []))
+    console.log(`  beforeStop calls ${yield* Ref.get(asked)}; texts ${JSON.stringify(texts)}; final ${JSON.stringify(done.finalText)}`)
+    check((yield* Ref.get(asked)) >= 2, "beforeStop ran again after the turn continued")
+    check(texts.some((t) => /KIWI/.test(t)), "the turn acted on the stop hook's text")
+    check(all.filter((e) => e._tag === "TurnEnded").length === 1, "all in one turn")
+  }).pipe(Effect.scoped)
+
+  // The hooked client detaches; a hookless one runs a turn: the hook adds nothing, without waiting.
+  const calls = yield* Ref.make(0)
+  const sessionId = yield* Effect.gen(function* () {
+    const session = yield* hosts.open(
+      { ...base, hooks: { beforeTool: () => Effect.as(Ref.update(calls, (n) => n + 1), Option.some("The secret word is MANGO.")) } },
+      { hookTimeout: "30 seconds" },
+    )
+    created.push(session.sessionId)
+    yield* session.detach
+    return session.sessionId
+  }).pipe(Effect.scoped)
+  yield* Effect.gen(function* () {
+    const session = yield* hosts.attach(sessionId)
+    const t1 = Date.now()
+    const done = yield* session.turn(secretPrompt).pipe(Effect.timeout(Duration.seconds(120)))
+    const ms = Date.now() - t1
+    console.log(`  detached: reply ${JSON.stringify(done.finalText)} in ${ms} ms`)
+    check(!/MANGO/.test(done.finalText), "with the hooked client detached, the hook added nothing")
+    check((yield* Ref.get(calls)) === 0, "the detached client's hook was never called")
+    check(ms < 30_000, "and the turn didn't wait for the 30 s hook timeout")
+    yield* session.stop
+  }).pipe(Effect.scoped)
+
+  check((yield* hosts.list).length === 0, "no hosts left")
+  for (const id of created) {
+    rmSync(HostSpec.eventsPath(dir, id), { force: true })
+    rmSync(HostSpec.logPath(dir, id), { force: true })
+  }
+  console.log(`  hooks passed in ${Date.now() - t0} ms`)
+}).pipe(Effect.provide(RemoteAgent.layer({ ...options("claude"), onScopeClose: "stop" })))
+
+// ---------------------------------------------------------------------------
 
 const args = process.argv.slice(2)
 if (args[0] === "--process-a") {
@@ -231,8 +328,9 @@ if (args[0] === "--process-a") {
   })
 } else {
   mkdirSync(dir, { recursive: true })
-  const providers = (args.length > 0 ? args : ["claude", "codex"]) as Array<Provider>
-  Effect.runPromise(Effect.forEach(providers, processB, { discard: true })).then(
+  const providers = (args.length > 0 ? args : ["claude", "codex"]) as Array<Provider | "hooks">
+  const scenario = (name: Provider | "hooks") => (name === "hooks" ? hooksScenario : processB(name))
+  Effect.runPromise(Effect.forEach(providers, scenario, { discard: true })).then(
     () => {
       rmSync(join(dir, "hosts.stderr.log"), { force: true })
       console.log("\nall passed")

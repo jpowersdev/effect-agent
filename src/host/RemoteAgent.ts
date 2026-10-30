@@ -15,7 +15,9 @@
  *   yield* session.subscribeFrom(0).pipe(Stream.runForEach(persist))
  *
  * `RemoteAgent.layer` provides `Agent` (so existing programs work unchanged)
- * and `AgentHosts` (`open` typed as `RemoteSession`, `attach`, `list`).
+ * and `AgentHosts` (`open` typed as `RemoteSession`, `attach`, `list`,
+ * `events`). Hooks stay in the client: the host forwards each hook call to
+ * an attached client that has hooks (see `AttachOptions`).
  *
  * Process supervision: hosts are started with `detached: true` and survive
  * their caller, but a service manager may still kill them. A runner under
@@ -34,7 +36,7 @@ import { randomUUID } from "node:crypto"
 import { closeSync, existsSync, openSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { Agent, type AgentSession, type RunOptions } from "../Agent.ts"
+import { Agent, type AgentSession, type Hooks, type RunOptions } from "../Agent.ts"
 import { AgentError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
 import type { AgentEvent, TurnSucceeded } from "../AgentEvent.ts"
 import { type MessageId, SessionId, type TurnId } from "../Domain.ts"
@@ -54,7 +56,7 @@ import {
   ReadyLine,
   socketPath,
 } from "./HostSpec.ts"
-import { type EventsTrimmed, type HostInfo, HostRpcs, type SeqEvent } from "./protocol.ts"
+import { type EventsTrimmed, type HookName, type HookRequest, type HostInfo, HostRpcs, type SeqEvent } from "./protocol.ts"
 
 export const mainPath = fileURLToPath(new URL("./main.ts", import.meta.url))
 
@@ -88,8 +90,15 @@ export interface RemoteAgentOptions extends ProviderSpec {
    * drop. Default `defaultReconnect`.
    */
   readonly reconnect?: Schedule.Schedule<unknown, AgentError> | false
+  /**
+   * How long a host waits for a client to answer a hook call before the hook
+   * adds nothing. Default 5 seconds. `open`/`attach` can override it per session.
+   */
+  readonly hookTimeout?: Duration.Input
   /** Internal, tests only (see `HostSpec.testDropBeforeReply`). */
   readonly testDropBeforeReply?: ReadonlyArray<string>
+  /** Internal, tests only (see `HostSpec.testInvokeHook`). */
+  readonly testInvokeHook?: boolean
   /** A host ends its session after this long idle with no client attached. Default 30 minutes. */
   readonly orphanTimeout?: Duration.Input
   /** How long a host keeps serving after its session ends. Default 5 seconds. */
@@ -150,13 +159,39 @@ export interface RemoteSession extends AgentSession {
   readonly stop: Effect.Effect<void, AgentError>
 }
 
+export interface AttachOptions {
+  /**
+   * Answer the session's hook calls with these. Only hooks the session was
+   * opened with are ever called. Of the attached clients with a hook, the one
+   * that attached most recently answers it; a client attached without hooks
+   * never does.
+   */
+  readonly hooks?: Hooks
+  /** Override `RemoteAgentOptions.hookTimeout` for the calls this client answers. */
+  readonly hookTimeout?: Duration.Input
+}
+
+const hookNames = (hooks: Hooks | undefined): Array<HookName> =>
+  hooks === undefined ? [] : (["beforeTool", "afterTool", "beforeStop"] as const).filter((k) => hooks[k] !== undefined)
+
 export class AgentHosts extends Context.Service<
   AgentHosts,
   {
     /** `Agent.open`, typed as a `RemoteSession`. */
-    readonly open: (options: RunOptions) => Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope>
+    /**
+     * `Agent.open`, typed as a `RemoteSession`. `options.hooks` stay in this
+     * process: the host forwards each hook call to an attached client that
+     * has hooks (see `attach`). Refused where the provider has no hooks.
+     */
+    readonly open: (
+      options: RunOptions,
+      session?: { readonly hookTimeout?: Duration.Input },
+    ) => Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope>
     /** Connect to a running host. `SessionNotFound` when no live host has that session. */
-    readonly attach: (sessionId: SessionId) => Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope>
+    readonly attach: (
+      sessionId: SessionId,
+      options?: AttachOptions,
+    ) => Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope>
     /** Live hosts in the directory; manifests of dead ones (and expired events files) are removed. */
     readonly list: Effect.Effect<ReadonlyArray<Manifest>>
     /**
@@ -355,6 +390,8 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
       const connect = (
         target: { readonly sessionId: SessionId; readonly socket: string; readonly pid: number },
         onClose: "stop" | "detach",
+        /** Answer the session's hook calls with these. */
+        answering?: { readonly hooks: Hooks; readonly timeout: Duration.Input },
       ) =>
         Effect.gen(function* () {
           const sessionScope = yield* Effect.scope
@@ -528,31 +565,19 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
               : Effect.fail(agentError(`host ${target.pid} did not exit after Stop`))
           })
 
-          /** `Subscribe`, resumed after a drop from the seq after the last one delivered. */
-          const subscribeFrom = (fromSeq: number, live = false): Stream.Stream<SeqEvent, EventsTrimmed | AgentError> =>
+          /** A streaming call that survives drops: after one, `make` runs again on the next connection. */
+          const follow = <A, E>(
+            make: (client: Client) => Stream.Stream<A, E>,
+          ): Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | AgentError> =>
             Stream.suspend(() => {
               if (detached) return Stream.fail(detachedError())
-              let next = Math.max(0, Math.floor(fromSeq))
-              let delivered = false
-              const attempt = (): Stream.Stream<SeqEvent, EventsTrimmed | AgentError> =>
+              const attempt = (): Stream.Stream<A, Exclude<E, RpcClientError.RpcClientError> | AgentError> =>
                 Stream.unwrap(
                   Effect.map(current, (conn) =>
-                    conn.client.Subscribe({ fromSeq: next, live: live && !delivered }).pipe(
-                      Stream.tap((entry) =>
-                        Effect.sync(() => {
-                          delivered = true
-                          if (entry.seq >= next) next = entry.seq + 1
-                        }),
-                      ),
-                      // The host ends the stream when the session ends (not when a consumer stops early).
-                      Stream.concat(Stream.unwrap(Effect.sync(() => ((sessionEnded = true), Stream.empty)))),
+                    make(conn.client).pipe(
                       Stream.catchCause((cause) => {
                         const why = droppedUnder(conn, cause)
-                        if (why === null) {
-                          // The session's own ending error (or EventsTrimmed).
-                          if (Option.exists(Cause.findErrorOption(cause), (e) => e instanceof AgentError)) sessionEnded = true
-                          return Stream.failCause(cause as Cause.Cause<EventsTrimmed | AgentError>)
-                        }
+                        if (why === null) return Stream.failCause(cause as Cause.Cause<Exclude<E, RpcClientError.RpcClientError>>)
                         return Stream.unwrap(Effect.as(lost(conn, why), Stream.suspend(attempt)))
                       }),
                     ),
@@ -560,6 +585,28 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
                 )
               return attempt()
             }).pipe(Stream.interruptWhen(whenDetached))
+
+          /** `Subscribe`, resumed after a drop from the seq after the last one delivered. */
+          const subscribeFrom = (fromSeq: number, live = false): Stream.Stream<SeqEvent, EventsTrimmed | AgentError> =>
+            Stream.suspend(() => {
+              let next = Math.max(0, Math.floor(fromSeq))
+              let delivered = false
+              return follow((client) =>
+                client.Subscribe({ fromSeq: next, live: live && !delivered }).pipe(
+                  Stream.tap((entry) =>
+                    Effect.sync(() => {
+                      delivered = true
+                      if (entry.seq >= next) next = entry.seq + 1
+                    }),
+                  ),
+                  // The host ends the stream when the session ends (not when a consumer stops early).
+                  Stream.concat(Stream.unwrap(Effect.as(markEnded, Stream.empty))),
+                ),
+              ).pipe(
+                // The session's own ending error.
+                Stream.tapError((e) => (e._tag === "AgentError" && !connectionErrors.has(e) ? markEnded : Effect.void)),
+              )
+            })
 
           const toEvents = (stream: Stream.Stream<SeqEvent, EventsTrimmed | AgentError>): Stream.Stream<AgentEvent, AgentError> =>
             stream.pipe(
@@ -576,6 +623,80 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
             }),
           )
 
+          /**
+           * Register to answer hook calls (again after each reconnect, keeping
+           * `clientId`), and answer each by running the hook here. Returns once
+           * the host has the registration.
+           */
+          const answerHooks = (hooks: Hooks, timeout: Duration.Duration) =>
+            Effect.gen(function* () {
+              const names = hookNames(hooks)
+              if (names.length === 0) return
+              const clientId = randomUUID()
+              const timeoutMs = Duration.toMillis(timeout)
+              /** Results by hook id: a request delivered again after a reconnect doesn't run twice. */
+              const runs = new Map<string, Deferred.Deferred<string | null>>()
+              const runHook = (request: HookRequest): Effect.Effect<Option.Option<string>> => {
+                const c = request.call
+                switch (request.hook) {
+                  case "beforeTool":
+                    return hooks.beforeTool !== undefined && c !== null
+                      ? hooks.beforeTool({ callId: c.callId, name: c.name, input: c.input })
+                      : Effect.succeedNone
+                  case "afterTool":
+                    return hooks.afterTool !== undefined && c !== null
+                      ? hooks.afterTool({
+                          callId: c.callId,
+                          name: c.name,
+                          input: c.input,
+                          output: c.output ?? "",
+                          isError: c.isError ?? false,
+                        })
+                      : Effect.succeedNone
+                  case "beforeStop":
+                    return hooks.beforeStop !== undefined ? hooks.beforeStop() : Effect.succeedNone
+                }
+              }
+              const answer = (request: HookRequest) =>
+                Effect.gen(function* () {
+                  let result = runs.get(request.hookId)
+                  if (result === undefined) {
+                    result = Deferred.makeUnsafe<string | null>()
+                    runs.set(request.hookId, result)
+                    if (runs.size > 1_000) runs.delete(runs.keys().next().value!)
+                    // As locally: a failure, defect or timeout adds nothing.
+                    yield* Effect.suspend(() => runHook(request)).pipe(
+                      Effect.timeoutOption(timeout),
+                      Effect.map((text) => (Option.isSome(text) && Option.isSome(text.value) && text.value.value !== "" ? text.value.value : null)),
+                      Effect.catchCause(() => Effect.succeed(null)),
+                      Effect.flatMap((text) => Deferred.succeed(result!, text)),
+                      Effect.forkIn(sessionScope),
+                    )
+                  }
+                  const text = yield* Deferred.await(result)
+                  yield* call((c) => c.HookResponse({ hookId: request.hookId, result: text })).pipe(Effect.ignore)
+                })
+              const registered = Deferred.makeUnsafe<void, AgentError>()
+              yield* follow((client) => client.HookRequests({ clientId, hooks: names, timeoutMs })).pipe(
+                Stream.runForEach((item) =>
+                  item._tag === "Registered"
+                    ? Deferred.succeed(registered, undefined).pipe(Effect.asVoid)
+                    : answer(item).pipe(Effect.forkIn(sessionScope), Effect.asVoid),
+                ),
+                Effect.onExit((exit) =>
+                  Deferred.done(registered, Exit.isSuccess(exit) ? Exit.void : Exit.fail(agentError("could not register to answer hooks"))),
+                ),
+                Effect.ignore,
+                Effect.forkIn(sessionScope),
+              )
+              yield* Deferred.await(registered).pipe(
+                Effect.timeoutOrElse({
+                  duration: Duration.seconds(10),
+                  orElse: () => Effect.fail(agentError("the host did not take the hook registration")),
+                }),
+              )
+            })
+
           /** One request id per call, repeated by its retries, so the host acts on it once. */
           const once = <A, E>(make: (requestId: string) => Effect.Effect<A, E>) => Effect.suspend(() => make(randomUUID()))
           const session: RemoteSession = {
@@ -590,7 +711,7 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
             send: (input) => once((requestId) => call((c) => c.Send({ input, requestId }))),
             turn: (input) => once((requestId) => call((c) => c.Turn({ input, requestId }))),
             steer: (input) => once((requestId) => call((c) => c.Steer({ input, requestId }))),
-            interrupt: call((c) => c.Interrupt()),
+            interrupt: once((requestId) => call((c) => c.Interrupt({ requestId }))),
             end: call((c) => c.End()).pipe(Effect.tap(markEnded)),
             subscribeFrom: (fromSeq) => subscribeFrom(fromSeq),
             lastSeq: Effect.map(info, (i) => i.lastSeq),
@@ -602,16 +723,28 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
           }
 
           yield* Effect.addFinalizer(() => (onClose === "stop" && !detached ? Effect.ignore(stop) : detach))
+          if (answering !== undefined) yield* answerHooks(answering.hooks, Duration.fromInputUnsafe(answering.timeout))
           return session
         })
 
       // ---- services ----
 
-      const open = (run: RunOptions): Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope> =>
+      const hookTimeout = options.hookTimeout ?? Duration.seconds(5)
+      /** Hooks are only forwarded where the provider runs them (`capabilities.hooks`). */
+      const refuseHooks = (hooks: Hooks | undefined) =>
         Effect.gen(function* () {
-          if (run.hooks !== undefined) {
-            return yield* agentError("hooks can't be used with RemoteAgent: functions can't cross processes")
-          }
+          const names = hookNames(hooks)
+          if (names.length === 0 || (yield* local.capabilities).hooks) return
+          return yield* agentError(`${provider} does not support RunOptions.hooks (${names.join(", ")}): capabilities.hooks is false`)
+        })
+
+      const open = (
+        run: RunOptions,
+        session: { readonly hookTimeout?: Duration.Input } = {},
+      ): Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope> =>
+        Effect.gen(function* () {
+          yield* refuseHooks(run.hooks)
+          const names = hookNames(run.hooks)
           if (run.resume !== undefined) {
             const existing = readManifest(manifestPath(dir, run.resume))
             if (existing !== undefined && isLive(existing)) {
@@ -632,19 +765,26 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
             ...(options.persistEvents !== undefined && { persistEvents: options.persistEvents }),
             retainEvents: Duration.toMillis(retainEvents),
             ...(options.testDropBeforeReply !== undefined && { testDropBeforeReply: [...options.testDropBeforeReply] }),
+            ...(names.length > 0 && { hooks: Object.fromEntries(names.map((name) => [name, true])) }),
+            ...(options.testInvokeHook === true && { testInvokeHook: true }),
           }
           const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(HostSpec))(spec).pipe(
             Effect.mapError((e) => agentError(`invalid options: ${e.message}`, e)),
           )
           const wrap = yield* prepareWrap(run.cwd)
           const ready = yield* startHost(wrap(hostCommand), encoded)
-          return yield* connect(ready, onScopeClose).pipe(
+          const answering = run.hooks !== undefined ? { hooks: run.hooks, timeout: session.hookTimeout ?? hookTimeout } : undefined
+          return yield* connect(ready, onScopeClose, answering).pipe(
             Effect.tapError(() => Effect.sync(() => signal(ready.pid, "SIGTERM"))),
           )
         })
 
-      const attach = (sessionId: SessionId): Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope> =>
+      const attach = (
+        sessionId: SessionId,
+        attachOptions: AttachOptions = {},
+      ): Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope> =>
         Effect.gen(function* () {
+          yield* refuseHooks(attachOptions.hooks)
           prune()
           const manifest = readManifest(manifestPath(dir, sessionId))
           if (manifest === undefined) return yield* notFound(sessionId, "no manifest")
@@ -652,7 +792,11 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
             removeHostFiles(dir, sessionId)
             return yield* notFound(sessionId, `host ${manifest.pid} is gone`)
           }
-          return yield* connect(manifest, onScopeClose).pipe(
+          const answering =
+            attachOptions.hooks !== undefined
+              ? { hooks: attachOptions.hooks, timeout: attachOptions.hookTimeout ?? hookTimeout }
+              : undefined
+          return yield* connect(manifest, onScopeClose, answering).pipe(
             Effect.catchTag("AgentError", (e) => {
               if (!isAlive(manifest.pid)) removeHostFiles(dir, sessionId)
               return Effect.fail(notFound(sessionId, e.message))
@@ -696,8 +840,9 @@ export const layer = (options: RemoteAgentOptions): Layer.Layer<Agent | AgentHos
 
       const agent = Agent.of({
         provider,
-        capabilities: local.capabilities.pipe(Effect.map((c) => ({ ...c, reattach: true, hooks: false }))),
-        open,
+        // `hooks` as the provider has them: forwarded to the client.
+        capabilities: local.capabilities.pipe(Effect.map((c) => ({ ...c, reattach: true }))),
+        open: (run) => open(run),
         status: local.status,
         history: local.history,
       })
