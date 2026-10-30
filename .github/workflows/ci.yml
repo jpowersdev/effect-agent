@@ -3,7 +3,14 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore: &prose
+      # The docs site and prose; docs.yml builds the site
+      - site/**
+      - assets/**
+      - "**/*.md"
+      - .github/workflows/docs.yml
   pull_request:
+    paths-ignore: *prose
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

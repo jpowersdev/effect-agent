@@ -3,7 +3,19 @@ name: Docs
 on:
   push:
     branches: [main]
+    paths: &docs
+      # The guides, the site, and the API reference's sources
+      - site/**
+      - src/**
+      - docgen.json
+      - tsconfig.json
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - .github/actions/setup/**
+      - .github/workflows/docs.yml
   pull_request:
+    paths: *docs
   workflow_dispatch:
 
 concurrency:

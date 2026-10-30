@@ -3,6 +3,13 @@ name: Release
 on:
   push:
     branches: [main]
+    # A changeset added (opens the "Version Packages" PR), or that PR merged
+    # (it bumps package.json, and publishes)
+    paths:
+      - .changeset/**
+      - package.json
+      - .github/workflows/release.yml
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
