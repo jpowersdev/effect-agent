@@ -110,7 +110,7 @@ export class CodexAppServer extends Context.Service<
 >()("effect-agent/codex/CodexAppServer") {}
 
 /** Notifications we never use; opting out keeps recordings small and free of account metadata. */
-export const optOutNotificationMethods: ReadonlyArray<string> = [
+export const optOutNotificationMethods: ReadonlyArray<P.NotificationMethod> = [
   "turn/moderationMetadata",
   "remoteControl/status/changed",
   "rawResponse/completed",
@@ -130,14 +130,14 @@ export const defaultServerRequestHandler = (request: P.ServerRequest): Effect.Ef
   switch (request.method) {
     case M.commandApproval:
     case M.fileChangeApproval:
-      return Effect.succeed({ decision: "decline" })
+      return Effect.succeed<P.ApprovalDeclined>({ decision: "decline" })
     case M.legacyExecApproval:
     case M.legacyPatchApproval:
-      return Effect.succeed({ decision: "abort" })
+      return Effect.succeed<P.LegacyApprovalAborted>({ decision: "abort" })
     case M.requestUserInput:
-      return Effect.succeed({ answers: {} })
+      return Effect.succeed<P.UserInputAnswers>({ answers: {} })
     case M.mcpElicitation:
-      return Effect.succeed({ action: "decline", content: null, _meta: null })
+      return Effect.succeed<P.ElicitationDeclined>({ action: "decline", content: null, _meta: null })
     default:
       return Effect.fail(
         new CodexRpcError({

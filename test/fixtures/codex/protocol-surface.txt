@@ -1,0 +1,1032 @@
+# codex-cli 0.162.1: codex app-server generate-json-schema --experimental, the part protocol.ts depends on.
+
+# Written by `node scripts/codex-protocol.ts --update`; don't edit.
+
+ClientRequest methods
+  account/bedrock/checkGovCloudRequirements  (BedrockCheckGovCloudRequirementsParams)
+  account/bedrock/discover  (BedrockDiscoverParams)
+  account/bedrock/setup  (BedrockSetupParams)
+  account/gatewayOAuth/cancel
+  account/gatewayOAuth/login
+  account/gatewayOAuth/read
+  account/login/cancel  (CancelLoginAccountParams)
+  account/login/start  (LoginAccountParams)
+  account/logout
+  account/rateLimitResetCredit/consume  (ConsumeAccountRateLimitResetCreditParams)
+  account/rateLimits/read  (GetAccountRateLimitsParams, optional)
+  account/read  (GetAccountParams)
+  account/sendAddCreditsNudgeEmail  (SendAddCreditsNudgeEmailParams)
+  account/usage/read  (GetAccountTokenUsageParams, optional)
+  account/workspaceMessages/read
+  app/installed  (AppsInstalledParams)
+  app/list  (AppsListParams)
+  app/read  (AppsReadParams)
+  collaborationMode/list  (CollaborationModeListParams)
+  command/exec  (CommandExecParams)
+  command/exec/resize  (CommandExecResizeParams)
+  command/exec/terminate  (CommandExecTerminateParams)
+  command/exec/write  (CommandExecWriteParams)
+  config/batchWrite  (ConfigBatchWriteParams)
+  config/mcpServer/reload
+  config/read  (ConfigReadParams)
+  config/value/write  (ConfigValueWriteParams)
+  configRequirements/read
+  environment/add  (EnvironmentAddParams)
+  environment/info  (EnvironmentInfoParams)
+  environment/status  (EnvironmentStatusParams)
+  experimentalFeature/enablement/set  (ExperimentalFeatureEnablementSetParams)
+  experimentalFeature/list  (ExperimentalFeatureListParams)
+  externalAgentConfig/detect  (ExternalAgentConfigDetectParams)
+  externalAgentConfig/import  (ExternalAgentConfigImportParams)
+  externalAgentConfig/import/readHistories
+  externalAgentConfig/import/recordHistory  (ExternalAgentConfigImportHistoryRecordParams)
+  feedback/upload  (FeedbackUploadParams)
+  fs/copy  (FsCopyParams)
+  fs/createDirectory  (FsCreateDirectoryParams)
+  fs/getMetadata  (FsGetMetadataParams)
+  fs/readDirectory  (FsReadDirectoryParams)
+  fs/readFile  (FsReadFileParams)
+  fs/remove  (FsRemoveParams)
+  fs/unwatch  (FsUnwatchParams)
+  fs/watch  (FsWatchParams)
+  fs/writeFile  (FsWriteFileParams)
+  fuzzyFileSearch  (FuzzyFileSearchParams)
+  fuzzyFileSearch/sessionStart  (FuzzyFileSearchSessionStartParams)
+  fuzzyFileSearch/sessionStop  (FuzzyFileSearchSessionStopParams)
+  fuzzyFileSearch/sessionUpdate  (FuzzyFileSearchSessionUpdateParams)
+  getAuthStatus  (GetAuthStatusParams)
+  getConversationSummary  (GetConversationSummaryParams)
+  gitDiffToRemote  (GitDiffToRemoteParams)
+  hooks/list  (HooksListParams)
+  initialize  (InitializeParams)
+  marketplace/add  (MarketplaceAddParams)
+  marketplace/remove  (MarketplaceRemoveParams)
+  marketplace/upgrade  (MarketplaceUpgradeParams)
+  mcpServer/event/stream/start  (McpServerEventStreamStartParams)
+  mcpServer/event/stream/stop  (McpServerEventStreamStopParams)
+  mcpServer/oauth/login  (McpServerOauthLoginParams)
+  mcpServer/resource/read  (McpResourceReadParams)
+  mcpServer/tool/call  (McpServerToolCallParams)
+  mcpServerStatus/list  (ListMcpServerStatusParams)
+  memory/reset
+  memory/status  (MemoryStatusParams)
+  mock/experimentalMethod  (MockExperimentalMethodParams)
+  model/list  (ModelListParams)
+  modelProvider/capabilities/read  (ModelProviderCapabilitiesReadParams)
+  permissionProfile/list  (PermissionProfileListParams)
+  plugin/install  (PluginInstallParams)
+  plugin/installed  (PluginInstalledParams)
+  plugin/list  (PluginListParams)
+  plugin/read  (PluginReadParams)
+  plugin/reconcile  (PluginReconcileParams)
+  plugin/search  (PluginSearchParams)
+  plugin/share/checkout  (PluginShareCheckoutParams)
+  plugin/share/delete  (PluginShareDeleteParams)
+  plugin/share/list  (PluginShareListParams)
+  plugin/share/save  (PluginShareSaveParams)
+  plugin/share/updateTargets  (PluginShareUpdateTargetsParams)
+  plugin/skill/read  (PluginSkillReadParams)
+  plugin/uninstall  (PluginUninstallParams)
+  process/kill  (ProcessKillParams)
+  process/resizePty  (ProcessResizePtyParams)
+  process/spawn  (ProcessSpawnParams)
+  process/writeStdin  (ProcessWriteStdinParams)
+  project/create  (ProjectCreateParams)
+  project/delete  (ProjectDeleteParams)
+  project/import  (ProjectImportParams)
+  project/list  (ProjectListParams)
+  project/move  (ProjectMoveParams)
+  project/read  (ProjectReadParams)
+  project/update  (ProjectUpdateParams)
+  remoteControl/client/list  (RemoteControlClientsListParams)
+  remoteControl/client/revoke  (RemoteControlClientsRevokeParams)
+  remoteControl/disable  (RemoteControlDisableParams)
+  remoteControl/enable  (RemoteControlEnableParams)
+  remoteControl/pairing/start  (RemoteControlPairingStartParams)
+  remoteControl/pairing/status  (RemoteControlPairingStatusParams)
+  remoteControl/status/read
+  review/start  (ReviewStartParams)
+  rollout/compress
+  server/diagnostics  (ServerDiagnosticsParams)
+  skills/config/write  (SkillsConfigWriteParams)
+  skills/extraRoots/set  (SkillsExtraRootsSetParams)
+  skills/list  (SkillsListParams)
+  thread/approveGuardianDeniedAction  (ThreadApproveGuardianDeniedActionParams)
+  thread/archive  (ThreadArchiveParams)
+  thread/attachment/add  (ThreadAttachmentAddParams)
+  thread/attachment/list  (ThreadAttachmentListParams)
+  thread/attachment/remove  (ThreadAttachmentRemoveParams)
+  thread/attachmentOwner/list  (ThreadAttachmentOwnerListParams)
+  thread/backgroundTerminals/clean  (ThreadBackgroundTerminalsCleanParams)
+  thread/backgroundTerminals/list  (ThreadBackgroundTerminalsListParams)
+  thread/backgroundTerminals/terminate  (ThreadBackgroundTerminalsTerminateParams)
+  thread/compact/start  (ThreadCompactStartParams)
+  thread/decrement_elicitation  (ThreadDecrementElicitationParams)
+  thread/delete  (ThreadDeleteParams)
+  thread/fork  (ThreadForkParams)
+  thread/goal/clear  (ThreadGoalClearParams)
+  thread/goal/get  (ThreadGoalGetParams)
+  thread/goal/set  (ThreadGoalSetParams)
+  thread/increment_elicitation  (ThreadIncrementElicitationParams)
+  thread/inject_items  (ThreadInjectItemsParams)
+  thread/items/list  (ThreadItemsListParams)
+  thread/list  (ThreadListParams)
+  thread/loaded/list  (ThreadLoadedListParams)
+  thread/memoryMode/set  (ThreadMemoryModeSetParams)
+  thread/metadata/update  (ThreadMetadataUpdateParams)
+  thread/name/set  (ThreadSetNameParams)
+  thread/prediction/request  (ThreadPredictionRequestParams)
+  thread/queue/add  (ThreadQueueAddParams)
+  thread/queue/delete  (ThreadQueueDeleteParams)
+  thread/queue/list  (ThreadQueueListParams)
+  thread/queue/reorder  (ThreadQueueReorderParams)
+  thread/queue/start  (ThreadQueueStartParams)
+  thread/queue/update  (ThreadQueueUpdateParams)
+  thread/read  (ThreadReadParams)
+  thread/realtime/appendAudio  (ThreadRealtimeAppendAudioParams)
+  thread/realtime/appendSpeech  (ThreadRealtimeAppendSpeechParams)
+  thread/realtime/appendText  (ThreadRealtimeAppendTextParams)
+  thread/realtime/listVoices  (ThreadRealtimeListVoicesParams)
+  thread/realtime/start  (ThreadRealtimeStartParams)
+  thread/realtime/stop  (ThreadRealtimeStopParams)
+  thread/resume  (ThreadResumeParams)
+  thread/revert  (ThreadRevertParams)
+  thread/search  (ThreadSearchParams)
+  thread/searchOccurrences  (ThreadSearchOccurrencesParams)
+  thread/section/move  (ThreadSectionMoveParams)
+  thread/settings/update  (ThreadSettingsUpdateParams)
+  thread/shellCommand  (ThreadShellCommandParams)
+  thread/start  (ThreadStartParams)
+  thread/timeline/list  (ThreadTimelineListParams)
+  thread/turns/list  (ThreadTurnsListParams)
+  thread/unarchive  (ThreadUnarchiveParams)
+  thread/unsubscribe  (ThreadUnsubscribeParams)
+  threadSection/create  (ThreadSectionCreateParams)
+  threadSection/delete  (ThreadSectionDeleteParams)
+  threadSection/list  (ThreadSectionListParams)
+  threadSection/update  (ThreadSectionUpdateParams)
+  turn/interrupt  (TurnInterruptParams)
+  turn/settings/update  (TurnSettingsUpdateParams)
+  turn/start  (TurnStartParams)
+  turn/steer  (TurnSteerParams)
+  userVerification/cancel  (UserVerificationCancelParams)
+  userVerification/delete  (UserVerificationDeleteParams)
+  userVerification/enroll  (UserVerificationEnrollParams)
+  userVerification/status  (UserVerificationStatusParams)
+  userVerification/verify  (UserVerificationVerifyParams)
+  windowsSandbox/readiness
+  windowsSandbox/setupStart  (WindowsSandboxSetupStartParams)
+
+ServerNotification methods
+  account/gatewayOAuth/changed  (GatewayOAuthChangedNotification)
+  account/login/completed  (AccountLoginCompletedNotification)
+  account/rateLimits/updated  (AccountRateLimitsUpdatedNotification)
+  account/updated  (AccountUpdatedNotification)
+  app/list/updated  (AppListUpdatedNotification)
+  autoApprovalReview/strictReviewRequired  (StrictReviewRequiredNotification)
+  command/exec/outputDelta  (CommandExecOutputDeltaNotification)
+  configWarning  (ConfigWarningNotification)
+  deprecationNotice  (DeprecationNoticeNotification)
+  error  (ErrorNotification)
+  externalAgentConfig/import/completed  (ExternalAgentConfigImportCompletedNotification)
+  externalAgentConfig/import/progress  (ExternalAgentConfigImportProgressNotification)
+  fs/changed  (FsChangedNotification)
+  fuzzyFileSearch/sessionCompleted  (FuzzyFileSearchSessionCompletedNotification)
+  fuzzyFileSearch/sessionUpdated  (FuzzyFileSearchSessionUpdatedNotification)
+  guardianWarning  (GuardianWarningNotification)
+  hook/completed  (HookCompletedNotification)
+  hook/started  (HookStartedNotification)
+  item/agentMessage/delta  (AgentMessageDeltaNotification)
+  item/autoApprovalReview/completed  (ItemGuardianApprovalReviewCompletedNotification)
+  item/autoApprovalReview/started  (ItemGuardianApprovalReviewStartedNotification)
+  item/commandExecution/outputDelta  (CommandExecutionOutputDeltaNotification)
+  item/commandExecution/terminalInteraction  (TerminalInteractionNotification)
+  item/completed  (ItemCompletedNotification)
+  item/fileChange/outputDelta  (FileChangeOutputDeltaNotification)
+  item/fileChange/patchUpdated  (FileChangePatchUpdatedNotification)
+  item/mcpToolCall/progress  (McpToolCallProgressNotification)
+  item/plan/delta  (PlanDeltaNotification)
+  item/reasoning/summaryPartAdded  (ReasoningSummaryPartAddedNotification)
+  item/reasoning/summaryTextDelta  (ReasoningSummaryTextDeltaNotification)
+  item/reasoning/textDelta  (ReasoningTextDeltaNotification)
+  item/started  (ItemStartedNotification)
+  mcpServer/event/stream/notification  (McpServerEventStreamNotification)
+  mcpServer/oauthLogin/completed  (McpServerOauthLoginCompletedNotification)
+  mcpServer/startupStatus/updated  (McpServerStatusUpdatedNotification)
+  model/rerouted  (ModelReroutedNotification)
+  model/safetyBuffering/updated  (ModelSafetyBufferingUpdatedNotification)
+  model/verification  (ModelVerificationNotification)
+  modelProvider/authRecoveryCompleted  (AuthRecoveryNotification)
+  modelProvider/authRecoveryStarted  (AuthRecoveryNotification)
+  process/exited  (ProcessExitedNotification)
+  process/outputDelta  (ProcessOutputDeltaNotification)
+  project/changed  (ProjectChangedNotification)
+  rawResponse/completed  (RawResponseCompletedNotification)
+  rawResponseItem/completed  (RawResponseItemCompletedNotification)
+  remoteControl/status/changed  (RemoteControlStatusChangedNotification)
+  serverRequest/resolved  (ServerRequestResolvedNotification)
+  skills/changed  (SkillsChangedNotification)
+  thread/archived  (ThreadArchivedNotification)
+  thread/attachment/updated  (ThreadAttachmentUpdatedNotification)
+  thread/closed  (ThreadClosedNotification)
+  thread/compacted  (ContextCompactedNotification)
+  thread/deleted  (ThreadDeletedNotification)
+  thread/environment/connected  (EnvironmentConnectionNotification)
+  thread/environment/disconnected  (EnvironmentConnectionNotification)
+  thread/goal/cleared  (ThreadGoalClearedNotification)
+  thread/goal/updated  (ThreadGoalUpdatedNotification)
+  thread/name/updated  (ThreadNameUpdatedNotification)
+  thread/prediction/updated  (ThreadPredictionUpdatedNotification)
+  thread/project/updated  (ThreadProjectUpdatedNotification)
+  thread/queue/changed  (ThreadQueueChangedNotification)
+  thread/realtime/closed  (ThreadRealtimeClosedNotification)
+  thread/realtime/error  (ThreadRealtimeErrorNotification)
+  thread/realtime/item/completed  (ThreadRealtimeItemCompletedNotification)
+  thread/realtime/item/started  (ThreadRealtimeItemStartedNotification)
+  thread/realtime/item/transcript/delta  (ThreadRealtimeItemTranscriptDeltaNotification)
+  thread/realtime/itemAdded  (ThreadRealtimeItemAddedNotification)
+  thread/realtime/outputAudio/delta  (ThreadRealtimeOutputAudioDeltaNotification)
+  thread/realtime/sdp  (ThreadRealtimeSdpNotification)
+  thread/realtime/started  (ThreadRealtimeStartedNotification)
+  thread/realtime/transcript/delta  (ThreadRealtimeTranscriptDeltaNotification)
+  thread/realtime/transcript/done  (ThreadRealtimeTranscriptDoneNotification)
+  thread/reverted  (ThreadRevertedNotification)
+  thread/settings/updated  (ThreadSettingsUpdatedNotification)
+  thread/started  (ThreadStartedNotification)
+  thread/status/changed  (ThreadStatusChangedNotification)
+  thread/tokenUsage/updated  (ThreadTokenUsageUpdatedNotification)
+  thread/unarchived  (ThreadUnarchivedNotification)
+  turn/completed  (TurnCompletedNotification)
+  turn/diff/updated  (TurnDiffUpdatedNotification)
+  turn/moderationMetadata  (TurnModerationMetadataNotification)
+  turn/plan/updated  (TurnPlanUpdatedNotification)
+  turn/started  (TurnStartedNotification)
+  warning  (WarningNotification)
+  windows/worldWritableWarning  (WindowsWorldWritableWarningNotification)
+  windowsSandbox/setupCompleted  (WindowsSandboxSetupCompletedNotification)
+
+ServerRequest methods
+  account/chatgptAuthTokens/refresh  (ChatgptAuthTokensRefreshParams)
+  applyPatchApproval  (ApplyPatchApprovalParams)
+  attestation/generate  (AttestationGenerateParams)
+  currentTime/read  (CurrentTimeReadParams)
+  execCommandApproval  (ExecCommandApprovalParams)
+  item/commandExecution/requestApproval  (CommandExecutionRequestApprovalParams)
+  item/fileChange/requestApproval  (FileChangeRequestApprovalParams)
+  item/permissions/requestApproval  (PermissionsRequestApprovalParams)
+  item/tool/call  (DynamicToolCallParams)
+  item/tool/requestUserInput  (ToolRequestUserInputParams)
+  mcpServer/elicitation/request  (McpServerElicitationRequestParams)
+
+Account
+  [apiKey]
+  [chatgpt]
+    email: string | null
+    planType: PlanType
+  [amazonBedrock]
+    usesCodexManagedCredentials?: boolean
+
+AccountRateLimitsUpdatedNotification
+  // Sparse rolling rate-limit update. Clients should merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and does not clear a previously observed value.
+  rateLimits: RateLimitSnapshot
+
+ApplyPatchApprovalResponse
+  decision: ReviewDecision
+
+AskForApproval
+  | "untrusted"
+  | "on-request"
+  | "never"
+  | { granular: { mcp_elicitations: boolean; request_permissions?: boolean; rules: boolean; sandbox_approval: boolean; skill_approval?: boolean } }
+
+ClientInfo
+  name: string
+  title?: string | null
+  version: string
+
+CodexErrorInfo
+  // This translation layer make sure that we expose codex error code in camel case. When an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.
+  | "contextWindowExceeded"
+  | "sessionBudgetExceeded"
+  | "usageLimitExceeded"
+  | "rateLimitExceeded"
+  | "flexUnavailable"
+  | "serverOverloaded"
+  | "cyberPolicy"
+  | "misalignmentPolicyViolation"
+  | "tooManyDenials"
+  | "internalServerError"
+  | "unauthorized"
+  | "badRequest"
+  | "threadRollbackFailed"
+  | "sandboxError"
+  | "other"
+  | { httpConnectionFailed: { httpStatusCode?: integer | null } }
+  | { responseStreamConnectionFailed: { httpStatusCode?: integer | null } }
+    // Failed to connect to the response SSE stream.
+  | { responseStreamDisconnected: { httpStatusCode?: integer | null } }
+    // The response SSE stream disconnected in the middle of a turn before completion.
+  | { responseTooManyFailedAttempts: { httpStatusCode?: integer | null } }
+    // Reached the retry limit for responses.
+  | { activeTurnNotSteerable: { turnKind: NonSteerableTurnKind } }
+    // Returned when `turn/start` or `turn/steer` is submitted while the current active turn cannot accept same-turn steering, for example `/review` or manual `/compact`.
+  | string | object
+
+CommandAction
+  [read]
+    command: string
+    name: string
+    path: LegacyAppPathString
+  [listFiles]
+    command: string
+    path?: string | null
+  [search]
+    command: string
+    path?: string | null
+    query?: string | null
+  [unknown]
+    command: string
+
+CommandExecutionRequestApprovalResponse
+  decision: CommandExecutionApprovalDecision
+
+CreditsSnapshot
+  balance?: string | null
+  hasCredits: boolean
+  unlimited: boolean
+
+ErrorNotification
+  error: TurnError
+  threadId: string
+  turnId: string
+  willRetry: boolean
+
+ExecCommandApprovalResponse
+  decision: ReviewDecision
+
+FileChangeRequestApprovalResponse
+  decision: FileChangeApprovalDecision
+
+GetAccountParams
+  refreshToken?: boolean
+      // When `true`, requests a proactive token refresh before returning. In managed auth mode this triggers the normal refresh-token flow. In external auth mode this flag is ignored. Clients should refresh tokens themselves and call `account/login/start` with `chatgptAuthTokens`.
+
+GetAccountRateLimitsParams
+  // Usage-read capabilities of the requesting client, never inferred from its experiment arm.
+  excludeResetCreditDetails?: boolean
+      // Skip the separate reset-credit detail lookup for background usage polls. The usage response still includes the available count; omitted/false preserves detailed reads.
+  supportsLunaReserve?: boolean
+      // The client supports automatic Luna Reserve fallback. For eligible ChatGPT CLI users, allow the backend to record experiment exposure after ordinary usage is blocked.
+
+GetAccountRateLimitsResponse
+  accountId?: string | null
+      // Account associated with this usage snapshot, when supplied by the backend.
+  ordinaryUsageAllowed?: boolean | null
+      // Backend permission for ordinary included usage, validated against the active account. Null means unavailable; clients must not infer recovery from percentages or reset times.
+  rateLimitResetCredits?: RateLimitResetCreditsSummary | null
+  rateLimitUpsell?: unknown
+      // Optional backend-owned banner from the same usage read. Its nested keys retain the backend's snake_case contract; an absent banner leaves the client's existing UI unchanged.
+  rateLimits: RateLimitSnapshot
+      // Backward-compatible single-bucket view; mirrors the historical payload.
+  rateLimitsByLimitId?: Record<string, RateLimitSnapshot> | null
+      // Multi-bucket view keyed by metered `limit_id` (for example, `codex`).
+
+GetAccountResponse
+  account?: Account | null
+  requiresOpenaiAuth: boolean
+  workspaceRouting?: WorkspaceRouting | null
+
+InitializeCapabilities
+  // Client-declared capabilities negotiated during initialize.
+  experimentalApi?: boolean
+      // Opt into receiving experimental API methods and fields.
+  explicitGatewayOauth?: boolean
+      // Use explicit gateway OAuth login instead of automatic browser authorization. Applies to this app-server's gateway runtime; later connections cannot undo it.
+  extensions?: object | null
+      // MCP extension settings declared by the app-server client.
+  mcpServerOpenaiFormElicitation?: boolean
+      // Legacy opt-in for the `openai/form` MCP extension. New clients should declare `openai/form` in [`Self::extensions`].
+  optOutNotificationMethods?: Array<string> | null
+      // Exact notification method names that should be suppressed for this connection (for example `thread/started`).
+  requestAttestation?: boolean
+      // Opt into `attestation/generate` requests for upstream `x-oai-attestation`.
+
+InitializeParams
+  capabilities?: InitializeCapabilities | null
+  clientInfo: ClientInfo
+
+InitializeResponse
+  codexHome: AbsolutePathBuf
+      // Absolute path to the server's $CODEX_HOME directory.
+  platformFamily: string
+      // Platform family for the running app-server target, for example `"unix"` or `"windows"`.
+  platformOs: string
+      // Operating system for the running app-server target, for example `"macos"`, `"linux"`, or `"windows"`.
+  userAgent: string
+
+ItemCompletedNotification
+  completedAtMs: integer
+      // Unix timestamp (in milliseconds) when this item lifecycle completed.
+  item: ThreadItem
+  threadId: string
+  turnId: string
+
+ItemStartedNotification
+  item: ThreadItem
+  startedAtMs: integer
+      // Unix timestamp (in milliseconds) when this item lifecycle started.
+  threadId: string
+  turnId: string
+
+McpServerElicitationRequestResponse
+  _meta?: unknown
+      // Optional client metadata for form-mode action handling.
+  action: McpServerElicitationAction
+  content?: unknown
+      // Structured user input for accepted elicitations, mirroring RMCP `CreateElicitationResult`. This is nullable because decline/cancel responses have no content.
+
+MessagePhase
+  // Classifies assistant text as commentary, a partial answer, or a terminal answer. Providers do not emit this consistently, so callers must treat `None` as "phase unknown" and keep compatibility behavior for legacy models.
+  | "commentary"
+  | "partial_answer"
+  | "final_answer"
+
+RateLimitSnapshot
+  credits?: CreditsSnapshot | null
+  individualLimit?: SpendControlLimitSnapshot | null
+  limitId?: string | null
+  limitName?: string | null
+  normalModelSlug?: string | null
+      // Normal model whose display name and reasoning options describe this quota alias.
+  planType?: PlanType | null
+  primary?: RateLimitWindow | null
+  rateLimitReachedType?: RateLimitReachedType | null
+  secondary?: RateLimitWindow | null
+  spendControlReached?: boolean | null
+      // Backend-reported spend-control state. `None` is unavailable, not a sparse-update recovery.
+
+RateLimitWindow
+  resetsAt?: integer | null
+  usedPercent: integer
+  windowDurationMins?: integer | null
+
+ReasoningEffort
+  // A non-empty reasoning effort value advertised by the model.
+  = string
+
+SandboxMode
+  | "read-only"
+  | "workspace-write"
+  | "danger-full-access"
+
+SortDirection
+  | "asc"
+  | "desc"
+
+Thread
+  agentNickname?: string | null
+      // Optional random unique nickname assigned to an AgentControl-spawned sub-agent.
+  agentRole?: string | null
+      // Optional role (agent_role) assigned to an AgentControl-spawned sub-agent.
+  canAcceptDirectInput?: boolean | null
+      // Whether the app server accepts direct turn input for this loaded thread. `None` means the capability is unavailable, such as for an unloaded stored thread.
+  cliVersion: string
+      // Version of the CLI that created the thread.
+  createdAt: integer
+      // Unix timestamp (in seconds) when the thread was created.
+  cwd: AbsolutePathBuf
+      // Working directory captured for the thread.
+  daybreakEnabled?: boolean | null
+      // Saved Daybreak choice, independent of turn execution. Null if unset.
+  environments?: Array<ThreadEnvironment> | null
+      // Current environments for a loaded thread, in priority order, primary first. `null` means the thread is not loaded or the server does not expose its selection. An empty list means no environments are selected. This does not report connection status.
+  ephemeral: boolean
+      // Whether the thread is ephemeral and should not be materialized on disk.
+  extra?: ThreadExtra | null
+      // Optional implementation-specific thread data.
+  forkedFromId?: string | null
+      // Source thread id when this thread was created by forking another thread.
+  gitInfo?: GitInfo | null
+      // Optional Git metadata captured when the thread was created.
+  historyMode?: ThreadHistoryMode
+      // Persisted thread history contract selected when this thread was created.
+  id: string
+      // Identifier for this thread. Codex-generated thread IDs are UUIDv7.
+  model?: string | null
+      // Current configured model when loaded, otherwise the latest persisted model. Null when unavailable. This is not per-turn execution telemetry.
+  modelProvider: string
+      // Model provider used for this thread (for example, 'openai').
+  name?: string | null
+      // Optional user-facing thread title.
+  originator?: string | null
+      // Originator recorded when the thread was created, independent of its current client or executor. Null when the recorded originator is unavailable.
+  parentThreadId?: string | null
+      // The ID of the parent thread. This will only be set if this thread is a subagent.
+  path?: string | null
+      // [UNSTABLE] Path to the thread on disk.
+  preview: string
+      // Usually the first user message in the thread, if available.
+  projectId: string | null
+      // Canonical project assignment owned by app-server, if any.
+  reasoningEffort?: ReasoningEffort | null
+      // Current configured reasoning effort when loaded, otherwise the latest persisted effort. Null when unset or unavailable. This is not per-turn execution telemetry.
+  recencyAt?: integer | null
+      // Unix timestamp (in seconds) used for thread recency ordering.
+  section?: ThreadSection | null
+      // The independently persisted section selected for this thread, if any.
+  sectionEnteredAt?: integer | null
+      // Unix timestamp in seconds when the thread entered its current section.
+  sessionId: string
+      // Session id shared by threads that belong to the same session tree.
+  source: SessionSource
+      // Origin of the thread (CLI, VSCode, codex exec, codex app-server, etc.).
+  status: ThreadStatus
+      // Current runtime status for the thread.
+  threadSource?: ThreadSource | null
+      // Optional analytics source classification for this thread.
+  turns: Array<Turn>
+      // Only populated on `thread/resume`, `thread/fork`, and `thread/read` (when `includeTurns` is true) responses. For all other responses and notifications returning a Thread, the turns field will be an empty list.
+  updatedAt: integer
+      // Unix timestamp (in seconds) when the thread was last updated.
+
+ThreadBackgroundTerminal
+  command: string
+  cpuPercent?: number | null
+  cwd: LegacyAppPathString
+  itemId: string
+  osPid?: integer | null
+  processId: string
+  rssKb?: integer | null
+
+ThreadBackgroundTerminalsListParams
+  cursor?: string | null
+      // Opaque pagination cursor returned by a previous call.
+  limit?: integer | null
+      // Optional page size.
+  threadId: string
+
+ThreadBackgroundTerminalsListResponse
+  data: Array<ThreadBackgroundTerminal>
+  nextCursor?: string | null
+      // Opaque cursor to pass to the next call to continue after the last item. If None, there are no more items to return.
+
+ThreadBackgroundTerminalsTerminateParams
+  processId: string
+  threadId: string
+
+ThreadBackgroundTerminalsTerminateResponse
+  terminated: boolean
+
+ThreadItem
+  [userMessage]
+    clientId?: string | null
+    content: Array<UserInput>
+    id: string
+  [hookPrompt]
+    fragments: Array<HookPromptFragment>
+    id: string
+  [agentMessage]
+    delivery?: AgentMessageDelivery | null
+    id: string
+    memoryCitation?: MemoryCitation | null
+    phase?: MessagePhase | null
+    questions?: Array<AsyncUserInputQuestion> | null
+    text: string
+  [functionCallOutput]
+    id: string
+    name: string
+    namespace?: string | null
+    output: FunctionCallOutputBody
+  [plan]
+    // EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.
+    id: string
+    text: string
+  [reasoning]
+    content?: Array<string>
+    id: string
+    summary?: Array<string>
+  [commandExecution]
+    aggregatedOutput?: string | null
+        // The command's output, aggregated from stdout and stderr.
+    command: string
+        // The command to be executed.
+    commandActions: Array<CommandAction>
+        // A best-effort parsing of the command to understand the action(s) it will perform. This returns a list of CommandAction objects because a single shell command may be composed of many commands piped together.
+    cwd: LegacyAppPathString
+        // The command's working directory.
+    durationMs?: integer | null
+        // The duration of the command execution in milliseconds.
+    exitCode?: integer | null
+        // The command's exit code.
+    id: string
+    pluginId?: string | null
+        // Trusted first-party plugin id when this command resolves to one plugin script.
+    processId?: string | null
+        // Identifier for the underlying PTY process (when available).
+    scriptPath?: string | null
+        // Safe plugin-relative path when this command resolves to one plugin script.
+    source?: CommandExecutionSource
+    status: CommandExecutionStatus
+  [fileChange]
+    changes: Array<FileUpdateChange>
+    id: string
+    status: PatchApplyStatus
+  [mcpToolCall]
+    appContext?: McpToolCallAppContext | null
+    arguments: unknown
+    durationMs?: integer | null
+        // The duration of the MCP tool call in milliseconds.
+    error?: McpToolCallError | null
+    id: string
+    mcpAppResourceUri?: string | null
+        // Legacy compatibility field; prefer `mcpAppUi.resourceUri` when available.
+    mcpAppUi?: McpAppUi | null
+        // Presentation captured from the invoked descriptor; absent in older history.
+    pluginId?: string | null
+    readOnlyHint?: boolean | null
+    result?: McpToolCallResult | null
+    server: string
+    status: McpToolCallStatus
+    tool: string
+  [dynamicToolCall]
+    arguments: unknown
+    contentItems?: Array<DynamicToolCallOutputContentItem> | null
+    durationMs?: integer | null
+        // The duration of the dynamic tool call in milliseconds.
+    id: string
+    namespace?: string | null
+    status: DynamicToolCallStatus
+    success?: boolean | null
+    tool: string
+  [collabAgentToolCall]
+    agentsStates: Record<string, CollabAgentState>
+        // Last known status of the target agents, when available.
+    id: string
+        // Unique identifier for this collab tool call.
+    model?: string | null
+        // Model requested for the spawned agent, when applicable.
+    prompt?: string | null
+        // Prompt text sent as part of the collab tool call, when available.
+    reasoningEffort?: ReasoningEffort | null
+        // Reasoning effort requested for the spawned agent, when applicable.
+    receiverThreadIds: Array<string>
+        // Thread ID of the receiving agent, when applicable. In case of spawn operation, this corresponds to the newly spawned agent.
+    senderThreadId: string
+        // Thread ID of the agent issuing the collab request.
+    status: CollabAgentToolCallStatus
+        // Current status of the collab tool call.
+    tool: CollabAgentTool
+        // Name of the collab tool that was invoked.
+  [subAgentActivity]
+    agentPath: string
+    agentThreadId: string
+    id: string
+    kind: SubAgentActivityKind
+    model?: string | null
+        // Resolved model at sub-agent creation; absent from older records and other activities.
+    reasoningEffort?: ReasoningEffort | null
+        // Resolved reasoning effort at sub-agent creation, when known.
+  [webSearch]
+    action?: WebSearchAction | null
+    id: string
+    query: string
+    results?: Array<unknown> | null
+        // Structured search results returned out-of-band by standalone web search. These stay as opaque JSON at the extension/app-server boundary so new result fields and result types can pass through without a Codex release.
+  [imageView]
+    id: string
+    path: LegacyAppPathString
+  [sleep]
+    // Display item emitted by the interruptible `clock.sleep` tool.
+    durationMs: integer
+    id: string
+  [imageGeneration]
+    failure?: ImageGenerationFailure | null
+    id: string
+    result: string
+    revisedPrompt?: string | null
+    savedPath?: AbsolutePathBuf | null
+    status: string
+    transparentBackground?: boolean | null
+  [enteredReviewMode]
+    id: string
+    review: string
+  [exitedReviewMode]
+    id: string
+    review: string
+  [contextCompaction]
+    id: string
+
+ThreadResumeParams
+  // There are three ways to resume a thread: 1. By thread_id: load the thread from disk by thread_id and resume it. 2. By history: instantiate the thread from memory and resume it. 3. By path: load the thread from disk by path and resume it. For non-running threads, the precedence is: history > non-empty path > thread_id. If using history or a non-empty path for a non-running thread, the thread_id param will be ignored. If thread_id identifies a running thread, app-server rejoins that thread and treats a non-empty path as a consistency check against the active rollout path. Empty string path values are treated as absent. Prefer using thread_id whenever possible.
+  approvalPolicy?: AskForApproval | null
+  approvalsReviewer?: ApprovalsReviewer | null
+      // Override where approval requests are routed for review on this thread and subsequent turns.
+  baseInstructions?: string | null
+  config?: object | null
+  cwd?: string | null
+  developerInstructions?: string | null
+  excludeTurns?: boolean
+      // When true, return only thread metadata and live-resume state without populating `thread.turns`. This is useful when the client plans to call `thread/turns/list` immediately after resuming. Full-history hydration is deprecated for paginated threads; use this with `thread/turns/list` and `thread/items/list` instead.
+  history?: Array<ResponseItem> | null
+      // [UNSTABLE] FOR CODEX CLOUD - DO NOT USE. If specified, the thread will be resumed with the provided history instead of loaded from disk.
+  initialTurnsPage?: ThreadResumeInitialTurnsPageParams | null
+      // When present, include a `thread/turns/list` page in the resume response so clients can bootstrap recent turns without a second request.
+  model?: string | null
+      // Configuration overrides for the resumed thread, if any.
+  modelProvider?: string | null
+  path?: string | null
+      // [UNSTABLE] Specify the rollout path to resume from. If specified for a non-running thread, the thread_id param will be ignored. If thread_id identifies a running thread, the path must match the active rollout path.
+  permissions?: string | null
+      // Named profile id for the resumed thread. Cannot be combined with `sandbox`.
+  personality?: Personality | null
+      // @deprecated `friendly` and `pragmatic` no longer select a style. Changing this does not rewrite the thread's existing instructions.
+  runtimeWorkspaceRoots?: Array<AbsolutePathBuf> | null
+      // Replace the thread's runtime workspace roots. Paths must be absolute.
+  sandbox?: SandboxMode | null
+  serviceTier?: string | null
+  threadId: string
+
+ThreadResumeResponse
+  activePermissionProfile?: ActivePermissionProfile | null
+      // Named or implicit built-in profile that produced the active permissions, when known.
+  approvalPolicy: AskForApproval
+  approvalsReviewer: ApprovalsReviewer
+      // Reviewer currently used for approval requests on this thread.
+  collaborationMode?: CollaborationMode | null
+      // Effective collaboration mode. Absent when resuming from an older server.
+  cwd: AbsolutePathBuf
+  disabledPluginIds?: Array<string>
+      // Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.
+  initialTurnsPage?: TurnsPage | null
+      // `thread/turns/list` page returned when requested by `initialTurnsPage`.
+  instructionSources?: Array<LegacyAppPathString>
+      // Environment-native paths to instruction source files currently loaded for this thread.
+  itemsBackwardsCursor?: string | null
+      // Opaque cursor for hydrating paginated items backwards. Pass this as `cursor` to `thread/items/list` with `sortDirection: "desc"`. The first page includes the item identified by the cursor.
+  model: string
+  modelProvider: string
+  multiAgentMode?: MultiAgentMode
+      // @deprecated Always `explicitRequestOnly`. Use `reasoningEffort` for Ultra behavior.
+  reasoningEffort?: ReasoningEffort | null
+  runtimeWorkspaceRoots?: Array<AbsolutePathBuf>
+      // Thread-scoped runtime workspace roots used to materialize `:workspace_roots`.
+  sandbox: SandboxPolicy
+      // Legacy sandbox policy retained for compatibility. Experimental clients should prefer `activePermissionProfile` for profile provenance.
+  serviceTier?: string | null
+  thread: Thread
+  turnsBackwardsCursor?: string | null
+      // Opaque cursor for hydrating paginated turns backwards. Pass this as `cursor` to `thread/turns/list` with `sortDirection: "desc"`. The first page includes the turn identified by the cursor.
+
+ThreadStartParams
+  allowProviderModelFallback?: boolean
+      // Allow a provider with an authoritative static model catalog to replace an unavailable requested model with its default.
+  approvalPolicy?: AskForApproval | null
+  approvalsReviewer?: ApprovalsReviewer | null
+      // Override where approval requests are routed for review on this thread and subsequent turns.
+  baseInstructions?: string | null
+  config?: object | null
+  cwd?: string | null
+  daybreakEnabled?: boolean | null
+      // Initial Daybreak choice for this persistent thread. Omitted or null leaves it unset. This does not select a turn's `cyberAccessProgram` or grant access. Not supported for ephemeral threads.
+  developerInstructions?: string | null
+  dynamicTools?: Array<DynamicToolSpec> | null
+  environments?: Array<TurnEnvironmentParams> | null
+      // Optional sticky environments for this thread. Omitted selects the default environment when environment access is enabled. Empty disables environment access for turns that do not provide a turn override. Non-empty selects the first environment as the current turn environment.
+  ephemeral?: boolean | null
+  experimentalRawEvents?: boolean
+      // If true, opt into emitting raw Responses API items on the event stream. This is for internal use only (e.g. Codex Cloud).
+  historyMode?: ThreadHistoryMode | null
+      // Persisted thread history contract to use for this new thread.
+  mockExperimentalField?: string | null
+      // Test-only experimental field used to validate experimental gating and schema filtering behavior in a stable way.
+  model?: string | null
+  modelProvider?: string | null
+  multiAgentMode?: MultiAgentMode | null
+      // @deprecated Ignored. Use Ultra reasoning effort for proactive multi-agent behavior.
+  permissions?: string | null
+      // Named profile id for this thread. Cannot be combined with `sandbox`.
+  personality?: Personality | null
+      // @deprecated `friendly` and `pragmatic` no longer select a style.
+  projectId?: string | null
+      // Optional project identity for this new thread. Durable threads persist the assignment; ephemeral threads expose it only in live responses.
+  runtimeWorkspaceRoots?: Array<AbsolutePathBuf> | null
+      // Replace the thread's runtime workspace roots. Paths must be absolute.
+  sandbox?: SandboxMode | null
+  selectedCapabilityRoots?: Array<SelectedCapabilityRoot> | null
+      // Capability roots selected for this thread by the hosting platform.
+  serviceName?: string | null
+  serviceTier?: string | null
+  sessionStartSource?: ThreadStartSource | null
+  threadSource?: ThreadSource | null
+      // Optional client-supplied analytics source classification for this thread.
+
+ThreadStartResponse
+  activePermissionProfile?: ActivePermissionProfile | null
+      // Named or implicit built-in profile that produced the active permissions, when known.
+  approvalPolicy: AskForApproval
+  approvalsReviewer: ApprovalsReviewer
+      // Reviewer currently used for approval requests on this thread.
+  cwd: AbsolutePathBuf
+  disabledPluginIds?: Array<string>
+      // Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.
+  instructionSources?: Array<LegacyAppPathString>
+      // Environment-native paths to instruction source files currently loaded for this thread.
+  model: string
+  modelProvider: string
+  multiAgentMode?: MultiAgentMode
+      // @deprecated Always `explicitRequestOnly`. Use `reasoningEffort` for Ultra behavior.
+  reasoningEffort?: ReasoningEffort | null
+  runtimeWorkspaceRoots?: Array<AbsolutePathBuf>
+      // Thread-scoped runtime workspace roots used to materialize `:workspace_roots`.
+  sandbox: SandboxPolicy
+      // Legacy sandbox policy retained for compatibility. Experimental clients should prefer `activePermissionProfile` for profile provenance.
+  serviceTier?: string | null
+  thread: Thread
+
+ThreadTokenUsage
+  last: TokenUsageBreakdown
+  modelContextWindow?: integer | null
+  total: TokenUsageBreakdown
+
+ThreadTokenUsageUpdatedNotification
+  threadId: string
+  tokenUsage: ThreadTokenUsage
+  turnId: string
+
+ThreadTurnsListParams
+  cursor?: string | null
+      // Opaque cursor to pass to the next call to continue after the last turn.
+  itemsView?: TurnItemsView | null
+      // How much item detail to include for each returned turn; defaults to summary.
+  limit?: integer | null
+      // Optional turn page size.
+  sortDirection?: SortDirection | null
+      // Optional turn pagination direction; defaults to descending.
+  threadId: string
+
+ThreadTurnsListResponse
+  backwardsCursor?: string | null
+      // Opaque cursor to pass as `cursor` when reversing `sortDirection`. This is only populated when the page contains at least one turn. Use it with the opposite `sortDirection` to include the anchor turn again and catch updates to that turn.
+  data: Array<Turn>
+  nextCursor?: string | null
+      // Opaque cursor to pass to the next call to continue after the last turn. if None, there are no more turns to return.
+
+ThreadUnsubscribeParams
+  threadId: string
+
+ThreadUnsubscribeResponse
+  status: ThreadUnsubscribeStatus
+
+TokenUsageBreakdown
+  cacheWriteInputTokens?: integer
+  cachedInputTokens: integer
+  inputTokens: integer
+  outputTokens: integer
+  reasoningOutputTokens: integer
+  totalTokens: integer
+
+ToolRequestUserInputResponse
+  // EXPERIMENTAL. Response payload mapping question ids to answers.
+  answers: Record<string, ToolRequestUserInputAnswer>
+
+Turn
+  completedAt?: integer | null
+      // Unix timestamp (in seconds) when the turn completed.
+  durationMs?: integer | null
+      // Duration between turn start and completion in milliseconds, if known.
+  error?: TurnError | null
+      // Error associated with a failed or interrupted turn.
+  id: string
+      // Identifier for this turn. Codex-generated turn IDs are UUIDv7.
+  items: Array<ThreadItem>
+      // Thread items currently included in this turn payload.
+  itemsView?: TurnItemsView
+      // Describes how much of `items` has been loaded for this turn.
+  rootTurnId?: string | null
+      // ID of the first turn in the chain of work that led to this turn. Pass this as `rootTurnId` when starting work on behalf of this turn. May be null in older history or a `review/start` response.
+  startedAt?: integer | null
+      // Unix timestamp (in seconds) when the turn started.
+  status: TurnStatus
+
+TurnCompletedNotification
+  threadId: string
+  turn: Turn
+
+TurnError
+  additionalDetails?: string | null
+  codexErrorInfo?: CodexErrorInfo | null
+  message: string
+  misalignment?: MisalignmentErrorDetails | null
+      // Optional public explanation and continuation instruction for a misalignment block.
+
+TurnInterruptParams
+  threadId: string
+  turnId: string
+
+TurnInterruptResponse
+  = object
+
+TurnItemsView
+  | "notLoaded"
+  | "summary"
+  | "full"
+
+TurnStartParams
+  additionalContext?: Record<string, AdditionalContextEntry> | null
+      // Optional client-provided context fragments keyed by an opaque source identifier.
+  approvalPolicy?: AskForApproval | null
+      // Override the approval policy for this turn and subsequent turns.
+  approvalsReviewer?: ApprovalsReviewer | null
+      // Override where approval requests are routed for review on this turn and subsequent turns.
+  clientUserMessageId?: string | null
+  collaborationMode?: CollaborationMode | null
+      // EXPERIMENTAL - Set a pre-set collaboration mode. Takes precedence over model, reasoning_effort, and developer instructions if set. For `collaboration_mode.settings.developer_instructions`, `null` means "use the built-in instructions for the selected mode".
+  cwd?: string | null
+      // Override the working directory for this turn and subsequent turns.
+  cyberAccessProgram?: CyberAccessProgram | null
+      // EXPERIMENTAL - Request an authorized cyber program for this turn. Omission preserves automatic behavior. This does not grant access.
+  disabledPluginIds?: Array<string> | null
+      // Replace this thread's disabled plugin IDs. Omitted/null preserves the list; [] clears it.
+  effort?: ReasoningEffort | null
+      // Override the reasoning effort for this turn and subsequent turns.
+  environments?: Array<TurnEnvironmentParams> | null
+      // Optional environments for this turn and subsequent turns. Omitted uses the thread sticky environments. Empty disables environment access for this turn. Non-empty selects the first environment as the current turn environment for this turn.
+  input: Array<UserInput>
+  model?: string | null
+      // Override the model for this turn and subsequent turns.
+  multiAgentMode?: MultiAgentMode | null
+      // @deprecated Ignored. Use `effort: "ultra"` for proactive multi-agent behavior.
+  outputSchema?: unknown
+      // Optional JSON Schema used to constrain the final assistant message for this turn.
+  parentTurnId?: string | null
+      // ID of the turn that caused this new turn to start. Set this when starting work on behalf of another turn, such as delegated work in a different thread. Leave unset for work started directly by the user. Ignored when this request adds input to an active turn.
+  permissions?: string | null
+      // Select a named permissions profile id for this turn and subsequent turns. Cannot be combined with `sandboxPolicy`.
+  personality?: Personality | null
+      // @deprecated `friendly` and `pragmatic` no longer select a style. Changing this does not rewrite the thread's existing instructions.
+  responsesapiClientMetadata?: Record<string, string> | null
+      // Optional metadata to enrich Codex's ResponsesAPI turn metadata. Entries are flattened into the JSON string sent as `client_metadata["x-codex-turn-metadata"]` on ResponsesAPI HTTP and websocket requests. They are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.
+  rootTurnId?: string | null
+      // ID of the first turn in the chain of work that led to this new turn. When setting `parentTurnId`, set this to the parent turn's `rootTurnId` when known. This keeps descendant work attributed to the original turn. If omitted, the new turn becomes its own root. Ignored when this request adds input to an active turn.
+  runtimeWorkspaceRoots?: Array<AbsolutePathBuf> | null
+      // Replace the thread's runtime workspace roots for this turn and subsequent turns. Paths must be absolute.
+  sandboxPolicy?: SandboxPolicy | null
+      // Override the sandbox policy for this turn and subsequent turns.
+  serviceTier?: string | null
+      // Override the service tier for this turn and subsequent turns.
+  serviceTierForTurn?: string | null
+      // Override the service tier only when this request starts a new turn. Use "default" for standard speed. Omitted or null inherits the thread's tier. Does not change the thread's tier or a turn being steered.
+  summary?: ReasoningSummary | null
+      // Override the reasoning summary for this turn and subsequent turns.
+  threadId: string
+  toolOutput?: TurnToolOutput | null
+  turnTrigger?: string | null
+      // Optional source classification for the caller that starts this turn. Ignored when this request steers an already-active turn.
+
+TurnStartResponse
+  turn: Turn
+
+TurnStartedNotification
+  threadId: string
+  turn: Turn
+
+TurnStatus
+  | "completed"
+  | "interrupted"
+  | "failed"
+  | "inProgress"
+
+TurnSteerParams
+  additionalContext?: Record<string, AdditionalContextEntry> | null
+      // Optional client-provided context fragments keyed by an opaque source identifier.
+  clientUserMessageId?: string | null
+  expectedTurnId: string
+      // Required active turn id precondition. The request fails when it does not match the currently active turn.
+  input: Array<UserInput>
+  responsesapiClientMetadata?: Record<string, string> | null
+      // Optional metadata to enrich Codex's ResponsesAPI turn metadata. Entries are flattened into the JSON string sent as `client_metadata["x-codex-turn-metadata"]` on ResponsesAPI HTTP and websocket requests. They are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.
+  threadId: string
+
+TurnSteerResponse
+  turnId: string
+
+UserInput
+  [text]
+    text: string
+    text_elements?: Array<TextElement>
+        // UI-defined spans within `text` used to render or persist special elements.
+  [image]
+    detail?: ImageDetail | null
+  [localImage]
+    detail?: ImageDetail | null
+    path: string
+  [audio]
+    url: string
+  [localAudio]
+    path: string
+  [skill]
+    name: string
+    path: string
+  [mention]
+    name: string
+    path: string

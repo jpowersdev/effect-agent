@@ -20,6 +20,7 @@ import * as ClaudeSdk from "../claude/ClaudeSdk.ts"
 import * as CodexAgent from "../codex/CodexAgent.ts"
 import * as CodexAppServer from "../codex/CodexAppServer.ts"
 import * as CodexReplay from "../codex/CodexReplay.ts"
+import type { JsonValue } from "../codex/protocol.ts"
 
 /** A duration as `Duration` input text (`"30 seconds"`) or millis. */
 export const DurationSpec = Schema.Union([Schema.String, Schema.Number]).pipe(
@@ -283,7 +284,8 @@ export const providerLayer = (spec: ProviderSpec): Layer.Layer<Agent, never, Chi
         })
   return CodexAgent.layer({
     ...(codex.pricing !== undefined && { pricing: codex.pricing }),
-    ...(codex.config !== undefined && { config: codex.config }),
+    // Decoded from the JSON spec, so the values are JSON.
+    ...(codex.config !== undefined && { config: codex.config as Readonly<Record<string, JsonValue>> }),
     ...(codex.stallGrace !== undefined && { stallGrace: toDuration(codex.stallGrace) }),
   }).pipe(Layer.provide(server))
 }

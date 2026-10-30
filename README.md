@@ -228,6 +228,8 @@ node scripts/live-claude.ts   # live, against the real CLIs (small cost)
 node scripts/live-codex.ts
 ```
 
+To take a new Claude Code or Codex release (protocol check, SDK type diff, fixture refresh), follow [UPGRADING.md](UPGRADING.md).
+
 `EFFECT_AGENT_TEST_HOST=bun` runs every session host (in the tests and `scripts/live-reattach.ts`) under Bun instead of Node.
 
 ## Building

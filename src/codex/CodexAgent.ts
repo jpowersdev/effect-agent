@@ -41,7 +41,7 @@ export interface CodexAgentOptions {
   /** Token prices for estimated cost and `spendCapUsd`. Without them cost is unknown and spend caps are refused. */
   readonly pricing?: Pricing.PriceTable
   /** Extra per-thread config overrides (dotted config.toml keys). effect-agent's own settings win on conflict. */
-  readonly config?: Readonly<Record<string, unknown>>
+  readonly config?: Readonly<Record<string, P.JsonValue>>
   /** Default for `RunOptions.watchdog.grace` (10 seconds when neither is set). */
   readonly stallGrace?: Duration.Input
 }
@@ -58,7 +58,7 @@ export const codexEffort = (effort: Effort): string => (effort === "max" ? "xhig
  * 0.162.1 by listing the model's tools with each switch off. Names not in
  * this table (e.g. `apply_patch`, `spawn_agent`) can't be removed per thread.
  */
-export const toolSwitches: Readonly<Record<string, Readonly<Record<string, unknown>>>> = {
+export const toolSwitches: Readonly<Record<string, Readonly<Record<string, P.JsonValue>>>> = {
   shell: { "features.shell_tool": false, "features.unified_exec": false },
   exec_command: { "features.shell_tool": false, "features.unified_exec": false },
   write_stdin: { "features.shell_tool": false, "features.unified_exec": false },
@@ -76,9 +76,9 @@ const subagentNote =
 /** Thread overrides shared by `thread/start` and `thread/resume`. Fails on tool names Codex can't disable. */
 export const threadOverrides = (
   options: RunOptions,
-  extraConfig: Readonly<Record<string, unknown>> = {},
+  extraConfig: Readonly<Record<string, P.JsonValue>> = {},
 ): { readonly overrides: P.ThreadOverrides } | { readonly error: string } => {
-  const tools: Record<string, unknown> = {}
+  const tools: Record<string, P.JsonValue> = {}
   const unknown: Array<string> = []
   for (const name of options.disable?.tools ?? []) {
     const sw = toolSwitches[name]
@@ -90,7 +90,7 @@ export const threadOverrides = (
       error: `Codex cannot disable tool(s) ${unknown.join(", ")}; supported: ${Object.keys(toolSwitches).join(", ")}`,
     }
   }
-  const config: Record<string, unknown> = {
+  const config: Record<string, P.JsonValue> = {
     ...extraConfig,
     // MCP isolation: no configured servers, and no built-in codex_apps (ChatGPT apps/connectors).
     mcp_servers: {},
@@ -478,7 +478,7 @@ const openSession = Effect.fnUntraced(function* (
       const run = state.running
       const item: P.ThreadItem | undefined = params.item
       if (!("id" in msg && msg.id !== undefined)) {
-        switch (msg.method) {
+        switch (msg.method as P.NotificationMethod) {
           case "turn/started": {
             const turnId = TurnId.make(params.turn.id)
             const current = run ?? (state.running = newRun([]))

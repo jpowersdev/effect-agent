@@ -7,6 +7,10 @@
  * the server sends are typed loosely (optional/unknown where we don't
  * depend on a field) so newer servers keep working.
  *
+ * Every wire name the codex provider uses (methods, error kinds, item types,
+ * statuses) is written here, so `scripts/codex-protocol.ts` can check this
+ * file against a codex release (see UPGRADING.md).
+ *
  * Wire format: newline-delimited JSON-RPC 2.0 without the `jsonrpc` field.
  */
 
@@ -56,13 +60,16 @@ export const isNotification = (m: Message): m is Notification => m.id === undefi
 // ---------------------------------------------------------------------------
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | (string & {})
-export type AskForApproval = "untrusted" | "on-failure" | "on-request" | "never"
+export type AskForApproval = "untrusted" | "on-request" | "never"
+
+export type JsonValue = string | number | boolean | null | ReadonlyArray<JsonValue> | { readonly [key: string]: JsonValue }
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access"
 
 export interface TextInput {
   readonly type: "text"
   readonly text: string
-  readonly text_elements: ReadonlyArray<unknown>
+  /** Always empty: effect-agent sends plain text. */
+  readonly text_elements: ReadonlyArray<never>
 }
 export type UserInput = TextInput
 
@@ -81,6 +88,20 @@ export type CodexErrorInfo =
   | "other"
   | (string & {})
   | { readonly [key: string]: unknown }
+
+/** The `codexErrorInfo` kinds effect-agent names: a string tag, or the key of an object variant. */
+export type CodexErrorKind =
+  | "contextWindowExceeded"
+  | "sessionBudgetExceeded"
+  | "usageLimitExceeded"
+  | "rateLimitExceeded"
+  | "serverOverloaded"
+  | "unauthorized"
+  | "internalServerError"
+  | "badRequest"
+  | "other"
+  | "responseStreamDisconnected"
+  | "responseTooManyFailedAttempts"
 
 export interface TurnError {
   readonly message: string
@@ -247,7 +268,7 @@ export interface ThreadOverrides {
   readonly approvalPolicy?: AskForApproval
   readonly sandbox?: SandboxMode
   /** Dotted config.toml keys, e.g. `"features.apps": false`. */
-  readonly config?: Readonly<Record<string, unknown>>
+  readonly config?: Readonly<Record<string, JsonValue>>
   /** Appended to the built-in instructions (never use `baseInstructions`, which replaces them). */
   readonly developerInstructions?: string
 }
@@ -299,7 +320,7 @@ export interface GetAccountRateLimitsResponse {
   /** Null means unavailable. */
   readonly ordinaryUsageAllowed: boolean | null
   readonly rateLimits: RateLimitSnapshot
-  readonly rateLimitsByLimitId?: Readonly<Record<string, RateLimitSnapshot>> | null
+  readonly rateLimitsByLimitId?: Readonly<Partial<Record<string, RateLimitSnapshot>>> | null
 }
 
 export type Account =
@@ -374,6 +395,35 @@ export type ClientMethod = keyof ClientRequests
 // Server -> client notifications (params)
 // ---------------------------------------------------------------------------
 
+/**
+ * The notifications effect-agent names: read, throttled into heartbeats, or
+ * opted out of. Every other notification maps to an `Other` event.
+ */
+export type NotificationMethod =
+  | "turn/started"
+  | "turn/completed"
+  | "item/started"
+  | "item/completed"
+  | "thread/tokenUsage/updated"
+  | "account/rateLimits/updated"
+  | "error"
+  // heartbeats
+  | "item/agentMessage/delta"
+  | "item/reasoning/textDelta"
+  | "item/reasoning/summaryTextDelta"
+  | "item/reasoning/summaryPartAdded"
+  | "item/commandExecution/outputDelta"
+  | "item/fileChange/outputDelta"
+  | "item/plan/delta"
+  | "item/mcpToolCall/progress"
+  | "turn/plan/updated"
+  | "turn/diff/updated"
+  // opted out of
+  | "turn/moderationMetadata"
+  | "remoteControl/status/changed"
+  | "rawResponse/completed"
+  | "rawResponseItem/completed"
+
 export interface TurnNotification {
   readonly threadId: string
   readonly turn: Turn
@@ -411,6 +461,25 @@ export const ServerRequestMethods = {
   requestUserInput: "item/tool/requestUserInput",
   mcpElicitation: "mcpServer/elicitation/request",
 } as const
+
+/** Answer to `commandApproval` and `fileChangeApproval`. */
+export interface ApprovalDeclined {
+  readonly decision: "decline"
+}
+/** Answer to `legacyExecApproval` and `legacyPatchApproval`. */
+export interface LegacyApprovalAborted {
+  readonly decision: "abort"
+}
+/** Answer to `requestUserInput`: no answers. */
+export interface UserInputAnswers {
+  readonly answers: Readonly<Record<string, never>>
+}
+/** Answer to `mcpElicitation`. */
+export interface ElicitationDeclined {
+  readonly action: "decline"
+  readonly content: null
+  readonly _meta: null
+}
 
 /** JSON-RPC "method not found". */
 export const METHOD_NOT_FOUND = -32601

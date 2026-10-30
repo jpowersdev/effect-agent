@@ -162,7 +162,7 @@ export const stalledFailure = (stall: { readonly idleMs: number; readonly inTool
     inTool: stall.inTool,
   })
 
-const throttleKinds = new Set([
+const throttleKinds: ReadonlySet<string> = new Set<P.CodexErrorKind>([
   "rateLimitExceeded",
   "serverOverloaded",
   "responseStreamDisconnected",
@@ -197,7 +197,8 @@ export const classifyOutcome = (turn: P.Turn, ctx: OutcomeContext): TurnOutcome 
   const error = turn.error
   const message = error?.message ?? `turn ${turn.status}`
   const kind = errorKind(error?.codexErrorInfo)
-  switch (kind) {
+  // Typed so each case must be a kind protocol.ts names.
+  switch (kind as P.CodexErrorKind | null) {
     case "usageLimitExceeded":
       return new UsageLimited({ message, ...usageLimitDetails(ctx.rateLimits) })
     case "unauthorized":
@@ -301,7 +302,7 @@ export const makeMapState = (): MapState => ({ announced: new Set(), lastHeartbe
 
 export const HEARTBEAT_INTERVAL_MS = 1000
 
-const heartbeatMethods = new Set([
+const heartbeatMethods: ReadonlySet<string> = new Set<P.NotificationMethod>([
   "item/agentMessage/delta",
   "item/reasoning/textDelta",
   "item/reasoning/summaryTextDelta",
@@ -339,7 +340,8 @@ export const mapNotification = (msg: P.Incoming, state: MapState, nowMs: number)
 
   if ("id" in msg && msg.id !== undefined) return [{ _tag: "Other", raw }] // server request
 
-  switch (msg.method) {
+  // Typed so each case must be a method protocol.ts names.
+  switch (msg.method as P.NotificationMethod) {
     case "item/started": {
       const item: P.ThreadItem = params.item
       if (item.type === "reasoning" || item.type === "agentMessage") return heartbeat()
