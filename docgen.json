@@ -10,6 +10,7 @@
     "src/host/EventFile.ts",
     "src/host/HookBridge.ts",
     "src/host/Host.ts",
+    "src/host/providers.ts",
     "src/internal/**/*.ts"
   ],
   "parseCompilerOptions": "tsconfig.json",
