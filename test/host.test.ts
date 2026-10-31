@@ -11,7 +11,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Agent, AgentError, ConnectionLost, MessageId, SessionClosed, SessionId, SessionNotFound, type TurnId, UsageLimited } from "../src/index.ts"
-import { AgentHosts, EventsTrimmed, HostSpec, RemoteAgent } from "../src/host/index.ts"
+import { AgentHosts, EventsTrimmed, HostSpec, DetachedAgent } from "../src/host/index.ts"
 import { host } from "./support/hostCommand.ts"
 
 const dir = mkdtempSync(join(tmpdir(), "ea-host-"))
@@ -30,7 +30,7 @@ afterAll(() => {
   // Never leave a host behind, whatever a test did.
   for (const name of existsSync(dir) ? readdirSync(dir) : []) {
     if (!name.endsWith(".json")) continue
-    const manifest = RemoteAgent.listHosts(dir).find((m) => `${m.sessionId}.json` === name)
+    const manifest = DetachedAgent.listHosts(dir).find((m) => `${m.sessionId}.json` === name)
     if (manifest !== undefined) started.add(manifest.pid)
   }
   for (const pid of started) if (isAlive(pid)) process.kill(pid, "SIGKILL")
@@ -63,11 +63,11 @@ const hostFilesGone = (sessionId: string) =>
 const timeout = 30_000
 
 for (const p of providers) {
-  const layer = (name: string, options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
-    RemoteAgent.layer({ host, provider: p.name, replay: fixture(p.name, name), dir, ...options }).pipe(Layer.provide(NodeServices.layer))
+  const layer = (name: string, options: Partial<DetachedAgent.DetachedAgentOptions> = {}) =>
+    DetachedAgent.layer({ host, provider: p.name, replay: fixture(p.name, name), dir, ...options }).pipe(Layer.provide(NodeServices.layer))
 
   /** Open a session, send one message and return as soon as it lands, leaving the session running. */
-  const startTurn = (name: string, options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
+  const startTurn = (name: string, options: Partial<DetachedAgent.DetachedAgentOptions> = {}) =>
     Effect.scoped(
       Effect.gen(function* () {
         const session = yield* (yield* AgentHosts).open({ cwd: p.cwd })
@@ -227,9 +227,9 @@ for (const p of providers) {
           const stopped = yield* Effect.scoped(
             Effect.gen(function* () {
               const session = yield* (yield* Agent).open({ cwd: p.cwd })
-              const remote = session as RemoteAgent.RemoteSession
-              started.add(remote.hostPid)
-              return { sessionId: session.sessionId, hostPid: remote.hostPid }
+              const detached = session as DetachedAgent.DetachedSession
+              started.add(detached.hostPid)
+              return { sessionId: session.sessionId, hostPid: detached.hostPid }
             }),
           ).pipe(Effect.provide(layer(p.simple)))
           expect(isAlive(stopped.hostPid)).toBe(false)
@@ -378,7 +378,7 @@ describe("host: attach", () => {
       const failure = failureOf(yield* (yield* AgentHosts).attach(id).pipe(Effect.scoped, Effect.exit))
       expect(failure).toBeInstanceOf(SessionNotFound)
       expect(failure).toMatchObject({ sessionId: id })
-    }).pipe(Effect.provide(RemoteAgent.layer({ host, provider: "codex", replay: fixture("codex", "simple"), dir })),
+    }).pipe(Effect.provide(DetachedAgent.layer({ host, provider: "codex", replay: fixture("codex", "simple"), dir })),
       Effect.provide(NodeServices.layer)),
   )
 })

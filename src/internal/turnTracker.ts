@@ -13,9 +13,10 @@
  * @internal
  */
 import { Deferred, Effect, Exit } from "effect"
-import { AgentError, SessionClosed } from "../AgentError.ts"
-import type { AgentEvent, TurnOutcome } from "../AgentEvent.ts"
-import type { TurnId } from "../Domain.ts"
+import { AgentError } from "../AgentError.ts"
+import type { AgentEvent } from "../AgentEvent.ts"
+import { SessionClosed } from "../AgentSession.ts"
+import type { TurnId, TurnOutcome } from "../Turn.ts"
 
 /** @internal */
 export interface TurnTracker {

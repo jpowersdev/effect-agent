@@ -20,7 +20,7 @@
  * `systemctl --user set-property effect_agent.slice MemoryMax=16G` caps every
  * agent together.
  *
- * For `RemoteAgent`, the `Launcher` wraps the host process, so the scope
+ * For `DetachedAgent`, the `Launcher` wraps the host process, so the scope
  * holds the host, the agent and its commands. Pass `stopOnEnd: false` there:
  * the session outlives the Scope it was opened in, and its systemd scope ends
  * on its own once the host has exited and nothing else is left in it.
@@ -42,7 +42,7 @@ export interface Options {
    * the runaway command dies and the agent sees it fail.
    */
   readonly oomPolicy?: "stop" | "continue"
-  /** Stop the scopes and the slice when their Scopes close. Default true; false for `RemoteAgent` (see above). */
+  /** Stop the scopes and the slice when their Scopes close. Default true; false for `DetachedAgent` (see above). */
   readonly stopOnEnd?: boolean
 }
 

@@ -13,8 +13,9 @@ import { chmodSync, mkdirSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { RunSettings } from "../Agent.ts"
-import { AgentError, SessionNotFound } from "../AgentError.ts"
-import { DurationInput, EnvOverrides, SessionId } from "../Domain.ts"
+import { AgentError } from "../AgentError.ts"
+import { SessionId, SessionNotFound } from "../AgentSession.ts"
+import { DurationInput, EnvOverrides } from "../internal/schema.ts"
 
 /**
  * A duration: `Duration` input text (`"30 seconds"`) or millis. Encoded as millis.
@@ -116,7 +117,7 @@ export const Provider = Schema.Literals(["claude", "codex"])
 export type Provider = typeof Provider.Type
 
 /**
- * Provider-layer settings shared by `RemoteAgent.layer` and the host.
+ * Provider-layer settings shared by `DetachedAgent.layer` and the host.
  *
  * @since 0.1.0
  * @category models

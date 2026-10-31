@@ -1,5 +1,5 @@
 /**
- * The host's side of remote hooks: the provider session's hook functions call
+ * The host's side of hooks on detached sessions: the provider session's hook functions call
  * `call`, which forwards the call to an attached client that registered to
  * answer that hook (`HookRequests`) and waits for its `HookResponse`.
  *

@@ -5,7 +5,7 @@
  *
  * @since 0.1.0
  */
-import type { TokenUsage } from "./Domain.ts"
+import type { TokenUsage } from "./Usage.ts"
 
 /**
  * USD per million tokens.

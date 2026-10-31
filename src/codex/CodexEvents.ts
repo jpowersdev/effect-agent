@@ -8,6 +8,8 @@
  */
 import { DateTime, Option } from "effect"
 import type { AccountStatus } from "../Agent.ts"
+import type { AgentEvent } from "../AgentEvent.ts"
+import { MessageId } from "../Message.ts"
 import {
   AgentFailed,
   AuthFailed,
@@ -17,10 +19,12 @@ import {
   SpendCapReached,
   Stalled,
   Throttled,
+  TurnId,
+  type TurnOutcome,
   UsageLimited,
-} from "../AgentError.ts"
-import type { AgentEvent, TurnOutcome } from "../AgentEvent.ts"
-import { type LimitWindow, type LimitWindowStatus, MessageId, type TokenUsage, TurnId } from "../Domain.ts"
+} from "../Turn.ts"
+import type { TokenUsage } from "../Usage.ts"
+import type { LimitWindow, LimitWindowStatus } from "../UsageLimit.ts"
 import * as P from "./protocol.ts"
 
 // ---------------------------------------------------------------------------

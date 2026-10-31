@@ -9,7 +9,7 @@
  */
 import { Clock, Duration, Effect, Option, Queue, Schedule, type Scope, Stream } from "effect"
 import type { AgentEvent } from "./AgentEvent.ts"
-import type { TurnId } from "./Domain.ts"
+import type { TurnId } from "./Turn.ts"
 
 /**
  * Idle limits; `toolIdle` defaults to `idle`.

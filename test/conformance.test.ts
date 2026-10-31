@@ -10,7 +10,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ClaudeAgent, ClaudeReplay } from "../src/claude/index.ts"
 import { CodexAgent, CodexReplay } from "../src/codex/index.ts"
-import { RemoteAgent } from "../src/host/index.ts"
+import { DetachedAgent } from "../src/host/index.ts"
 import { AccountStatus, Agent, AgentEvent, type AgentSession, type RunOptions, SessionId } from "../src/index.ts"
 import { host } from "./support/hostCommand.ts"
 
@@ -32,9 +32,9 @@ type Scenario =
 
 interface Provider {
   readonly name: string
-  /** The underlying provider (`claude` / `codex`); differs from `name` for remote providers. */
+  /** The underlying provider (`claude` / `codex`); differs from `name` for detached providers. */
   readonly kind: "claude" | "codex"
-  /** Per-test timeout (remote sessions start a host process). */
+  /** Per-test timeout (detached sessions start a host process). */
   readonly timeout?: number
   readonly cwd: string
   readonly missingId: string
@@ -124,18 +124,18 @@ const codex: Provider = {
  */
 const hostDir = mkdtempSync(join(tmpdir(), "ea-conf-"))
 afterAll(() => {
-  for (const host of RemoteAgent.listHosts(hostDir)) process.kill(host.pid, "SIGKILL")
+  for (const host of DetachedAgent.listHosts(hostDir)) process.kill(host.pid, "SIGKILL")
   rmSync(hostDir, { recursive: true, force: true })
 })
 
-const remote = (local: Provider): Provider => ({
+const detached = (local: Provider): Provider => ({
   ...local,
-  name: `remote-${local.kind}`,
+  name: `detached-${local.kind}`,
   timeout: 30_000,
   layer: (scenario) => {
     const fixtures = local.kind === "claude" ? claudeFixtures : codexFixtures
     const pricing = local.kind === "codex" ? codexPricing(scenario) : undefined
-    return RemoteAgent.layer({ host,
+    return DetachedAgent.layer({ host,
       provider: local.kind,
       replay: fixture(local.kind, fixtures[scenario]),
       dir: hostDir,
@@ -212,7 +212,7 @@ const checkStream = (events: ReadonlyArray<AgentEvent>, sessionId: string) => {
 const outcomes = (events: ReadonlyArray<AgentEvent>) =>
   events.flatMap((e) => (e._tag === "TurnEnded" ? [e.outcome._tag] : []))
 
-for (const provider of [claude, codex, remote(claude), remote(codex)]) {
+for (const provider of [claude, codex, detached(claude), detached(codex)]) {
   const base: RunOptions = { cwd: provider.cwd }
 
   describe(`conformance: ${provider.name}`, { timeout: provider.timeout ?? 5_000 }, () => {
@@ -421,7 +421,7 @@ for (const provider of [claude, codex, remote(claude), remote(codex)]) {
       Effect.gen(function* () {
         const caps = yield* (yield* Agent).capabilities
         expect(caps.provider).toBe(provider.kind)
-        expect(caps.reattach).toBe(provider.name.startsWith("remote-"))
+        expect(caps.reattach).toBe(provider.name.startsWith("detached-"))
         expect(caps.version).toMatch(/^\d+\.\d+\.\d+/)
       }).pipe(Effect.provide(provider.layer("simple"))),
     )

@@ -45,7 +45,7 @@ export {
  * @since 0.1.0
  * @category modules
  */
-export * as RemoteAgent from "./RemoteAgent.ts"
+export * as DetachedAgent from "./DetachedAgent.ts"
 
 export {
   /**
@@ -57,8 +57,8 @@ export {
    * @since 0.1.0
    * @category re-exports
    */
-  type RemoteSession,
-} from "./RemoteAgent.ts"
+  type DetachedSession,
+} from "./DetachedAgent.ts"
 
 /**
  * The program a session host process runs.

@@ -1,6 +1,6 @@
 /**
- * The provider-neutral core: the `Agent` service and its sessions, the event
- * stream, how turns end, and the shared value types. Providers live in
+ * The provider-neutral core: the `Agent` service, its sessions, messages and
+ * turns, the event stream, and usage. Providers live in
  * `@jpowersdev/effect-agent/claude` and `@jpowersdev/effect-agent/codex`;
  * sessions that outlive their process in `@jpowersdev/effect-agent/host`.
  *
@@ -8,7 +8,7 @@
  */
 
 /**
- * Provider-neutral coding agent: the `Agent` service, sessions and run options.
+ * The `Agent` service: one provider, and the options for opening a session.
  *
  * @since 0.1.0
  * @category re-exports
@@ -16,12 +16,28 @@
 export * from "./Agent.ts"
 
 /**
- * How a turn can end, as Schema-described tagged errors.
+ * A session: one agent process working in one directory.
  *
- * @since 0.1.0
+ * @since 0.3.0
  * @category re-exports
  */
-export * from "./AgentError.ts"
+export * from "./AgentSession.ts"
+
+/**
+ * A message: input you give a session, and where it went.
+ *
+ * @since 0.3.0
+ * @category re-exports
+ */
+export * from "./Message.ts"
+
+/**
+ * A turn: the agent's work on a message, and how it ended.
+ *
+ * @since 0.3.0
+ * @category re-exports
+ */
+export * from "./Turn.ts"
 
 /**
  * The normalized event stream.
@@ -32,12 +48,28 @@ export * from "./AgentError.ts"
 export * from "./AgentEvent.ts"
 
 /**
- * Shared value types: ids, token usage, cost and usage-limit windows.
+ * An infrastructure or protocol failure, for anything without a more specific error.
  *
  * @since 0.1.0
  * @category re-exports
  */
-export * from "./Domain.ts"
+export * from "./AgentError.ts"
+
+/**
+ * What a turn used: tokens, and what they cost.
+ *
+ * @since 0.3.0
+ * @category re-exports
+ */
+export * from "./Usage.ts"
+
+/**
+ * Usage-limit windows.
+ *
+ * @since 0.3.0
+ * @category re-exports
+ */
+export * from "./UsageLimit.ts"
 
 /**
  * Control over how agent processes start.

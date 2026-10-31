@@ -24,7 +24,7 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { AgentError, type AgentEvent, ConnectionLost, MessageId, SessionId, SessionNotFound, TurnId } from "../src/index.ts"
-import { AgentHosts, HostSpec, RemoteAgent, type SeqEvent } from "../src/host/index.ts"
+import { AgentHosts, HostSpec, DetachedAgent, type SeqEvent } from "../src/host/index.ts"
 import * as Host from "../src/host/Host.ts"
 import { host } from "./support/hostCommand.ts"
 
@@ -44,7 +44,7 @@ const isAlive = (pid: number) => {
 
 afterAll(() => {
   // Never leave a host behind, whatever a test did.
-  for (const sub of readdirSync(root)) for (const m of RemoteAgent.listHosts(join(root, sub))) started.add(m.pid)
+  for (const sub of readdirSync(root)) for (const m of DetachedAgent.listHosts(join(root, sub))) started.add(m.pid)
   for (const pid of started) if (isAlive(pid)) process.kill(pid, "SIGKILL")
   rmSync(root, { recursive: true, force: true })
 })
@@ -123,8 +123,8 @@ const plantExpired = (d: string, sessionId: string) => {
 const timeout = 30_000
 
 for (const p of providers) {
-  const layer = (name: string, options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
-    RemoteAgent.layer({ host, provider: p.name, replay: fixture(p.name, name), dir, ...options }).pipe(Layer.provide(NodeServices.layer))
+  const layer = (name: string, options: Partial<DetachedAgent.DetachedAgentOptions> = {}) =>
+    DetachedAgent.layer({ host, provider: p.name, replay: fixture(p.name, name), dir, ...options }).pipe(Layer.provide(NodeServices.layer))
 
   const toolCallTurn = (events: ReadonlyArray<AgentEvent>) => {
     const call = events.find((e) => e._tag === "ToolCall")
