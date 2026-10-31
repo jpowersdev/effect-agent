@@ -364,7 +364,7 @@ const settle = (outcome: TurnOutcome): Effect.Effect<TurnSucceeded, TurnFailure>
  * @since 0.1.0
  * @category constructors
  */
-export const remoteHooks = (bridge: HookBridge.HookBridge): Hooks => ({
+export const clientHooks = (bridge: HookBridge.HookBridge): Hooks => ({
   beforeTool: (call) => bridge.call("beforeTool", call),
   afterTool: (call) => bridge.call("afterTool", call),
   beforeStop: () => bridge.call("beforeStop", null),
@@ -404,7 +404,7 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
         Effect.map((c) => c.hooks),
         Effect.orElseSucceed(() => false),
       )
-      const runOptions: RunOptions = { ...spec.run, ...(hasHooks && { hooks: remoteHooks(hookBridge) }) }
+      const runOptions: RunOptions = { ...spec.run, ...(hasHooks && { hooks: clientHooks(hookBridge) }) }
 
       // ---- open ----
       // A child of `run`'s scope: however `run` ends (even interrupted, as

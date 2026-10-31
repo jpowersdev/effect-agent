@@ -158,7 +158,7 @@ export class AgentError extends Schema.TaggedError<AgentError>()("AgentError", {
 
 /**
  * The session can't take this call: it has ended (`end`, its Scope closed,
- * or the agent process died, which `message` then says) or, for a remote
+ * or the agent process died, which `message` then says) or, for a detached
  * session, this handle was detached.
  *
  * @since 0.2.0
@@ -170,7 +170,7 @@ export class SessionClosed extends Schema.TaggedError<SessionClosed>()("SessionC
 }) {}
 
 /**
- * Lost the connection to the process running the session (a `RemoteAgent`
+ * Lost the connection to the process running the session (a `DetachedAgent`
  * host) and could not get it back. The session itself may still be running:
  * `AgentHosts.attach` it again.
  *

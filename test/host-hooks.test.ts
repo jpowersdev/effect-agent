@@ -1,5 +1,5 @@
 /**
- * Remote hooks: the functions stay in the client; the host forwards each hook
+ * Hooks on detached sessions: the functions stay in the client; the host forwards each hook
  * call to an attached client with hooks. Real host processes over a Claude
  * recording. A recording never fires hooks, so the host's internal
  * `TestInvokeHook` RPC makes calls through the same bridge the provider's
@@ -16,7 +16,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Hooks } from "../src/index.ts"
-import { AgentHosts, HostProtocol, HostSpec, RemoteAgent } from "../src/host/index.ts"
+import { AgentHosts, HostProtocol, HostSpec, DetachedAgent } from "../src/host/index.ts"
 import { host } from "./support/hostCommand.ts"
 
 const dir = mkdtempSync(join(tmpdir(), "ea-hooks-"))
@@ -32,14 +32,14 @@ const isAlive = (pid: number) => {
 }
 
 afterAll(() => {
-  for (const m of RemoteAgent.listHosts(dir)) started.add(m.pid)
+  for (const m of DetachedAgent.listHosts(dir)) started.add(m.pid)
   for (const pid of started) if (isAlive(pid)) process.kill(pid, "SIGKILL")
   rmSync(dir, { recursive: true, force: true })
 })
 
 const cwd = "/tmp/effect-agent-replay"
-const layer = (options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
-  RemoteAgent.layer({ host,
+const layer = (options: Partial<DetachedAgent.DetachedAgentOptions> = {}) =>
+  DetachedAgent.layer({ host,
     provider: "claude",
     replay: join(import.meta.dirname, "fixtures", "claude", "simple-turn.jsonl"),
     dir,
@@ -94,7 +94,7 @@ const open = (hooks: Hooks | undefined, session: { readonly hookTimeout?: Durati
 
 const timeout = 30_000
 
-describe("remote hooks", () => {
+describe("hooks on detached sessions", () => {
   it.live(
     "each hook is answered by the attached client, with its Schema-encoded input",
     () =>
@@ -265,10 +265,10 @@ describe("remote hooks", () => {
  * Claude session's SDK hooks forward them to this process, and the replay
  * logs what the SDK got back (`replayHookLog`).
  */
-describe("remote hooks over a recording with hook calls", () => {
+describe("hooks on detached sessions over a recording with hook calls", () => {
   const prompt = "Use the Bash tool once to run `echo hello`, then reply with the secret word."
-  const replayLayer = (hookLog: string, options: Partial<RemoteAgent.RemoteAgentOptions> = {}) =>
-    RemoteAgent.layer({ host,
+  const replayLayer = (hookLog: string, options: Partial<DetachedAgent.DetachedAgentOptions> = {}) =>
+    DetachedAgent.layer({ host,
       provider: "claude",
       replay: join(import.meta.dirname, "fixtures", "claude", "hooks.jsonl"),
       replayHookLog: hookLog,

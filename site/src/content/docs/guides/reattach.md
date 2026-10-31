@@ -5,7 +5,7 @@ sidebar:
   order: 6
 ---
 
-With `RemoteAgent`, each session runs in a host process of its own. Your process can
+With `DetachedAgent`, each session runs in a host process of its own. Your process can
 exit, for a deploy say, and the session keeps going. When it comes back it attaches by
 id and reads the events it missed.
 
@@ -27,13 +27,13 @@ second entry point, like a worker. A bundled host starts in about 0.1 s, against
 
 ## Run sessions in hosts
 
-`RemoteAgent.layer` provides `Agent`, so the rest of your program doesn't change.
+`DetachedAgent.layer` provides `Agent`, so the rest of your program doesn't change.
 `onScopeClose: "detach"` leaves sessions running when their scope closes.
 
 ```ts
-import { AgentHosts, RemoteAgent } from "@jpowersdev/effect-agent/host"
+import { AgentHosts, DetachedAgent } from "@jpowersdev/effect-agent/host"
 
-const Remote = RemoteAgent.layer({
+const Detached = DetachedAgent.layer({
   provider: "claude",
   claude: {
     model: "claude-sonnet-5-5"
@@ -140,7 +140,7 @@ const systemd = yield* SystemdLauncher.make({
   stopOnEnd: false
 })
 
-const Remote = RemoteAgent.layer(options).pipe(
+const Detached = DetachedAgent.layer(options).pipe(
   Layer.provide(Layer.succeed(Launcher.Launcher, systemd.launcher))
 )
 ```
@@ -157,7 +157,7 @@ together.
 ## Set where the files go and how long they stay
 
 ```ts
-RemoteAgent.layer({
+DetachedAgent.layer({
   provider: "claude",
   host: {
     command,
@@ -186,7 +186,7 @@ If the connection to a host drops, the client reconnects and carries on. Subscri
 resume where they were, and a retried `send`, `turn` or `interrupt` takes effect once.
 
 ```ts
-RemoteAgent.layer({
+DetachedAgent.layer({
   ...options,
   // The default backs off from 100 ms to 2 s, and gives up after 30 s
   reconnect: Schedule.max([Schedule.spaced("1 second"), Schedule.during("1 minute")])

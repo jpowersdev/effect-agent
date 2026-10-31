@@ -3,7 +3,7 @@
  *
  *   node scripts/live-reattach.ts            # claude, then codex
  *   node scripts/live-reattach.ts codex      # one provider
- *   node scripts/live-reattach.ts hooks      # remote hooks (Claude)
+ *   node scripts/live-reattach.ts hooks      # hooks on a detached session (Claude)
  *
  * For each provider:
  *   1. Process A (a child node process) opens a session with
@@ -21,7 +21,7 @@
  *      `AgentHosts.events` after the host exited) matches it event for event.
  *   5. It checks the host and agent processes are gone.
  *
- * `hooks`: a remote Claude session whose hooks run in this process. A
+ * `hooks`: a detached Claude session whose hooks run in this process. A
  * `beforeTool` adds a secret word the reply must contain; a `beforeStop`
  * that answers once keeps the turn going; and with only a hookless client
  * attached, a hooked turn completes with the hook adding nothing.
@@ -36,7 +36,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { Duration, Effect, Fiber, Option, Ref, Stream } from "effect"
 import { type RunOptions, SessionId, TurnId } from "../src/index.ts"
-import { AgentHosts, HostSpec, RemoteAgent, type SeqEvent } from "../src/host/index.ts"
+import { AgentHosts, HostSpec, DetachedAgent, type SeqEvent } from "../src/host/index.ts"
 import { host } from "../test/support/hostCommand.ts"
 
 const root = "/tmp/effect-agent-live/reattach"
@@ -58,7 +58,7 @@ const isAlive = (pid: number) => {
   }
 }
 
-const options = (provider: Provider): RemoteAgent.RemoteAgentOptions => ({
+const options = (provider: Provider): DetachedAgent.DetachedAgentOptions => ({
   provider,
   host,
   dir,
@@ -119,7 +119,7 @@ const processA = (provider: Provider) =>
     console.log(JSON.stringify({ sessionId: session.sessionId, turnId, hostPid: session.hostPid, agentPid }))
     // Gone mid-turn, without even closing the scope.
     process.exit(0)
-  }).pipe(Effect.scoped, Effect.provide(RemoteAgent.layer(options(provider))), Effect.provide(NodeServices.layer))
+  }).pipe(Effect.scoped, Effect.provide(DetachedAgent.layer(options(provider))), Effect.provide(NodeServices.layer))
 
 // ---------------------------------------------------------------------------
 // Process B
@@ -228,17 +228,17 @@ const processB = (provider: Provider) =>
     rmSync(HostSpec.eventsPath(dir, a.sessionId), { force: true })
     rmSync(HostSpec.logPath(dir, a.sessionId), { force: true })
     console.log(`  ${provider} passed in ${Date.now() - t0} ms`)
-  }).pipe(Effect.provide(RemoteAgent.layer(options(provider))), Effect.provide(NodeServices.layer))
+  }).pipe(Effect.provide(DetachedAgent.layer(options(provider))), Effect.provide(NodeServices.layer))
 
 // ---------------------------------------------------------------------------
-// Remote hooks (Claude)
+// Hooks on a detached session (Claude)
 // ---------------------------------------------------------------------------
 
 const secretPrompt =
   "Use the Bash tool once to run `echo hello`. Context added while the tool runs may tell you a secret word. Then reply with just the secret word, or NONE if you were not told one."
 
 const hooksScenario = Effect.gen(function* () {
-  console.log("\n== claude: remote hooks ==")
+  console.log("\n== claude: hooks on a detached session ==")
   const t0 = Date.now()
   const hosts = yield* AgentHosts
   const base = run("claude")
@@ -260,7 +260,7 @@ const hooksScenario = Effect.gen(function* () {
     created.push(session.sessionId)
     const done = yield* session.turn(secretPrompt).pipe(Effect.timeout(Duration.seconds(120)))
     console.log(`  beforeTool calls ${calls.join(",")}; reply ${JSON.stringify(done.finalText)}`)
-    check(calls.includes("Bash"), "the remote session's beforeTool ran here, for Bash")
+    check(calls.includes("Bash"), "the detached session's beforeTool ran here, for Bash")
     check(/MANGO/.test(done.finalText), "the reply has the secret word the hook added")
     yield* session.stop
   }).pipe(Effect.scoped)
@@ -319,7 +319,7 @@ const hooksScenario = Effect.gen(function* () {
     rmSync(HostSpec.logPath(dir, id), { force: true })
   }
   console.log(`  hooks passed in ${Date.now() - t0} ms`)
-}).pipe(Effect.provide(RemoteAgent.layer({ ...options("claude"), onScopeClose: "stop" })), Effect.provide(NodeServices.layer))
+}).pipe(Effect.provide(DetachedAgent.layer({ ...options("claude"), onScopeClose: "stop" })), Effect.provide(NodeServices.layer))
 
 // ---------------------------------------------------------------------------
 
@@ -341,7 +341,7 @@ if (args[0] === "--process-a") {
     (e) => {
       console.error("\nFAILED:", e)
       // Leave nothing running: stop any host this script started.
-      for (const host of RemoteAgent.listHosts(dir)) process.kill(host.pid, "SIGTERM")
+      for (const host of DetachedAgent.listHosts(dir)) process.kill(host.pid, "SIGTERM")
       process.exit(1)
     },
   )

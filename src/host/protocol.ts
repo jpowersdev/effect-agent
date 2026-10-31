@@ -147,7 +147,7 @@ export class HostRpcs extends RpcGroup.make(
    * Events with `seq >= fromSeq`, then live ones, until the session ends
    * (failing with the session's `AgentError` if it ended in one). `live`
    * prepends the session's `SessionStarted` when it is older than `fromSeq`,
-   * as `AgentSession.subscribe` does (`RemoteSession.subscribe` pins `fromSeq`
+   * as `AgentSession.subscribe` does (`DetachedSession.subscribe` pins `fromSeq`
    * to `Info.lastSeq + 1`, and sets `live` unless the session had ended).
    */
   Rpc.make("Subscribe", {

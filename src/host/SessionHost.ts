@@ -1,7 +1,7 @@
 /**
  * The program a session host process runs. The library ships no executable:
  * add a one-line entry to your app, give it your platform's services, and
- * point `RemoteAgent.layer({ host })` at it.
+ * point `DetachedAgent.layer({ host })` at it.
  *
  * ```ts skip-type-checking
  * // host.ts

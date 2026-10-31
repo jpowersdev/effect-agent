@@ -31,7 +31,7 @@ export type Effort = typeof Effort.Type
 
 /**
  * Everything in `RunOptions` but `hooks`, as a Schema: plain data that can
- * be stored or sent to another process (`RemoteAgent` sends it to its host).
+ * be stored or sent to another process (`DetachedAgent` sends it to its host).
  * Durations encode as millis; an `env` value of `undefined` as `null`.
  *
  * @since 0.2.0
@@ -272,7 +272,7 @@ export type SteerOutcome = typeof SteerOutcome.Type
 
 /**
  * An open session, from `Agent.open`. Calls fail with `SessionClosed` once
- * the session has ended, with `ConnectionLost` when a remote session's host
+ * the session has ended, with `ConnectionLost` when a detached session's host
  * can't be reached, and with `AgentError` for anything else.
  *
  * @since 0.1.0

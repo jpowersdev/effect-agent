@@ -116,7 +116,7 @@ export const Provider = Schema.Literals(["claude", "codex"])
 export type Provider = typeof Provider.Type
 
 /**
- * Provider-layer settings shared by `RemoteAgent.layer` and the host.
+ * Provider-layer settings shared by `DetachedAgent.layer` and the host.
  *
  * @since 0.1.0
  * @category models

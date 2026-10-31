@@ -8,7 +8,7 @@
  * (see `SessionHost.ts`); `host` says how to start it:
  *
  * ```ts skip-type-checking
- * const layer = RemoteAgent.layer({
+ * const layer = DetachedAgent.layer({
  *   provider: "claude",
  *   host: { command: process.execPath, args: [fileURLToPath(new URL("./host.ts", import.meta.url))] },
  *   onScopeClose: "detach",
@@ -23,8 +23,8 @@
  * yield* session.subscribeFrom(0).pipe(Stream.runForEach(persist))
  * ```
  *
- * `RemoteAgent.layer` provides `Agent` (so existing programs work unchanged)
- * and `AgentHosts` (`open` typed as `RemoteSession`, `attach`, `list`,
+ * `DetachedAgent.layer` provides `Agent` (so existing programs work unchanged)
+ * and `AgentHosts` (`open` typed as `DetachedSession`, `attach`, `list`,
  * `events`). Hooks stay in the client: the host forwards each hook call to
  * an attached client that has hooks (see `AttachOptions`).
  *
@@ -82,7 +82,7 @@ import { type EventsTrimmed, type HookName, type HookRequest, type HookStreamIte
  * @since 0.1.0
  * @category models
  */
-export interface RemoteAgentOptions extends ProviderSpec {
+export interface DetachedAgentOptions extends ProviderSpec {
   /** Where hosts keep their sockets, manifests and logs. Default `HostSpec.defaultDir()`. */
   readonly dir?: string
   /**
@@ -161,7 +161,7 @@ type Unreachable = ConnectionLost | SessionClosed
  * @since 0.1.0
  * @category models
  */
-export interface RemoteSession extends AgentSession {
+export interface DetachedSession extends AgentSession {
   /** The host process's pid. */
   readonly hostPid: number
   readonly socket: string
@@ -210,7 +210,7 @@ export interface AttachOptions {
    * it; a client attached without hooks never does.
    */
   readonly hooks?: Hooks
-  /** Override `RemoteAgentOptions.hookTimeout` for the calls this client answers. */
+  /** Override `DetachedAgentOptions.hookTimeout` for the calls this client answers. */
   readonly hookTimeout?: Duration.Input
 }
 
@@ -218,7 +218,7 @@ const hookNames = (hooks: Hooks | undefined): Array<HookName> =>
   hooks === undefined ? [] : (["beforeTool", "afterTool", "beforeStop"] as const).filter((k) => hooks[k] !== undefined)
 
 /**
- * What remote sessions add to `Agent`: `open` typed as `RemoteSession`, `attach` by session id, `list` of live hosts, and `events` for a session's log.
+ * What detached sessions add to `Agent`: `open` typed as `DetachedSession`, `attach` by session id, `list` of live hosts, and `events` for a session's log.
  *
  * @since 0.1.0
  * @category services
@@ -226,21 +226,21 @@ const hookNames = (hooks: Hooks | undefined): Array<HookName> =>
 export class AgentHosts extends Context.Service<
   AgentHosts,
   {
-    /** `Agent.open`, typed as a `RemoteSession`. */
+    /** `Agent.open`, typed as a `DetachedSession`. */
     /**
-     * `Agent.open`, typed as a `RemoteSession`. `options.hooks` stay in this
+     * `Agent.open`, typed as a `DetachedSession`. `options.hooks` stay in this
      * process: the host forwards each hook call to an attached client that
      * has that hook (see `attach`). Refused where the provider has no hooks.
      */
     readonly open: (
       options: RunOptions,
       session?: { readonly hookTimeout?: Duration.Input },
-    ) => Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope>
+    ) => Effect.Effect<DetachedSession, SessionNotFound | AgentError, Scope.Scope>
     /** Connect to a running host. `SessionNotFound` when no live host has that session. */
     readonly attach: (
       sessionId: SessionId,
       options?: AttachOptions,
-    ) => Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope>
+    ) => Effect.Effect<DetachedSession, SessionNotFound | AgentError, Scope.Scope>
     /** Live hosts in the directory; manifests of dead ones (and expired events files) are removed. */
     readonly list: Effect.Effect<ReadonlyArray<Manifest>>
     /**
@@ -388,7 +388,7 @@ const { isAlive, signal } = ProcessTree
  * @category layers
  */
 export const layer = (
-  options: RemoteAgentOptions,
+  options: DetachedAgentOptions,
 ): Layer.Layer<Agent | AgentHosts, never, ChildProcessSpawner.ChildProcessSpawner> =>
   Layer.effectContext(
     Effect.gen(function* () {
@@ -770,7 +770,7 @@ export const layer = (
 
           /** One request id per call, repeated by its retries, so the host acts on it once. */
           const once = <A, E>(make: (requestId: string) => Effect.Effect<A, E>) => Effect.suspend(() => make(randomUUID()))
-          const session: RemoteSession = {
+          const session: DetachedSession = {
             sessionId: first.info.sessionId,
             provider: first.info.provider,
             location: Option.fromNullishOr(first.info.location),
@@ -833,7 +833,7 @@ export const layer = (
       const open = (
         run: RunOptions,
         session: { readonly hookTimeout?: Duration.Input } = {},
-      ): Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope> =>
+      ): Effect.Effect<DetachedSession, SessionNotFound | AgentError, Scope.Scope> =>
         Effect.gen(function* () {
           yield* Effect.annotateCurrentSpan({ provider, resume: run.resume !== undefined })
           yield* refuseHooks(run.hooks)
@@ -869,12 +869,12 @@ export const layer = (
           return yield* connect(ready, onScopeClose, answering).pipe(
             Effect.tapError(() => Effect.sync(() => signal(ready.pid, "SIGTERM"))),
           )
-        }).pipe(Effect.withSpan("RemoteAgent.open"))
+        }).pipe(Effect.withSpan("DetachedAgent.open"))
 
       const attach = (
         sessionId: SessionId,
         attachOptions: AttachOptions = {},
-      ): Effect.Effect<RemoteSession, SessionNotFound | AgentError, Scope.Scope> =>
+      ): Effect.Effect<DetachedSession, SessionNotFound | AgentError, Scope.Scope> =>
         Effect.gen(function* () {
           yield* Effect.annotateCurrentSpan({ provider, sessionId })
           yield* refuseHooks(attachOptions.hooks)
@@ -895,7 +895,7 @@ export const layer = (
               return Effect.fail(notFound(sessionId, e.message))
             }),
           )
-        }).pipe(Effect.withSpan("RemoteAgent.attach"))
+        }).pipe(Effect.withSpan("DetachedAgent.attach"))
 
       const fromFile = (sessionId: SessionId, fromSeq: number): Stream.Stream<SeqEvent, AgentError> =>
         EventFile.read(eventsPath(dir, sessionId), fromSeq).pipe(
