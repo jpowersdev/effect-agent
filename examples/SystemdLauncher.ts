@@ -58,15 +58,21 @@ export interface SystemdLauncher {
 }
 
 export const make = (
-  options: Options = {},
-): Effect.Effect<SystemdLauncher, never, ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Scope.Scope> =>
-  Effect.gen(function* () {
+  options: Options = {}
+): Effect.Effect<
+  SystemdLauncher,
+  never,
+  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Scope.Scope
+> =>
+  Effect.gen(function*() {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
     const fs = yield* FileSystem.FileSystem
     const stopOnEnd = options.stopOnEnd ?? true
     const properties = Object.entries({
       ...options.properties,
-      ...(options.oomPolicy !== undefined && { OOMPolicy: options.oomPolicy }),
+      ...(options.oomPolicy !== undefined && {
+        OOMPolicy: options.oomPolicy
+      })
     }).flatMap(([key, value]) => ["--property", `${key}=${value}`])
     // Dashes in a slice name mean nesting, so the id has none.
     const slice = `effect_agent-${crypto.randomUUID().replaceAll("-", "")}.slice`
@@ -75,21 +81,23 @@ export const make = (
     const systemctl = (...args: Array<string>) =>
       spawner.string(ChildProcess.make("systemctl", ["--user", ...args])).pipe(
         Effect.map((out) => out.trim()),
-        Effect.orElseSucceed(() => ""),
+        Effect.orElseSucceed(() => "")
       )
 
-    if (stopOnEnd) yield* Effect.addFinalizer(() => systemctl("stop", slice))
+    if (stopOnEnd) {
+      yield* Effect.addFinalizer(() => systemctl("stop", slice))
+    }
 
     const launcher: Launcher.Launcher["Service"] = {
       prepare: ({ provider }) =>
-        Effect.gen(function* () {
+        Effect.gen(function*() {
           const unit = `effect-agent-${provider}-${crypto.randomUUID()}.scope`
           units.push(unit)
           // Runs after the library has stopped the agent process (finalizers run in reverse).
           if (stopOnEnd) {
             yield* Effect.addFinalizer(() =>
               // A scope that failed (e.g. OOM-killed) stays loaded until reset; the slice keeps the count.
-              Effect.andThen(systemctl("stop", unit), systemctl("reset-failed", unit)),
+              Effect.andThen(systemctl("stop", unit), systemctl("reset-failed", unit))
             )
           }
           return (command) => ({
@@ -105,10 +113,10 @@ export const make = (
               ...properties,
               "--",
               command.command,
-              ...command.args,
-            ],
+              ...command.args
+            ]
           })
-        }),
+        })
     }
 
     return {
@@ -116,11 +124,15 @@ export const make = (
       slice,
       units: Effect.sync(() => [...units]),
       // The slice's memory.events counts kills in every scope under it, including ones already gone.
-      oomKilled: Effect.gen(function* () {
+      oomKilled: Effect.gen(function*() {
         const cgroup = yield* systemctl("show", "--property=ControlGroup", "--value", slice)
-        if (cgroup === "") return false
-        const events = yield* fs.readFileString(`/sys/fs/cgroup${cgroup}/memory.events`).pipe(Effect.orElseSucceed(() => ""))
+        if (cgroup === "") {
+          return false
+        }
+        const events = yield* fs.readFileString(`/sys/fs/cgroup${cgroup}/memory.events`).pipe(
+          Effect.orElseSucceed(() => "")
+        )
         return Number(/^oom_kill (\d+)$/m.exec(events)?.[1] ?? 0) > 0
-      }),
+      })
     }
   })

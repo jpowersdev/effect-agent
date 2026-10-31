@@ -74,7 +74,7 @@ agent.open({
   cwd,
   model: "claude-sonnet-5-5",
   effort: "high",
-  appendSystemPrompt: "Commit when the tests pass. Never push.",
+  appendSystemPrompt: "Commit when the tests pass. Never push."
 })
 ```
 
@@ -95,7 +95,7 @@ off subagents and named tools too.
 ```ts
 agent.open({
   cwd,
-  disable: { askUser: true, subagents: true, tools: ["WebSearch"] },
+  disable: { askUser: true, subagents: true, tools: ["WebSearch"] }
 })
 ```
 
@@ -109,7 +109,7 @@ no MCP servers: none of the user's, and no claude.ai connectors or ChatGPT apps.
 ```ts
 agent.open({
   cwd,
-  env: { GIT_PAGER: "cat", NODE_OPTIONS: undefined },
+  env: { GIT_PAGER: "cat", NODE_OPTIONS: undefined }
 })
 ```
 
@@ -137,9 +137,9 @@ agent.open({
   hooks: {
     beforeStop: () =>
       testsPass.pipe(
-        Effect.map((ok) => (ok ? Option.none() : Option.some("The tests still fail."))),
-      ),
-  },
+        Effect.map((ok) => (ok ? Option.none() : Option.some("The tests still fail.")))
+      )
+  }
 })
 ```
 
@@ -153,7 +153,7 @@ nothing. Claude has hooks; on Codex, `open` fails if any are set.
 ```ts
 const beforeTool = (call: ToolHookInput) =>
   Effect.succeed(
-    call.name === "Bash" ? Option.some("Use pnpm, not npm.") : Option.none(),
+    call.name === "Bash" ? Option.some("Use pnpm, not npm.") : Option.none()
   )
 ```
 
@@ -175,6 +175,8 @@ const session = yield* agent.open({ cwd, resume: yield* store.load })
 It doesn't start an agent.
 
 ```ts
-const past = yield* agent.history(sessionId, { cwd })
+const past = yield* agent.history(sessionId, {
+  cwd
+})
 const prompts = past.filter((event) => event._tag === "UserMessage")
 ```

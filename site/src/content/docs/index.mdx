@@ -18,17 +18,16 @@ hero:
 import { Card, CardGrid, LinkButton } from "@astrojs/starlight/components"
 
 ```ts
-const program = Effect.gen(function* () {
+const program = Effect.gen(function*() {
   const agent = yield* Agent
   const session = yield* agent.open({ cwd: process.cwd(), spendCapUsd: 5 })
 
   // Print each command the agent runs
   const events = yield* session.subscribe
   yield* events.pipe(
-    Stream.runForEach((event) =>
-      event._tag === "ToolCall" ? Console.log(`$ ${event.summary}`) : Effect.void,
-    ),
-    Effect.forkScoped,
+    Stream.filter((event) => event._tag === "ToolCall"),
+    Stream.runForEach((event) => Console.log(`$ ${event.summary}`)),
+    Effect.forkScoped
   )
 
   const result = yield* session.turn("Fix the failing test")
@@ -42,8 +41,8 @@ const program = Effect.gen(function* () {
   Effect.scoped, // stops the agent and everything it started
   Effect.catchTags({
     UsageLimited: (e) => Console.log(`Hit the ${e.window} usage limit`),
-    SpendCapReached: (e) => Console.log(`Stopped at $${e.spentUsd}`),
-  }),
+    SpendCapReached: (e) => Console.log(`Stopped at $${e.spentUsd}`)
+  })
 )
 ```
 
@@ -53,7 +52,7 @@ const program = Effect.gen(function* () {
 
     ```ts
     const AgentLive = ClaudeAgent.layer().pipe(
-      Layer.provide(ClaudeSdk.layer()),
+      Layer.provide(ClaudeSdk.layer())
     )
     // or CodexAgent.layer() + CodexAppServer.layer()
     ```
@@ -76,8 +75,7 @@ const program = Effect.gen(function* () {
 
     ```ts
     session.turn(prompt).pipe(
-      Effect.catchTag("Stalled", () =>
-        session.turn("Still there?")),
+      Effect.catchTag("Stalled", () => session.turn("Still there?"))
     )
     ```
 

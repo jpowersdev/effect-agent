@@ -1360,16 +1360,22 @@ export const make = (options: CodexAgentOptions = {}) =>
  * @example
  * ```ts
  * import { NodeServices } from "@effect/platform-node"
- * import { Layer } from "effect"
  * import { CodexAgent, CodexAppServer } from "@jpowersdev/effect-agent/codex"
+ * import { Layer } from "effect"
  *
  * // Codex reports tokens, not cost: prices (USD per million tokens) make
  * // cost estimates and `spendCapUsd` possible.
  * const layer = CodexAgent.layer({
- *   pricing: { "*": { input: 1.25, cachedInput: 0.125, output: 10 } },
+ *   pricing: {
+ *     "*": {
+ *       input: 1.25,
+ *       cachedInput: 0.125,
+ *       output: 10
+ *     }
+ *   }
  * }).pipe(
  *   Layer.provide(CodexAppServer.layer()),
- *   Layer.provide(NodeServices.layer),
+ *   Layer.provide(NodeServices.layer)
  * )
  * ```
  *

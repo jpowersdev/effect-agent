@@ -16,8 +16,8 @@ The host runs a small entry point from your app. The library ships no executable
 ```ts
 // host.ts
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
-import { Effect } from "effect"
 import { SessionHost } from "@jpowersdev/effect-agent/host"
+import { Effect } from "effect"
 
 NodeRuntime.runMain(SessionHost.run.pipe(Effect.provide(NodeServices.layer)))
 ```
@@ -35,12 +35,14 @@ import { AgentHosts, RemoteAgent } from "@jpowersdev/effect-agent/host"
 
 const Remote = RemoteAgent.layer({
   provider: "claude",
-  claude: { model: "claude-sonnet-5-5" },
+  claude: {
+    model: "claude-sonnet-5-5"
+  },
   host: {
     command: process.execPath,
-    args: [fileURLToPath(new URL("./host.ts", import.meta.url))],
+    args: [fileURLToPath(new URL("./host.ts", import.meta.url))]
   },
-  onScopeClose: "detach", // the default is "stop"
+  onScopeClose: "detach" // the default is "stop"
 }).pipe(Layer.provide(NodeServices.layer))
 ```
 
@@ -52,7 +54,10 @@ Store the session id, and the message id from `send`, before you exit.
 const session = yield* agent.open({ cwd })
 const messageId = yield* session.send("Fix the failing test")
 
-yield* store.save({ sessionId: session.sessionId, messageId })
+yield* store.save({
+  sessionId: session.sessionId,
+  messageId
+})
 ```
 
 ## Pick it up again
@@ -69,7 +74,7 @@ const session = yield* hosts.attach(sessionId) // SessionNotFound if no host has
 
 yield* session.subscribeFrom(lastSeq + 1).pipe(
   Stream.runForEach(({ seq, event }) => store.saveEvent(seq, event)),
-  Effect.forkScoped,
+  Effect.forkScoped
 )
 
 const result = yield* session.awaitMessage(messageId)
@@ -82,7 +87,7 @@ The host is gone once its session ends, but its events file stays for `retainEve
 
 ```ts
 yield* hosts.events(sessionId, lastSeq + 1).pipe(
-  Stream.runForEach(({ seq, event }) => store.saveEvent(seq, event)),
+  Stream.runForEach(({ seq, event }) => store.saveEvent(seq, event))
 )
 ```
 
@@ -114,7 +119,11 @@ attach with them again.
 const session = yield* hosts.open({ cwd, hooks: { beforeTool } })
 
 // After a restart
-const session = yield* hosts.attach(sessionId, { hooks: { beforeTool } })
+const session = yield* hosts.attach(sessionId, {
+  hooks: {
+    beforeTool
+  }
+})
 ```
 
 Any client can answer any hook, whether or not `open` had it. The client that attached
@@ -127,10 +136,12 @@ Hosts outlive the process that started them, but its supervisor may still stop t
 The `Launcher` wraps the host command, so it can move hosts somewhere else.
 
 ```ts
-const systemd = yield* SystemdLauncher.make({ stopOnEnd: false })
+const systemd = yield* SystemdLauncher.make({
+  stopOnEnd: false
+})
 
 const Remote = RemoteAgent.layer(options).pipe(
-  Layer.provide(Layer.succeed(Launcher.Launcher, systemd.launcher)),
+  Layer.provide(Layer.succeed(Launcher.Launcher, systemd.launcher))
 )
 ```
 
@@ -148,13 +159,16 @@ together.
 ```ts
 RemoteAgent.layer({
   provider: "claude",
-  host: { command, args },
+  host: {
+    command,
+    args
+  },
   dir: "/run/user/1000/effect-agent", // default: $XDG_RUNTIME_DIR/effect-agent
   maxEvents: 50_000, // events kept in memory; older ones are read from the file
   persistEvents: true, // false: no events file, no catching up past maxEvents, and no awaitTurn past the last 10 000 turns
   retainEvents: "24 hours", // how long the events file outlives the host
   orphanTimeout: "30 minutes",
-  hookTimeout: "5 seconds",
+  hookTimeout: "5 seconds"
 })
 ```
 
@@ -175,7 +189,7 @@ resume where they were, and a retried `send`, `turn` or `interrupt` takes effect
 RemoteAgent.layer({
   ...options,
   // The default backs off from 100 ms to 2 s, and gives up after 30 s
-  reconnect: Schedule.max([Schedule.spaced("1 second"), Schedule.during("1 minute")]),
+  reconnect: Schedule.max([Schedule.spaced("1 second"), Schedule.during("1 minute")])
 })
 ```
 

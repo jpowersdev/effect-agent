@@ -25,20 +25,23 @@ pnpm add @effect/platform-node   # or @effect/platform-bun; see Platform
 ```
 
 ```ts
-import { Effect, Layer, Stream } from "effect"
 import { Agent } from "@jpowersdev/effect-agent"
 import { ClaudeAgent, ClaudeSdk } from "@jpowersdev/effect-agent/claude"
+import { Effect, Layer, Stream } from "effect"
 
 const program = Effect.scoped(
-  Effect.gen(function* () {
+  Effect.gen(function*() {
     const agent = yield* Agent
     const session = yield* agent.open({ cwd, model, appendSystemPrompt, spendCapUsd: 5 })
     const events = yield* session.subscribe // subscribe before sending so nothing is missed
-    yield* events.pipe(Stream.runForEach(persist), Effect.forkScoped)
+    yield* events.pipe(
+      Stream.runForEach(persist),
+      Effect.forkScoped
+    )
 
     const result = yield* session.turn("Fix the failing test")
     //    ^ fails with UsageLimited | AuthFailed | SpendCapReached | Stalled | ...
-  }),
+  })
 ).pipe(Effect.provide(ClaudeAgent.layer().pipe(Layer.provide(ClaudeSdk.layer()))))
 ```
 
@@ -102,7 +105,10 @@ Some windows cap a single model family (Claude's weekly Opus or `model_scoped` c
 ```ts
 import { usableFor } from "@jpowersdev/effect-agent"
 
-if (usableFor(status, persona.model)) dispatch(task)  // false if e.g. the Fable cap is full for a Fable persona
+// false if e.g. the Fable cap is full for a Fable persona
+if (usableFor(status, persona.model)) {
+  dispatch(task)
+}
 ```
 
 ## Process control
@@ -119,16 +125,30 @@ On Linux with a systemd user manager, [`examples/SystemdLauncher.ts`](examples/S
 ```ts
 import * as SystemdLauncher from "./SystemdLauncher.ts"
 
-const result = yield* Effect.gen(function* () {
-  const systemd = yield* SystemdLauncher.make({ properties: { MemoryMax: "4G", TasksMax: "512" } })
+const result = yield* Effect.gen(function*() {
+  const systemd = yield* SystemdLauncher.make({
+    properties: {
+      MemoryMax: "4G",
+      TasksMax: "512"
+    }
+  })
   const session = yield* agent.open({ cwd }).pipe(Effect.provideService(Launcher.Launcher, systemd.launcher))
   return yield* session.turn(prompt).pipe(
     Effect.catchTag("ProcessKilled", (killed) =>
       // OutOfMemory: an error of your own
-      Effect.flatMap(systemd.oomKilled, (oom) => Effect.fail(oom ? new OutOfMemory({ cause: killed }) : killed)),
-    ),
+      Effect.flatMap(systemd.oomKilled, (oom) =>
+        Effect.fail(
+          oom ?
+            new OutOfMemory({
+              cause: killed
+            }) :
+            killed
+        )))
   )
-}).pipe(Effect.scoped, Effect.provide(NodeServices.layer))
+}).pipe(
+  Effect.scoped,
+  Effect.provide(NodeServices.layer)
+)
 ```
 
 - **OOM policy:** `oomPolicy: "stop"` (systemd's default) stops the whole scope when the kernel OOM killer strikes, so the turn ends `ProcessKilled`. With `"continue"`, usually only the runaway command dies, and the agent sees it fail and carries on. `oomKilled` reports the kill either way.
@@ -150,8 +170,8 @@ The host process runs an entry point in *your* app; the library ships no executa
 ```ts
 // host.ts
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
-import { Effect } from "effect"
 import { SessionHost } from "@jpowersdev/effect-agent/host"
+import { Effect } from "effect"
 
 NodeRuntime.runMain(SessionHost.run.pipe(Effect.provide(NodeServices.layer)))
 // Bun: BunRuntime.runMain(SessionHost.run.pipe(Effect.provide(BunServices.layer)))
@@ -162,19 +182,27 @@ import { AgentHosts, RemoteAgent } from "@jpowersdev/effect-agent/host"
 
 const layer = RemoteAgent.layer({
   provider: "claude",
-  claude: { model },
-  host: { command: process.execPath, args: [fileURLToPath(new URL("./host.ts", import.meta.url))] },
-  onScopeClose: "detach",
-}).pipe(Layer.provide(NodeServices.layer))   // status and history run locally
+  claude: {
+    model
+  },
+  host: {
+    command: process.execPath,
+    args: [fileURLToPath(new URL("./host.ts", import.meta.url))]
+  },
+  onScopeClose: "detach"
+}).pipe(Layer.provide(NodeServices.layer)) // status and history run locally
 
 // before the restart: persist the session id and the MessageId
-const session = yield* (yield* Agent).open({ cwd })   // Agent works unchanged; capabilities.reattach is true
+const session = yield* (yield* Agent).open({ cwd }) // Agent works unchanged; capabilities.reattach is true
 const messageId = yield* session.send("Fix the failing test")
 
 // after it
-const session = yield* (yield* AgentHosts).attach(sessionId)    // SessionNotFound if no live host
-yield* session.subscribeFrom(lastPersistedSeq + 1).pipe(Stream.runForEach(persist), Effect.forkScoped)
-const result = yield* session.awaitMessage(messageId)         // even if the turn ended while nobody was attached
+const session = yield* (yield* AgentHosts).attach(sessionId) // SessionNotFound if no live host
+yield* session.subscribeFrom(lastPersistedSeq + 1).pipe(
+  Stream.runForEach(persist),
+  Effect.forkScoped
+)
+const result = yield* session.awaitMessage(messageId) // even if the turn ended while nobody was attached
 ```
 
 `host` is just a command, so the runtime (Node or Bun, for the host and the client independently) and whether you bundle are up to you: if you bundle your app, make `host.ts` a second entry point, as you would a worker. Module loading dominates host startup, so a bundled entry starts noticeably faster (about 0.1 s versus 0.25 s here).
@@ -197,7 +225,11 @@ yield* (yield* AgentHosts).events(sessionId, lastPersistedSeq + 1).pipe(Stream.r
 ```ts
 const session = yield* (yield* AgentHosts).open({ cwd, hooks: { beforeTool } }, { hookTimeout: "2 seconds" })
 // after a restart, answer them again:
-const session = yield* (yield* AgentHosts).attach(sessionId, { hooks: { beforeTool } })
+const session = yield* (yield* AgentHosts).attach(sessionId, {
+  hooks: {
+    beforeTool
+  }
+})
 ```
 
 - **Who answers.** Of the attached clients that have that hook, the one that attached most recently. When it detaches, the one before it answers again. A client attached without hooks never answers.

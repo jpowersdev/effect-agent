@@ -12,10 +12,10 @@ agent started are stopped. If an agent dies, its leftovers are stopped right awa
 
 ```ts
 yield* Effect.scoped(
-  Effect.gen(function* () {
+  Effect.gen(function*() {
     const session = yield* agent.open({ cwd })
     yield* session.turn("Start the dev server and check the home page")
-  }),
+  })
 )
 // The dev server is gone too
 ```
@@ -33,8 +33,8 @@ import { Launcher } from "@jpowersdev/effect-agent"
 const Nice = Launcher.layer(() =>
   Effect.succeed(({ command, args }) => ({
     command: "nice",
-    args: ["-n", "10", command, ...args],
-  })),
+    args: ["-n", "10", command, ...args]
+  }))
 )
 
 program.pipe(Effect.provide(Nice))
@@ -58,7 +58,10 @@ import * as SystemdLauncher from "./SystemdLauncher.ts"
 
 const systemd = yield* SystemdLauncher.make({
   // See systemd.resource-control(5)
-  properties: { MemoryMax: "4G", TasksMax: "512" },
+  properties: {
+    MemoryMax: "4G",
+    TasksMax: "512"
+  }
 })
 
 const session = yield* agent
@@ -79,9 +82,13 @@ yield* session.turn(prompt).pipe(
   Effect.catchTag("ProcessKilled", (killed) =>
     Effect.flatMap(systemd.oomKilled, (oom) =>
       // OutOfMemory is your own error
-      Effect.fail(oom ? new OutOfMemory({ cause: killed }) : killed),
-    ),
-  ),
+      Effect.fail(
+        oom ?
+          new OutOfMemory({
+            cause: killed
+          }) :
+          killed
+      )))
 )
 ```
 
@@ -92,7 +99,12 @@ By default an OOM kill stops the whole scope, so the turn ends `ProcessKilled`. 
 it fail and carries on.
 
 ```ts
-SystemdLauncher.make({ properties: { MemoryMax: "4G" }, oomPolicy: "continue" })
+SystemdLauncher.make({
+  properties: {
+    MemoryMax: "4G"
+  },
+  oomPolicy: "continue"
+})
 ```
 
 ## Limit all agents together
@@ -115,7 +127,7 @@ isn't idle.
 ```ts
 agent.open({
   cwd,
-  watchdog: { idle: "5 minutes", toolIdle: "30 minutes" },
+  watchdog: { idle: "5 minutes", toolIdle: "30 minutes" }
 })
 ```
 

@@ -11,7 +11,9 @@ Run your program once against the real CLI, with `record` on the transport.
 
 ```ts
 const Recording = ClaudeAgent.layer().pipe(
-  Layer.provide(ClaudeSdk.layer({ record: "test/fixtures/fix-issue.jsonl" })),
+  Layer.provide(ClaudeSdk.layer({
+    record: "test/fixtures/fix-issue.jsonl"
+  }))
 )
 ```
 
@@ -29,15 +31,14 @@ import { it } from "@effect/vitest"
 import { ClaudeReplay } from "@jpowersdev/effect-agent/claude"
 
 const Replay = ClaudeAgent.layer().pipe(
-  Layer.provide(ClaudeReplay.layerFile("test/fixtures/fix-issue.jsonl")),
+  Layer.provide(ClaudeReplay.layerFile("test/fixtures/fix-issue.jsonl"))
 )
 
 it.effect("replies on the issue", () =>
-  Effect.gen(function* () {
+  Effect.gen(function*() {
     yield* work(issue)
     expect(replies).toHaveLength(1)
-  }).pipe(Effect.provide(Replay)),
-)
+  }).pipe(Effect.provide(Replay)))
 ```
 
 For Codex, use `CodexReplay.layer(recordingText)`. The program has to make the calls it
@@ -54,9 +55,9 @@ const answers: Array<ReadonlyArray<unknown>> = []
 const Replay = ClaudeAgent.layer().pipe(
   Layer.provide(
     ClaudeReplay.layerFile("test/fixtures/fix-issue.jsonl", {
-      onHook: (call) => answers.push(call.outputs),
-    }),
-  ),
+      onHook: (call) => answers.push(call.outputs)
+    })
+  )
 )
 ```
 

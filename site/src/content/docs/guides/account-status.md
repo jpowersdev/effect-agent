@@ -49,6 +49,14 @@ if (usableFor(status, "claude-fable-5-1")) {
 Pass the environment that points the CLI at it.
 
 ```ts
-yield* agent.status({ env: { CLAUDE_CONFIG_DIR: "/home/me/.claude-work" } })
-yield* agent.status({ env: { CODEX_HOME: "/home/me/.codex-work" } })
+yield* agent.status({
+  env: {
+    CLAUDE_CONFIG_DIR: "/home/me/.claude-work"
+  }
+})
+yield* agent.status({
+  env: {
+    CODEX_HOME: "/home/me/.codex-work"
+  }
+})
 ```
