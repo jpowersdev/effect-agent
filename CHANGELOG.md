@@ -1,5 +1,13 @@
 # @jpowersdev/effect-agent
 
+## 0.3.0
+
+### Minor Changes
+
+- [#9](https://github.com/jpowersdev/effect-agent/pull/9) [`2721a44`](https://github.com/jpowersdev/effect-agent/commit/2721a44e4def13a96de53159d9288e2379484c0d) Thanks [@jpowersdev](https://github.com/jpowersdev)! - Split the core into one module per concept, matching the vocabulary on the getting-started page: `AgentSession` (`AgentSession`, `SessionId` and the session errors), `Message` (`MessageId`, `Input`, `SteerOutcome`), `Turn` (`TurnId`, `TurnSucceeded`, the `TurnFailure` errors, `TurnOutcome`), `Usage` (`TokenUsage`, `Cost`) and `UsageLimit` (`LimitWindow`, `LimitWindowStatus`). `Domain` is gone, and `AgentError` now holds only `AgentError`. Everything is still exported flat from `@jpowersdev/effect-agent`, so imports don't change, except that `DurationInput` and `EnvOverrides` are no longer exported: they only carried `RunSettings` and `HostSpec` across a process boundary.
+
+- [#9](https://github.com/jpowersdev/effect-agent/pull/9) [`6cae7de`](https://github.com/jpowersdev/effect-agent/commit/6cae7de8ca6fad13177653554de8be1eb4e2f7db) Thanks [@jpowersdev](https://github.com/jpowersdev)! - Rename `RemoteAgent` to `DetachedAgent`. "Remote" read as hosting on another machine; the sessions are local processes detached from the one that opened them, which `onScopeClose: "detach"` already called them. `RemoteAgentOptions` is now `DetachedAgentOptions` and `RemoteSession` is now `DetachedSession`. The behavior is unchanged, and there is no alias for the old names: replace `RemoteAgent` with `DetachedAgent` in imports from `@jpowersdev/effect-agent/host`.
+
 ## 0.2.0
 
 ### Minor Changes
