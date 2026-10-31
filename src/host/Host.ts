@@ -22,25 +22,27 @@ import { RpcSerialization, RpcServer } from "effect/rpc"
 import { SocketServer } from "effect/socket"
 import type { Socket as NetSocket } from "node:net"
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
-import { Agent, type AgentSession, type Hooks, type RunOptions } from "../Agent.ts"
-import { AgentError, type SessionClosed, SessionNotFound, type TurnFailure } from "../AgentError.ts"
-import type { AgentEvent, TurnOutcome, TurnSucceeded } from "../AgentEvent.ts"
+import { Agent, type Hooks, type RunOptions } from "../Agent.ts"
+import { AgentError } from "../AgentError.ts"
+import type { AgentEvent } from "../AgentEvent.ts"
+import { type AgentSession, type SessionClosed, SessionNotFound } from "../AgentSession.ts"
+import type { TurnFailure, TurnOutcome, TurnSucceeded } from "../Turn.ts"
+import {
+  type HostSpec,
+  Manifest,
+  type ReadyLine,
+  eventsPath,
+  manifestPath,
+  socketPath,
+  toDuration,
+} from "./HostSpec.ts"
+import { EventsTrimmed, HostRpcs, type SeqEvent } from "./protocol.ts"
+import { providerLayer } from "./providers.ts"
 import * as Session from "../internal/session.ts"
 import * as TurnTracker from "../internal/turnTracker.ts"
 import * as ProcessTree from "../ProcessTree.ts"
 import * as EventFile from "./EventFile.ts"
 import * as HookBridge from "./HookBridge.ts"
-import {
-  eventsPath,
-  type HostSpec,
-  Manifest,
-  manifestPath,
-  type ReadyLine,
-  socketPath,
-  toDuration,
-} from "./HostSpec.ts"
-import { providerLayer } from "./providers.ts"
-import { EventsTrimmed, HostRpcs, type SeqEvent } from "./protocol.ts"
 
 /**
  * Defaults for the optional `HostSpec` settings.

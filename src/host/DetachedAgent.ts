@@ -54,27 +54,44 @@ import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { closeSync, existsSync, openSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
-import { Agent, type AgentSession, type Hooks, type RunOptions, settingsOf } from "../Agent.ts"
-import { AgentError, ConnectionLost, SessionClosed, type SessionError, SessionNotFound, type TurnFailure } from "../AgentError.ts"
-import type { AgentEvent, TurnSucceeded } from "../AgentEvent.ts"
-import { type MessageId, SessionId, type TurnId } from "../Domain.ts"
-import * as Launcher from "../Launcher.ts"
-import * as ProcessTree from "../ProcessTree.ts"
-import * as EventFile from "./EventFile.ts"
+import { Agent, type Hooks, type RunOptions, settingsOf } from "../Agent.ts"
+import { AgentError } from "../AgentError.ts"
+import type { AgentEvent } from "../AgentEvent.ts"
+import {
+  type AgentSession,
+  ConnectionLost,
+  SessionClosed,
+  type SessionError,
+  SessionId,
+  SessionNotFound,
+} from "../AgentSession.ts"
+import type { MessageId } from "../Message.ts"
+import type { TurnFailure, TurnId, TurnSucceeded } from "../Turn.ts"
 import { defaults as hostDefaults, isLive, pruneEvents, readManifest } from "./Host.ts"
 import {
+  HostSpec,
+  type Manifest,
+  type ProviderSpec,
+  ReadyLine,
   defaultDir,
   ensureDir,
   eventsPath,
-  HostSpec,
-  type Manifest,
   manifestPath,
-  type ProviderSpec,
-  ReadyLine,
   socketPath,
 } from "./HostSpec.ts"
+import {
+  type EventsTrimmed,
+  type HookName,
+  type HookRequest,
+  type HookStreamItem,
+  type HostInfo,
+  HostRpcs,
+  type SeqEvent,
+} from "./protocol.ts"
 import { providerLayer } from "./providers.ts"
-import { type EventsTrimmed, type HookName, type HookRequest, type HookStreamItem, type HostInfo, HostRpcs, type SeqEvent } from "./protocol.ts"
+import * as Launcher from "../Launcher.ts"
+import * as ProcessTree from "../ProcessTree.ts"
+import * as EventFile from "./EventFile.ts"
 
 /**
  * Options for `layer`.

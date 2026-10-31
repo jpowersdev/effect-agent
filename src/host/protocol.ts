@@ -8,10 +8,12 @@
  */
 import { Schema } from "effect"
 import { Rpc, RpcGroup } from "effect/rpc"
-import { Capabilities, SteerOutcome } from "../Agent.ts"
-import { AgentError, SessionError, TurnFailure } from "../AgentError.ts"
-import { AgentEvent, TurnSucceeded } from "../AgentEvent.ts"
-import { MessageId, SessionId, TurnId } from "../Domain.ts"
+import { Capabilities } from "../Agent.ts"
+import { AgentError } from "../AgentError.ts"
+import { AgentEvent } from "../AgentEvent.ts"
+import { SessionError, SessionId } from "../AgentSession.ts"
+import { MessageId, SteerOutcome } from "../Message.ts"
+import { TurnFailure, TurnId, TurnSucceeded } from "../Turn.ts"
 
 /**
  * `subscribeFrom` asked for events the host no longer has: older than its

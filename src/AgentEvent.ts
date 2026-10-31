@@ -6,8 +6,11 @@
  * @since 0.1.0
  */
 import { Schema } from "effect"
-import { TurnFailure } from "./AgentError.ts"
-import { Cost, LimitWindowStatus, MessageId, SessionId, TokenUsage, TurnId } from "./Domain.ts"
+import { SessionId } from "./AgentSession.ts"
+import { MessageId } from "./Message.ts"
+import { TurnId, TurnOutcome } from "./Turn.ts"
+import { Cost, TokenUsage } from "./Usage.ts"
+import { LimitWindowStatus } from "./UsageLimit.ts"
 
 const raw = Schema.Unknown
 
@@ -152,41 +155,12 @@ export const Compacted = Schema.TaggedStruct("Compacted", {
 export const Heartbeat = Schema.TaggedStruct("Heartbeat", { turnId: Schema.NullOr(TurnId), raw })
 
 /**
- * The successful `TurnOutcome`.
- *
- * @since 0.1.0
- * @category models
- */
-export const TurnSucceeded = Schema.TaggedStruct("Succeeded", {
-  turnId: TurnId,
-  finalText: Schema.String,
-})
-/**
- * @since 0.1.0
- * @category models
- */
-export type TurnSucceeded = typeof TurnSucceeded.Type
-
-/**
  * A provider frame with no normalized mapping.
  *
  * @since 0.1.0
  * @category events
  */
 export const Other = Schema.TaggedStruct("Other", { raw })
-
-/**
- * How a turn ended: `TurnSucceeded` or a `TurnFailure`.
- *
- * @since 0.1.0
- * @category models
- */
-export const TurnOutcome = Schema.Union([TurnSucceeded, TurnFailure])
-/**
- * @since 0.1.0
- * @category models
- */
-export type TurnOutcome = typeof TurnOutcome.Type
 
 /**
  * Terminal event for a turn. `usage` is this turn's; `cost` is cumulative for the session when known.
