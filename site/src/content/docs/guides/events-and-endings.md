@@ -29,7 +29,7 @@ yield* events.pipe(
         return Effect.void
     }
   }),
-  Effect.forkScoped,
+  Effect.forkScoped
 )
 
 yield* session.send("Run the tests")
@@ -49,7 +49,7 @@ const encode = Schema.encodeEffect(Schema.fromJsonString(AgentEvent))
 yield* events.pipe(
   Stream.mapEffect((event) => encode(event)),
   Stream.runForEach((line) => appendLine("transcript.jsonl", line)),
-  Effect.forkScoped,
+  Effect.forkScoped
 )
 ```
 
@@ -59,7 +59,10 @@ yield* events.pipe(
 
 ```ts
 yield* session.turn(task.prompt).pipe(
-  Effect.catchTag("UsageLimited", (e) => queue.retry(task, { after: e.resetsAt })),
+  Effect.catchTag("UsageLimited", (e) =>
+    queue.retry(task, {
+      after: e.resetsAt
+    }))
 )
 ```
 
@@ -72,7 +75,7 @@ too long fails with `Stalled`. The session is still open.
 
 ```ts
 yield* session.turn(prompt).pipe(
-  Effect.catchTag("Stalled", () => session.turn("You seem stuck. Where are you?")),
+  Effect.catchTag("Stalled", () => session.turn("You seem stuck. Where are you?"))
 )
 ```
 
@@ -80,9 +83,7 @@ yield* session.turn(prompt).pipe(
 
 ```ts
 yield* session.turn(prompt).pipe(
-  Effect.catchTag("SpendCapReached", (e) =>
-    Effect.log(`Stopped at $${e.spentUsd} of $${e.capUsd}`),
-  ),
+  Effect.catchTag("SpendCapReached", (e) => Effect.log(`Stopped at $${e.spentUsd} of $${e.capUsd}`))
 )
 ```
 
@@ -94,7 +95,10 @@ yield* session.turn(prompt).pipe(
 ```ts
 const outcomes = events.pipe(
   Stream.filter((event) => event._tag === "TurnEnded"),
-  Stream.map((ended) => ({ turnId: ended.turnId, outcome: ended.outcome })),
+  Stream.map((ended) => ({
+    turnId: ended.turnId,
+    outcome: ended.outcome
+  }))
 )
 ```
 

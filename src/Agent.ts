@@ -201,8 +201,8 @@ export type AccountStatus = typeof AccountStatus.Type
  *
  * @example
  * ```ts
- * import { Option } from "effect"
  * import { appliesTo } from "@jpowersdev/effect-agent"
+ * import { Option } from "effect"
  * import assert from "node:assert"
  *
  * const weeklyFable = {
@@ -210,7 +210,7 @@ export type AccountStatus = typeof AccountStatus.Type
  *   label: "seven_day_fable",
  *   usedPercent: 100,
  *   resetsAt: null,
- *   model: Option.some("fable"),
+ *   model: Option.some("fable")
  * } as const
  *
  * assert.strictEqual(appliesTo(weeklyFable, "claude-fable-5-1"), true)
@@ -314,21 +314,24 @@ export interface AgentSession {
  *
  * @example
  * ```ts
- * import { Effect, Layer, Stream } from "effect"
  * import { Agent } from "@jpowersdev/effect-agent"
  * import { ClaudeAgent, ClaudeSdk } from "@jpowersdev/effect-agent/claude"
+ * import { Effect, Layer, Stream } from "effect"
  *
- * const program = Effect.gen(function* () {
+ * const program = Effect.gen(function*() {
  *   const agent = yield* Agent
  *   const session = yield* agent.open({ cwd: process.cwd(), spendCapUsd: 5 })
  *   // Subscribe before sending, so no event is missed
  *   const events = yield* session.subscribe
- *   yield* events.pipe(Stream.runForEach(Effect.logInfo), Effect.forkScoped)
+ *   yield* events.pipe(
+ *     Stream.runForEach(Effect.logInfo),
+ *     Effect.forkScoped
+ *   )
  *   return yield* session.turn("Fix the failing test")
  * }).pipe(
  *   // Closing the scope ends the session and stops the agent process
  *   Effect.scoped,
- *   Effect.provide(ClaudeAgent.layer().pipe(Layer.provide(ClaudeSdk.layer()))),
+ *   Effect.provide(ClaudeAgent.layer().pipe(Layer.provide(ClaudeSdk.layer())))
  * )
  * ```
  *

@@ -49,13 +49,17 @@ export const priceFor = (table: PriceTable, model: string | null): ModelPrice | 
  * import assert from "node:assert"
  *
  * // USD per million tokens
- * const price: Pricing.ModelPrice = { input: 3, cachedInput: 0.25, output: 15 }
+ * const price: Pricing.ModelPrice = {
+ *   input: 3,
+ *   cachedInput: 0.25,
+ *   output: 15
+ * }
  *
  * const cost = Pricing.costOf(price, {
  *   inputTokens: 1_000_000, // half of them cached
  *   cachedInputTokens: 500_000,
  *   outputTokens: 100_000,
- *   reasoningTokens: null,
+ *   reasoningTokens: null
  * })
  * assert.strictEqual(cost, 3.125)
  * ```

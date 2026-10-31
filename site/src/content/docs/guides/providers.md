@@ -31,8 +31,17 @@ import { CodexAgent, CodexAppServer } from "@jpowersdev/effect-agent/codex"
 
 const Codex = CodexAgent.layer({
   // USD per million tokens, by model id. "*" covers the rest.
-  pricing: { "*": { input: 1.25, cachedInput: 0.125, output: 10 } },
-}).pipe(Layer.provide(CodexAppServer.layer()), Layer.provide(NodeServices.layer))
+  pricing: {
+    "*": {
+      input: 1.25,
+      cachedInput: 0.125,
+      output: 10
+    }
+  }
+}).pipe(
+  Layer.provide(CodexAppServer.layer()),
+  Layer.provide(NodeServices.layer)
+)
 ```
 
 ## Pick one at startup
@@ -42,7 +51,10 @@ Both layers provide the same service, so the choice can come from config.
 ```ts
 const Provider = process.env.AGENT === "codex" ? Codex : Claude
 
-program.pipe(Effect.provide(Provider), NodeRuntime.runMain)
+program.pipe(
+  Effect.provide(Provider),
+  NodeRuntime.runMain
+)
 ```
 
 ## Check what the provider can do
@@ -55,7 +67,7 @@ const capabilities = yield* agent.capabilities
 // { provider: "codex", version: "0.162.1", steer: true, hooks: false, ... }
 
 const session = yield* agent.open(
-  capabilities.hooks ? { cwd, hooks: { beforeTool } } : { cwd },
+  capabilities.hooks ? { cwd, hooks: { beforeTool } } : { cwd }
 )
 ```
 
