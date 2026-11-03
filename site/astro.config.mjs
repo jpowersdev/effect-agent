@@ -11,6 +11,14 @@ export default defineConfig({
         "Effect-native control of Claude Code and Codex: live sessions, steering, typed endings, reattach.",
       logo: { src: "./src/assets/logo.svg" },
       favicon: "/favicon.svg",
+      // What a link to the site shows when it's shared
+      head: [
+        { tag: "meta", attrs: { property: "og:image", content: "https://jpowersdev.github.io/effect-agent/social-preview.png" } },
+        { tag: "meta", attrs: { property: "og:image:width", content: "1280" } },
+        { tag: "meta", attrs: { property: "og:image:height", content: "640" } },
+        { tag: "meta", attrs: { property: "og:image:alt", content: "effect-agent: Effect-native control of Claude Code and Codex" } },
+        { tag: "meta", attrs: { name: "twitter:image", content: "https://jpowersdev.github.io/effect-agent/social-preview.png" } },
+      ],
       customCss: ["./src/styles/custom.css"],
       // Code fits the content column from 1440px up; narrower screens wrap it
       expressiveCode: { defaultProps: { wrap: true } },
