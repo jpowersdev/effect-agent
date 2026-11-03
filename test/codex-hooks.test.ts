@@ -313,6 +313,32 @@ describe("closing the relay", () => {
       expect(cleanedUp).toBe(true)
     }),
   )
+
+  it.live("doesn't wait for the hook that's closing it, which would never finish", () =>
+    Effect.gen(function* () {
+      const hookFinished = yield* Deferred.make<void>()
+      const otherFinalizer = yield* Deferred.make<void>()
+      const scope = yield* Scope.make()
+      yield* Scope.addFinalizer(scope, Effect.asVoid(Deferred.succeed(otherFinalizer, undefined)))
+      const socket = yield* CodexHooks.serve(
+        {
+          beforeTool: () =>
+            Scope.close(scope, Exit.void).pipe(
+              Effect.andThen(Deferred.succeed(hookFinished, undefined)),
+              Effect.as(Option.none<string>()),
+            ),
+        },
+        () => false,
+      ).pipe(Scope.provide(scope))
+      const client = connect(socket)
+      client.on("error", () => {})
+      client.write(`${JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "c", tool_input: {} })}\n`)
+      const within = <A>(deferred: Deferred.Deferred<A>) => Deferred.await(deferred).pipe(Effect.timeoutOption("2 seconds"), Effect.map(Option.isSome))
+      expect(yield* within(hookFinished)).toBe(true)
+      expect(yield* within(otherFinalizer)).toBe(true)
+      expect(existsSync(socket)).toBe(false)
+    }),
+  )
 })
 
 describe("a failed open", () => {

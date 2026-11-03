@@ -268,7 +268,8 @@ export const answer = (hooks: Hooks, line: string, consumeFailed: (callId: strin
  * Serves the relay for the session's scope, and returns the socket's path. A
  * relay that goes away (Codex stopped the hook) interrupts its call, as the
  * abort signal does on Claude. Closing the scope interrupts the calls still
- * running and waits for their cleanup.
+ * running and waits for their cleanup, except a call that is itself closing it,
+ * as with `Effect.forkIn`.
  *
  * @internal
  */
@@ -313,6 +314,10 @@ export const serve = (hooks: Hooks, consumeFailed: (callId: string) => boolean):
         })
         server.listen(path, () => resume(Effect.succeed({ path, stop, running })))
       }),
-      ({ stop, running }) => Effect.andThen(Effect.sync(stop), Fiber.interruptAll(running)),
+      ({ stop, running }) =>
+        Effect.andThen(
+          Effect.sync(stop),
+          Effect.withFiber((self) => Fiber.interruptAll([...running].filter((call) => call.id !== self.id))),
+        ),
     ).pipe(Effect.map(({ path }) => path))
   })
