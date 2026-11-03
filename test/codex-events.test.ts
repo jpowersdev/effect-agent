@@ -225,28 +225,32 @@ describe("helpers", () => {
   })
 
   it("builds thread overrides", () => {
-    const built = CodexAgent.threadOverrides({
+    const overrides = CodexAgent.threadOverrides({
       cwd: "/w",
       model: "gpt-x",
       effort: "max",
       appendSystemPrompt: "Be brief.",
-      disable: { askUser: true, subagents: true, tools: ["web_search", "shell"] },
+      disable: { askUser: true, subagents: true, tools: ["web_search", "shell", "apply_patch"] },
     })
-    expect("overrides" in built).toBe(true)
-    if (!("overrides" in built)) return
-    expect(built.overrides).toMatchObject({ cwd: "/w", model: "gpt-x", approvalPolicy: "never", sandbox: "danger-full-access" })
-    expect(built.overrides.config).toMatchObject({
+    expect(overrides).toMatchObject({ cwd: "/w", model: "gpt-x", approvalPolicy: "never", sandbox: "danger-full-access" })
+    expect(overrides.config).toMatchObject({
       mcp_servers: {},
       "features.apps": false,
       model_reasoning_effort: "xhigh",
       "features.default_mode_request_user_input": false,
       "features.multi_agent": false,
+      "features.multi_agent_v2": false,
       web_search: "disabled",
       "features.shell_tool": false,
     })
-    expect(built.overrides.developerInstructions).toMatch(/^Be brief\.\n\nDo not spawn sub-agents/)
-    expect("baseInstructions" in built.overrides).toBe(false)
-    expect(CodexAgent.threadOverrides({ cwd: "/w", disable: { tools: ["apply_patch"] } })).toMatchObject({ error: expect.stringMatching(/apply_patch/) })
+    expect(overrides.developerInstructions).toMatch(/^Be brief\.\n\nDo not spawn sub-agents/)
+    expect("baseInstructions" in overrides).toBe(false)
+  })
+
+  it("refuses the tools it can't remove, and subagents", () => {
+    expect(CodexAgent.refusedTools({ cwd: "/w" })).toEqual([])
+    expect(CodexAgent.refusedTools({ cwd: "/w", disable: { tools: ["web_search", "apply_patch"] } })).toEqual(["apply_patch"])
+    expect(CodexAgent.refusedTools({ cwd: "/w", disable: { subagents: true, tools: ["spawn_agent"] } })).toEqual(CodexAgent.subagentTools)
   })
 
   it("removes the same nesting markers as Claude, and Claude's login token", () => {
@@ -455,14 +459,6 @@ describe("historyEvents", () => {
     // raw keeps the stored turn, without duplicating its items
     expect(events[0]!.raw).toMatchObject({ id: "t1", status: "completed" })
     expect((events[0]!.raw as any).items).toBeUndefined()
-  })
-})
-
-describe("hooks", () => {
-  it("refuses any hook, accepts none", () => {
-    expect(CodexAgent.hooksError({ cwd: "/w" })).toBeNull()
-    expect(CodexAgent.hooksError({ cwd: "/w", hooks: {} })).toBeNull()
-    expect(CodexAgent.hooksError({ cwd: "/w", hooks: { afterTool: () => null as any } })).toMatch(/afterTool.*config-only/)
   })
 })
 

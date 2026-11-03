@@ -15,12 +15,13 @@
  * isolated (no configured MCP servers, no built-in `codex_apps`).
  *
  * `status` and `history` each start a short-lived app-server (through the
- * `Launcher`, if any) and stop it before returning. `RunOptions.hooks` is
- * refused: Codex hooks are config-only, with no runtime callbacks.
+ * `Launcher`, if any) and stop it before returning. `RunOptions.hooks`, and
+ * tools `disable` can't remove, go through Codex's command hooks (see
+ * `CodexHooks`).
  *
  * @since 0.1.0
  */
-import { Cause, Clock, Deferred, Duration, Effect, Exit, Layer, Option, Queue, Stream } from "effect"
+import { Cause, Clock, Deferred, Duration, Effect, Exit, Layer, Option, Queue, Scope, Stream } from "effect"
 import { type AccountStatus, Agent, type Capabilities, type Effort, type RunOptions } from "../Agent.ts"
 import { AgentError } from "../AgentError.ts"
 import type { AgentEvent } from "../AgentEvent.ts"
@@ -40,6 +41,7 @@ import * as Session from "../internal/session.ts"
 import * as Pricing from "../Pricing.ts"
 import type * as Watchdog from "../Watchdog.ts"
 import * as Events from "./CodexEvents.ts"
+import * as Hooks from "./CodexHooks.ts"
 import * as P from "./protocol.ts"
 
 const provider = "codex"
@@ -53,7 +55,10 @@ const provider = "codex"
 export interface CodexAgentOptions {
   /** Token prices for estimated cost and `spendCapUsd`. Without them cost is unknown and spend caps are refused. */
   readonly pricing?: Pricing.PriceTable
-  /** Extra per-thread config overrides (dotted config.toml keys). effect-agent's own settings win on conflict. */
+  /**
+   * Extra per-thread config overrides (dotted config.toml keys). effect-agent's own settings win on conflict.
+   * `open` fails if a session needs hooks and this would stop them (`features.hooks = false`, or any `hooks` key).
+   */
   readonly config?: Readonly<Record<string, P.JsonValue>>
   /** Default for `RunOptions.watchdog.grace` (10 seconds when neither is set). */
   readonly stallGrace?: Duration.Input
@@ -73,7 +78,8 @@ export const codexEffort = (effort: Effort): string => (effort === "max" ? "xhig
 /**
  * `disable.tools` names -> per-thread config that removes them. Verified on
  * 0.162.1 by listing the model's tools with each switch off. Names not in
- * this table (e.g. `apply_patch`, `spawn_agent`) can't be removed per thread.
+ * this table (e.g. `apply_patch`, `spawn_agent`) can't be removed per thread,
+ * so they are refused when called (see `refusedTools`).
  *
  * @internal
  */
@@ -93,26 +99,47 @@ const subagentNote =
   "Do not spawn sub-agents or use the collaboration tools (spawn_agent, send_message, followup_task, wait_agent); do the work yourself."
 
 /**
- * Thread overrides shared by `thread/start` and `thread/resume`. Fails on tool names Codex can't disable.
+ * The multi-agent tools of both generations (`features.multi_agent` and
+ * `features.multi_agent_v2`), as of 0.162.1.
  *
  * @internal
  */
-export const threadOverrides = (
-  options: RunOptions,
-  extraConfig: Readonly<Record<string, P.JsonValue>> = {},
-): { readonly overrides: P.ThreadOverrides } | { readonly error: string } => {
+export const subagentTools: ReadonlyArray<string> = [
+  "spawn_agent",
+  "send_input",
+  "resume_agent",
+  "wait_agent",
+  "close_agent",
+  "followup_task",
+  "interrupt_agent",
+  "list_agents",
+  "send_message",
+]
+
+/**
+ * Tools to refuse when called. Subagents are always among them when disabled,
+ * because the switches can't be relied on: a model's catalog entry can select
+ * multi-agent v2 regardless of them (`multi_agent_version`, as `gpt-6.1-sol`
+ * does), and a resumed thread keeps the tools it started with (both verified on
+ * 0.162.1).
+ *
+ * @internal
+ */
+export const refusedTools = (options: RunOptions): ReadonlyArray<string> => [
+  ...new Set([
+    ...(options.disable?.tools ?? []).filter((name) => toolSwitches[name] === undefined),
+    ...(options.disable?.subagents ? subagentTools : []),
+  ]),
+]
+
+/**
+ * Thread overrides shared by `thread/start` and `thread/resume`.
+ *
+ * @internal
+ */
+export const threadOverrides = (options: RunOptions, extraConfig: Readonly<Record<string, P.JsonValue>> = {}): P.ThreadOverrides => {
   const tools: Record<string, P.JsonValue> = {}
-  const unknown: Array<string> = []
-  for (const name of options.disable?.tools ?? []) {
-    const sw = toolSwitches[name]
-    if (sw === undefined) unknown.push(name)
-    else Object.assign(tools, sw)
-  }
-  if (unknown.length > 0) {
-    return {
-      error: `Codex cannot disable tool(s) ${unknown.join(", ")}; supported: ${Object.keys(toolSwitches).join(", ")}`,
-    }
-  }
+  for (const name of options.disable?.tools ?? []) Object.assign(tools, toolSwitches[name])
   const config: Record<string, P.JsonValue> = {
     ...extraConfig,
     // MCP isolation: no configured servers, and no built-in codex_apps (ChatGPT apps/connectors).
@@ -121,23 +148,21 @@ export const threadOverrides = (
     ...(options.effort !== undefined ? { model_reasoning_effort: codexEffort(options.effort) } : {}),
     // `request_user_input` is already refused in Default mode; this keeps it off if the default changes.
     ...(options.disable?.askUser ? { "features.default_mode_request_user_input": false } : {}),
-    // Not honored by 0.162.1 (subagents still spawn); kept for servers that do honor it.
-    ...(options.disable?.subagents ? { "features.multi_agent": false } : {}),
+    // Removes the tools where Codex honors these. Where it doesn't (see `refusedTools`), the refusal hook enforces it.
+    ...(options.disable?.subagents ? { "features.multi_agent": false, "features.multi_agent_v2": false } : {}),
     ...tools,
   }
   const instructions = [options.appendSystemPrompt, options.disable?.subagents ? subagentNote : undefined].filter(
     (s): s is string => s !== undefined && s !== "",
   )
   return {
-    overrides: {
-      cwd: options.cwd,
-      ...(options.model !== undefined ? { model: options.model } : {}),
-      approvalPolicy: "never",
-      sandbox: "danger-full-access",
-      config,
-      // Appends to Codex's instructions; `baseInstructions` would replace them.
-      ...(instructions.length > 0 ? { developerInstructions: instructions.join("\n\n") } : {}),
-    },
+    cwd: options.cwd,
+    ...(options.model !== undefined ? { model: options.model } : {}),
+    approvalPolicy: "never",
+    sandbox: "danger-full-access",
+    config,
+    // Appends to Codex's instructions; `baseInstructions` would replace them.
+    ...(instructions.length > 0 ? { developerInstructions: instructions.join("\n\n") } : {}),
   }
 }
 
@@ -167,20 +192,6 @@ export const sessionEnv = (
  */
 export const isSessionNotFoundError = (e: CodexRpcError): boolean =>
   /no rollout found|invalid session id|thread not found|thread not loaded|invalid thread id/i.test(e.message)
-
-/**
- * Codex has no runtime hook callbacks; refuse rather than silently ignore them.
- *
- * @internal
- */
-export const hooksError = (options: RunOptions): string | null => {
-  const hooks = options.hooks
-  if (hooks === undefined) return null
-  const set = (["beforeTool", "afterTool", "beforeStop"] as const).filter((k) => hooks[k] !== undefined)
-  return set.length === 0
-    ? null
-    : `Codex does not support RunOptions.hooks (${set.join(", ")}): its hooks are config-only (capabilities.hooks is false)`
-}
 
 /**
  * `turn/steer` failed because the expected turn is no longer running.
@@ -664,15 +675,76 @@ type Input =
 const lostIn = (exit: Exit.Exit<unknown, CodexRpcError | AgentError>): boolean =>
   Exit.isFailure(exit) && Option.exists(Cause.findErrorOption(exit.cause), (e) => e._tag === "AgentError")
 
+/**
+ * The flags that make each set of hook flags run, kept for the layer where
+ * hooks are on. Where they're off the answer depends on the user's hooks at the
+ * time, so it's found for each session.
+ */
+type TrustCache = Map<string, ReadonlyArray<string>>
+
+const listHooks = (conn: Connection, cwd: string) =>
+  timed("hooks/list", conn.request("hooks/list", { cwds: [cwd] })).pipe(Effect.mapError(toAgentError("hooks/list failed")))
+
+/**
+ * The flags that make `plan`'s hooks run. A hook's hash is only known by asking
+ * app-server, on a process of its own so that a recording holds just the
+ * session's. A replayed connection runs no commands: nothing to trust.
+ */
+const findHookFlags = (connect: (args: ReadonlyArray<string>) => Effect.Effect<Connection, AgentError, Scope.Scope>, cwd: string, plan: Hooks.Plan) =>
+  Effect.gen(function* () {
+    const list = (args: ReadonlyArray<string>) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const conn = yield* connect(args)
+          return conn.pid === null ? null : yield* listHooks(conn, cwd)
+        }),
+      )
+    const listed = yield* list(plan.flags)
+    if (listed === null) return { flags: [], lasting: true }
+    const own = Hooks.ownHooks(plan, listed)
+    if (own.length === plan.hookCount) return { flags: Hooks.stateFlags(own), lasting: true }
+    const all = yield* list([...plan.flags, ...Hooks.hooksOn])
+    if (all === null) return { flags: [], lasting: false }
+    return { flags: [...Hooks.hooksOn, ...Hooks.stateFlags(Hooks.ownHooks(plan, all), Hooks.otherHooks(plan, all))], lasting: false }
+  })
+
+/** A connection that will run `plan`'s hooks. Skipped hooks would let refused tools run, so it fails without them. */
+const connectWithHooks = (connect: (args: ReadonlyArray<string>) => Effect.Effect<Connection, AgentError, Scope.Scope>, cwd: string, plan: Hooks.Plan, cache: TrustCache) =>
+  Effect.gen(function* () {
+    const problemOn = (conn: Connection) =>
+      conn.pid === null
+        ? Effect.succeed(null)
+        : listHooks(conn, cwd).pipe(
+            Effect.map((listed) => Hooks.notRunnable(plan, listed)),
+            Effect.tapError(() => conn.close),
+          )
+    const key = plan.flags.join("\0")
+    const known = cache.get(key)
+    if (known !== undefined) {
+      const conn = yield* connect([...plan.flags, ...known])
+      if ((yield* problemOn(conn)) === null) return conn
+      // Hooks were turned off since, or this session's `CODEX_HOME` has them off.
+      cache.delete(key)
+      yield* conn.close
+    }
+    const found = yield* findHookFlags(connect, cwd, plan)
+    const conn = yield* connect([...plan.flags, ...found.flags])
+    const problem = yield* problemOn(conn)
+    if (problem !== null) {
+      yield* conn.close
+      return yield* agentError(`cannot install hooks: ${problem}`, new Session.HooksNotRun(problem))
+    }
+    if (found.lasting) cache.set(key, found.flags)
+    return conn
+  })
+
 const openSession = Effect.fn("CodexAgent.open")(function* (
   server: CodexAppServer["Service"],
   agentOptions: CodexAgentOptions,
   options: RunOptions,
+  trustCache: TrustCache,
 ) {
-  const built = threadOverrides(options, agentOptions.config)
-  if ("error" in built) return yield* agentError(built.error)
-  const hooksRefused = hooksError(options)
-  if (hooksRefused !== null) return yield* agentError(hooksRefused)
+  const overrides = threadOverrides(options, agentOptions.config)
   const pricing = agentOptions.pricing
   const capUsd = options.spendCapUsd
   if (capUsd !== undefined) {
@@ -682,14 +754,28 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
     }
   }
 
-  const conn: Connection = yield* server.connect({ cwd: options.cwd, env: sessionEnv(Env.host(), options.env) })
+  const hookPlan = Hooks.plan(options.hooks, refusedTools(options))
+  const stopper = hookPlan !== null ? Hooks.stoppedByConfig(agentOptions.config) : null
+  if (stopper !== null) {
+    const problem = `CodexAgent.layer's config sets ${stopper}, which would stop them`
+    return yield* agentError(`cannot install hooks: ${problem}`, new Session.HooksNotRun(problem))
+  }
+  /** Commands that failed, until `afterTool` asks about them. */
+  const failedCalls = new Set<string>()
+  const socket =
+    hookPlan?.relay === true && options.hooks !== undefined
+      ? yield* Hooks.serve(options.hooks, (callId) => failedCalls.delete(callId))
+      : null
+  const env = { ...sessionEnv(Env.host(), options.env), ...(socket !== null && { [Hooks.socketVariable]: socket }) }
+  const connect = (args: ReadonlyArray<string>) => server.connect({ cwd: options.cwd, env, ...(args.length > 0 && { args }) })
+  const conn: Connection = hookPlan !== null ? yield* connectWithHooks(connect, options.cwd, hookPlan, trustCache) : yield* connect([])
   const version = parseUserAgentVersion(conn.initialize.userAgent)
   // A failed open must not leave app-server running until the caller's scope closes.
   const closeOnError = <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.tapError(self, () => conn.close)
 
   const resumed = options.resume !== undefined
   const started: P.ThreadStartResponse = resumed
-    ? yield* timed("thread/resume", conn.request("thread/resume", { threadId: options.resume!, excludeTurns: true, ...built.overrides })).pipe(
+    ? yield* timed("thread/resume", conn.request("thread/resume", { threadId: options.resume!, excludeTurns: true, ...overrides })).pipe(
         Effect.catchTag("CodexRpcError", (e) =>
           Effect.fail(
             isSessionNotFoundError(e)
@@ -699,7 +785,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
         ),
         closeOnError,
       )
-    : yield* timed("thread/start", conn.request("thread/start", { ...built.overrides, ephemeral: false })).pipe(
+    : yield* timed("thread/start", conn.request("thread/start", { ...overrides, ephemeral: false })).pipe(
         Effect.mapError(toAgentError("thread/start failed")),
         closeOnError,
       )
@@ -1151,7 +1237,13 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
     Effect.forkScoped,
   )
   yield* conn.incoming.pipe(
-    Stream.runForEach((msg) => tell({ _tag: "Frame", msg })),
+    Stream.runForEach((msg) =>
+      Effect.suspend(() => {
+        const failed = options.hooks?.afterTool !== undefined ? Hooks.failedCallId(msg) : null
+        if (failed !== null) failedCalls.add(failed)
+        return tell({ _tag: "Frame", msg })
+      }),
+    ),
     Effect.andThen(conn.exit),
     Effect.flatMap((exit) => tell({ _tag: "TransportEnded", exit })),
     Effect.forkScoped,
@@ -1329,6 +1421,7 @@ export const readHistory = (
 export const make = (options: CodexAgentOptions = {}) =>
   Effect.gen(function* () {
     const server = yield* CodexAppServer
+    const trustCache: TrustCache = new Map()
     const capabilities: Effect.Effect<Capabilities, AgentError> = server.version.pipe(
       Effect.orElseSucceed(() => null),
       Effect.map((version) => ({
@@ -1340,16 +1433,23 @@ export const make = (options: CodexAgentOptions = {}) =>
         cost: options.pricing !== undefined ? ("estimated" as const) : ("none" as const),
         spendCap: options.pricing !== undefined ? ("estimated" as const) : ("none" as const),
         resetTimes: true,
-        hooks: false,
+        hooks: true,
         reattach: false,
-        // request_user_input is off in Default mode; subagents can't be turned off per thread (probed).
-        disable: { askUser: true, subagents: false, tools: "some" },
+        // request_user_input is off in Default mode. Tools with no switch, and subagents, are refused by a hook.
+        disable: { askUser: true, subagents: true, tools: "any" },
       })),
     )
     return Agent.of({
       provider,
       capabilities,
-      open: (runOptions) => openSession(server, options, runOptions),
+      open: (runOptions) =>
+        // What a failed open acquired goes with it, not when the caller's scope closes.
+        Effect.flatMap(Effect.flatMap(Effect.scope, Scope.fork), (scope) =>
+          openSession(server, options, runOptions, trustCache).pipe(
+            Scope.provide(scope),
+            Effect.onError(() => Scope.close(scope, Exit.void)),
+          ),
+        ),
       status: (statusOptions = {}) => readStatus(server, statusOptions.env),
       history: (sessionId, historyOptions) => readHistory(server, sessionId, historyOptions),
     })

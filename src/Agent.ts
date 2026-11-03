@@ -57,7 +57,7 @@ export const RunSettings = Schema.Struct({
       askUser: Schema.optionalKey(Schema.Boolean),
       /** Subagent tools (Claude `Agent`/`Task`, Codex multi-agent). */
       subagents: Schema.optionalKey(Schema.Boolean),
-      /** Provider-native tool names. */
+      /** Provider-native tool names. Removed where the provider can; on Codex, some are refused when called instead. */
       tools: Schema.optionalKey(Schema.Array(Schema.String)),
     }),
   ),
@@ -156,7 +156,7 @@ export const Capabilities = Schema.Struct({
   disable: Schema.Struct({
     askUser: Schema.Boolean,
     subagents: Schema.Boolean,
-    /** `any`: every native tool name; `some`: only names the provider can turn off (others fail `open`). */
+    /** `any`: every native tool name; `some`: only names the provider can turn off (others fail `open`). See `disable.tools`. */
     tools: Schema.Literals(["any", "some"]),
   }),
 })

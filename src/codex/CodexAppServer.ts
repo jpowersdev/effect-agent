@@ -74,6 +74,8 @@ export interface ConnectOptions {
   readonly cwd: string
   /** Applied over the host environment; `undefined` removes a variable. */
   readonly env?: Readonly<Record<string, string | undefined>>
+  /** Extra arguments for this connection, after `Options.args`. */
+  readonly args?: ReadonlyArray<string>
   /**
    * Answers server-to-client requests. Defaults to `defaultServerRequestHandler`,
    * which declines approvals, answers ask-user requests with no answers and
@@ -400,7 +402,7 @@ export const make = (options: Options = {}) =>
         // Inherited by app-server and every command it runs (each in its own PTY session,
         // outside our process group), so they can all be found and stopped.
         const marker = ProcessTree.newMarker()
-        const command = wrap({ command: codexPath, args: ["app-server", ...(options.args ?? [])] })
+        const command = wrap({ command: codexPath, args: ["app-server", ...(options.args ?? []), ...(connectOptions.args ?? [])] })
         const stdinQueue = yield* Queue.unbounded<string, Cause.Done>()
         const handle = yield* spawner
           .spawn(

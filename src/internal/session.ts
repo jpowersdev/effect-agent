@@ -28,6 +28,14 @@ export const agentError =
     new AgentError({ message, provider, ...(cause !== undefined && { cause }) })
 
 /**
+ * The `cause` of the `AgentError` from an `open` that failed, before starting
+ * anything, because the provider won't run the session's hooks.
+ *
+ * @internal
+ */
+export class HooksNotRun extends Error {}
+
+/**
  * A `SessionClosed` from `provider`.
  *
  * @internal

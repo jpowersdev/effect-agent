@@ -56,6 +56,7 @@ import { closeSync, existsSync, openSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { Agent, type Hooks, type RunOptions, settingsOf } from "../Agent.ts"
 import { AgentError } from "../AgentError.ts"
+import { HooksNotRun } from "../internal/session.ts"
 import type { AgentEvent } from "../AgentEvent.ts"
 import {
   type AgentSession,
@@ -224,7 +225,8 @@ export interface AttachOptions {
    * Answer the session's hook calls with these, whatever it was opened with
    * (where the provider has hooks, a session registers all of them). Of the
    * attached clients with a hook, the one that attached most recently answers
-   * it; a client attached without hooks never does.
+   * it; a client attached without hooks never does. Fails if the session opened
+   * without hooks because a policy stops them (`info.capabilities.hooks`).
    */
   readonly hooks?: Hooks
   /** Override `DetachedAgentOptions.hookTimeout` for the calls this client answers. */
@@ -847,6 +849,17 @@ export const layer = (
           return yield* agentError(`${provider} does not support RunOptions.hooks (${names.join(", ")}): capabilities.hooks is false`)
         })
 
+      /** A session opened without hooks never calls them, so answering them would silently do nothing. */
+      const refuseIfNoHooks = (socket: string) =>
+        dial(socket, Effect.void).pipe(
+          Effect.flatMap((conn) => Effect.as(Scope.close(conn.scope, Exit.void), conn.info.capabilities.hooks)),
+          Effect.flatMap((hooks) => {
+            if (hooks) return Effect.void
+            const reason = "this session runs no hooks: a policy stopped them when it opened (see the host's log)"
+            return Effect.fail(agentError(reason, new HooksNotRun(reason)))
+          }),
+        )
+
       const open = (
         run: RunOptions,
         session: { readonly hookTimeout?: Duration.Input } = {},
@@ -862,6 +875,7 @@ export const layer = (
           }
           const spec: HostSpec = {
             provider,
+            ...(hookNames(run.hooks).length > 0 && { hooks: true }),
             ...(options.claude !== undefined && { claude: options.claude }),
             ...(options.codex !== undefined && { codex: options.codex }),
             ...(options.replay !== undefined && { replay: options.replay }),
@@ -906,10 +920,12 @@ export const layer = (
             attachOptions.hooks !== undefined
               ? { hooks: attachOptions.hooks, timeout: attachOptions.hookTimeout ?? hookTimeout }
               : undefined
-          return yield* connect(manifest, onScopeClose, answering).pipe(
-            Effect.catchTag("AgentError", (e) => {
+          return yield* Effect.when(refuseIfNoHooks(manifest.socket), Effect.sync(() => hookNames(attachOptions.hooks).length > 0)).pipe(
+            Effect.andThen(connect(manifest, onScopeClose, answering)),
+            Effect.mapError((e) => {
+              if (e.cause instanceof HooksNotRun) return e
               if (!isAlive(manifest.pid)) removeHostFiles(dir, sessionId)
-              return Effect.fail(notFound(sessionId, e.message))
+              return notFound(sessionId, e.message)
             }),
           )
         }).pipe(Effect.withSpan("DetachedAgent.attach"))

@@ -59,12 +59,21 @@ Each provider is two layers: a transport (`ClaudeSdk`, `CodexAppServer`) and an 
 | Cost | ✅ reported | 🟡 estimated from a `pricing` table you supply |
 | Spend cap | ✅ native (`maxBudgetUsd`) | 🟡 estimated, enforced by interrupting |
 | Usage-limit reset times | ✅ | ✅ |
-| Hooks | ✅ also detached (see Reattach) | ❌ `open` fails if hooks are set |
-| `disable.subagents` | ✅ | ❌ Codex can't turn them off per thread |
-| `disable.tools` | ✅ any tool | 🟡 only some tools (others fail `open`) |
+| Hooks | ✅ also detached (see Reattach) | ✅ also detached, through Codex's command hooks (see below) |
+| `disable.subagents` | ✅ | ✅ refused when called (the model may still see the tools) |
+| `disable.tools` | ✅ any tool | ✅ any tool: removed where Codex has a switch, otherwise refused when called |
 | Account `status` | ✅ via the SDK's experimental usage API | ✅ |
 
 ✅ supported · 🟡 partly or estimated · ❌ not supported. `agent.capabilities` reports the same at runtime, plus the tool's version.
+
+Where Codex differs:
+
+- **Hooks need one more process.** The first `open` with hooks or refused tools, per layer, starts an extra app-server to read the hooks' hashes, and each hook call starts a short-lived process of your runtime (node or bun). `open` fails if Codex won't run the hooks, rather than running without them. A detached session pays this even if it never uses hooks: each host has its own layer, so every `open` starts the extra app-server, and all three hooks are registered, so every tool call starts two of those processes.
+- **Refused isn't removed.** The model still sees a tool that is only refused, and gets the refusal as its result. That includes subagent tools on current models, whose catalog entry selects them regardless of Codex's switches; the session's instructions also tell the model not to use them.
+- **Tool names.** Hooks see Codex's names (`Bash`, `apply_patch`, `collaborationspawn_agent`); `disable.tools` takes those or the names in `toolSwitches`.
+- **Gaps in Codex's hooks.** It runs none for hosted tools such as web search, or for `write_stdin`, and none after a failed `apply_patch`, so `afterTool` doesn't see those. `isError` is only set for shell commands.
+- **Trust is undocumented.** Codex skips hooks it doesn't trust, and effect-agent marks its own as trusted through the undocumented `hooks.state`. Your own hooks keep the trust they have.
+- **Hooks turned off.** As on Claude with `disableAllHooks`, turning hooks off in config stops your own hooks, and managed ones still run; a session's `RunOptions.hooks` and `disable` keep working. That takes two more app-servers per `open`. Claude runs a session's hooks under any policy. Codex can't under a managed policy that stops them (`features.hooks` in `managed_config.toml` or `requirements.toml`, or `allow_managed_hooks_only`), so `open` fails when a session needs them. It also fails if `CodexAgent.layer({ config })` would stop them (`features.hooks = false`, or any `hooks` key), because that applies after hooks are checked.
 
 ## Platform
 
@@ -220,7 +229,7 @@ When the host exits, the socket and manifest go, but the events file is kept for
 yield* (yield* AgentHosts).events(sessionId, lastPersistedSeq + 1).pipe(Stream.runForEach(persist))
 ```
 
-**Hooks.** `RunOptions.hooks` work on detached sessions where the provider has them (Claude; Codex `open` refuses them, as locally, and `capabilities.hooks` says which). The functions stay in your process. Every detached Claude session registers all three hook kinds, whether or not `open` passed any, and the host forwards each call (Schema-encoded input) to an attached client that has that hook, then adds that client's answer. So any client can supply any hook at any time, through `open` or `attach`:
+**Hooks.** `RunOptions.hooks` work on detached sessions (`capabilities.hooks` says whether the provider has them). The functions stay in your process. Every detached session registers all three hook kinds, whether or not `open` passed any, and the host forwards each call (Schema-encoded input) to an attached client that has that hook, then adds that client's answer. So any client can supply any hook at any time, through `open` or `attach`:
 
 ```ts
 const session = yield* (yield* AgentHosts).open({ cwd, hooks: { beforeTool } }, { hookTimeout: "2 seconds" })
@@ -232,8 +241,9 @@ const session = yield* (yield* AgentHosts).attach(sessionId, {
 })
 ```
 
+- **Hooks stopped by policy.** Where a managed policy stops Codex running them, a session whose `open` passed none opens without them, `session.info` reports `capabilities.hooks: false`, and `attach` with hooks fails.
 - **Who answers.** Of the attached clients that have that hook, the one that attached most recently. When it detaches, the one before it answers again. A client attached without hooks never answers.
-- **No answer adds nothing.** With no such client attached, the host answers "nothing" at once, in-process, with no socket round trip, so an unanswered hook costs next to nothing per tool call. A client that doesn't answer within `hookTimeout` (default 5 seconds; set on the layer, or per session in `open`/`attach`) adds nothing either, and the host logs the timeout, so the agent never waits longer. A hook that fails or defects adds nothing, as locally.
+- **No answer adds nothing.** With no such client attached, the host answers "nothing" at once, in-process. On Claude that makes an unanswered hook cost next to nothing per tool call. On Codex the hook is a command, so it still starts a process and makes a socket round trip to the host: about 20 ms on Node, twice per tool call, whether or not anyone answers. A client that doesn't answer within `hookTimeout` (default 5 seconds; set on the layer, or per session in `open`/`attach`) adds nothing either, and the host logs the timeout, so the agent never waits longer. A hook that fails or defects adds nothing, as locally.
 - **Reconnects.** A call still waiting when its client's connection drops is delivered again once the client reconnects, until its timeout. The client runs each call once.
 
 **Reconnecting.** When the connection to a host drops (other than by `detach`/`stop` or the session ending), the client re-dials it on `reconnect`, by default an exponential backoff from 100 ms, capped at 2 s between attempts, giving up after 30 s (`DetachedAgent.defaultReconnect`). It's transparent: subscriptions resume from the last seq they delivered, and calls in flight are retried. `send`, `steer`, `turn` and `interrupt` carry a client-generated request id. The host remembers the last 1 000 results by id and answers a repeat with the original result, so a retried `send` lands once, a retried `turn` waits on the original turn, and a retried `interrupt` can't hit the turn after it. Calls fail with `ConnectionLost` when the schedule gives up, or at once if the host is gone (manifest removed or pid dead). `reconnect: false` fails on the first drop. After `detach`, calls fail with `SessionClosed`.
@@ -257,7 +267,7 @@ ClaudeAgent.layer().pipe(Layer.provide(ClaudeReplay.layerFile("session.jsonl")))
 CodexAgent.layer().pipe(Layer.provide(CodexReplay.layer(recordingText)))
 ```
 
-Record with the transports' `record` option. A Codex connection truncates the file and records until it closes; one that starts while another is recording (a `status` call during a session, say) isn't recorded. Claude recordings also capture SDK hook calls (the event, the CLI's input, what the hooks returned, and where in the frame stream they came). `ClaudeReplay` calls the session's own hooks at those points and reports what they answered to `onHook`. `test/conformance.test.ts` runs the same programs against both providers.
+Record with the transports' `record` option. A Codex connection truncates the file and records until it closes; one that starts while another is recording (a `status` call during a session, say) isn't recorded. A Codex replay runs no commands, so it never calls your hooks; test those by calling them directly, or with a real `codex`. Claude recordings also capture SDK hook calls (the event, the CLI's input, what the hooks returned, and where in the frame stream they came). `ClaudeReplay` calls the session's own hooks at those points and reports what they answered to `onHook`. `test/conformance.test.ts` runs the same programs against both providers.
 
 ```sh
 pnpm typecheck && pnpm test

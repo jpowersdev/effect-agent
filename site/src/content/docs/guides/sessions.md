@@ -144,7 +144,7 @@ agent.open({
 ```
 
 Hooks run inside the agent's tool loop, so keep them fast. A hook that fails adds
-nothing. Claude has hooks; on Codex, `open` fails if any are set.
+nothing. They run even if the user has turned their own hooks off.
 
 ## Remind it of a rule
 

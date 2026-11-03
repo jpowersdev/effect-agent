@@ -120,6 +120,8 @@ const checks: ReadonlyArray<Check> = [
   { kind: "out", ours: "P.UserInputAnswers", theirs: "G.ToolRequestUserInputResponse" },
   { kind: "out", ours: "P.ElicitationDeclined", theirs: "G.McpServerElicitationRequestResponse" },
   { kind: "known", ours: "keyof P.ClientRequests", theirs: `G.ClientRequest["method"]`, label: "ClientRequests" },
+  { kind: "known", ours: "P.HookTrustStatus", theirs: "G.HookTrustStatus" },
+  { kind: "in", ours: "P.HookMetadata", theirs: `Extract<G.HookMetadata, { handlerType: "command" }>`, label: "HookMetadata" },
 ]
 
 /** Exports with nothing in codex's protocol to check them against. */

@@ -367,8 +367,28 @@ export interface BackgroundTerminalsListResponse {
   readonly nextCursor: string | null
 }
 
+/** Open enum. */
+export type HookTrustStatus = "managed" | "trusted" | "untrusted" | "modified" | (string & {})
+
+/** A discovered hook. `command` is there for command hooks. */
+export interface HookMetadata {
+  readonly key: string
+  readonly eventName: string
+  readonly source: string
+  readonly enabled: boolean
+  readonly isManaged: boolean
+  readonly currentHash: string
+  readonly trustStatus: HookTrustStatus
+  readonly command?: string
+}
+
+export interface HooksListResponse {
+  readonly data: ReadonlyArray<{ readonly hooks: ReadonlyArray<HookMetadata> }>
+}
+
 export interface ClientRequests {
   readonly initialize: { readonly params: InitializeParams; readonly result: InitializeResponse }
+  readonly "hooks/list": { readonly params: { readonly cwds?: ReadonlyArray<string> }; readonly result: HooksListResponse }
   readonly "thread/start": { readonly params: ThreadStartParams; readonly result: ThreadStartResponse }
   readonly "thread/resume": { readonly params: ThreadResumeParams; readonly result: ThreadResumeResponse }
   readonly "thread/unsubscribe": { readonly params: { readonly threadId: string }; readonly result: unknown }

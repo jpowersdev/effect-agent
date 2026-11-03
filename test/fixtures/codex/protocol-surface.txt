@@ -396,6 +396,40 @@ GetAccountResponse
   requiresOpenaiAuth: boolean
   workspaceRouting?: WorkspaceRouting | null
 
+HookMetadata
+  additionalContextLimit?: integer | null
+      // Configured `additionalContext` spill threshold. `null` uses 2,500 tokens; `0` disables spilling.
+  currentHash: string
+  displayOrder: integer
+  enabled: boolean
+  eventName: HookEventName
+  isManaged: boolean
+  key: string
+  matcher?: string | null
+  pluginId?: string | null
+  source: HookSource
+  sourcePath: AbsolutePathBuf
+  statusMessage?: string | null
+  timeoutSec: integer
+  trustStatus: HookTrustStatus
+  | { async?: boolean; command: string; handlerType: "command" }
+  | { handlerType: "mcpTool"; server: string; tool: string }
+  | { handlerType: "prompt" }
+  | { handlerType: "agent" }
+
+HookTrustStatus
+  | "managed"
+  | "untrusted"
+  | "trusted"
+  | "modified"
+
+HooksListParams
+  cwds?: Array<string>
+      // When empty, defaults to the current session working directory.
+
+HooksListResponse
+  data: Array<HooksListEntry>
+
 InitializeCapabilities
   // Client-declared capabilities negotiated during initialize.
   experimentalApi?: boolean
