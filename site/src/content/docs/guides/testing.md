@@ -63,6 +63,9 @@ const Replay = ClaudeAgent.layer().pipe(
 
 The model's replies come from the recording, so they don't change with your hooks.
 
+A Codex replay runs no commands, so it never calls your hooks. Test those by calling them
+directly, or with a real `codex`.
+
 ## Work on effect-agent itself
 
 ```sh

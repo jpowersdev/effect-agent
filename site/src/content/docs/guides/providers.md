@@ -91,6 +91,11 @@ one without. The first `open` per layer starts an extra `codex app-server`, and 
 call starts a short-lived process of your runtime. `open` fails if Codex won't run the
 hooks, rather than running without them.
 
+A detached session pays this even if it never uses hooks. Each host has its own layer, so
+every `open` starts the extra `codex app-server`. All three hooks are registered so that a
+client can answer them later, so every tool call starts two of those processes, about 20 ms
+each on Node.
+
 - A tool that's refused rather than removed is still visible to the model, which gets the
   refusal as the tool's result. Subagent tools usually work this way, because current
   models select them regardless of Codex's switches.
