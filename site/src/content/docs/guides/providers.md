@@ -64,10 +64,10 @@ provider's name.
 
 ```ts
 const capabilities = yield* agent.capabilities
-// { provider: "codex", version: "0.162.1", steer: true, hooks: false, ... }
+// { provider: "codex", version: "0.162.1", steer: true, cost: "estimated", ... }
 
 const session = yield* agent.open(
-  capabilities.hooks ? { cwd, hooks: { beforeTool } } : { cwd }
+  capabilities.spendCap !== "none" ? { cwd, spendCapUsd: 5 } : { cwd }
 )
 ```
 
@@ -79,7 +79,25 @@ const session = yield* agent.open(
 | Resume, history | ✅ | ✅ |
 | Cost | ✅ reported | 🟡 estimated from `pricing` |
 | Spend cap | ✅ | 🟡 estimated, enforced by interrupting |
-| Hooks | ✅ | ❌ `open` fails if hooks are set |
-| `disable.subagents` | ✅ | 🟡 asked for in the instructions, not enforced |
-| `disable.tools` | ✅ any tool | 🟡 some tools; others fail `open` |
+| Hooks | ✅ | ✅ |
+| `disable.subagents` | ✅ | ✅ refused when called |
+| `disable.tools` | ✅ any tool | ✅ any tool: removed, or refused when called |
 | Account `status` | ✅ | ✅ |
+
+## How Codex differs
+
+Codex runs hooks as commands, so a session with hooks or refused tools costs more than
+one without. The first `open` per layer starts an extra `codex app-server`, and each hook
+call starts a short-lived process of your runtime. `open` fails if Codex won't run the
+hooks, rather than running without them.
+
+- A tool that's refused rather than removed is still visible to the model, which gets the
+  refusal as the tool's result. Subagent tools usually work this way, because current
+  models select them regardless of Codex's switches.
+- Hooks see Codex's tool names, such as `Bash` and `apply_patch`.
+- Codex runs no hooks for hosted tools like web search, or after a failed `apply_patch`.
+  `isError` is only set for shell commands.
+- Turning hooks off in config works as on Claude: your own hooks stop, managed ones still
+  run, and a session's `hooks` and `disable` keep working. A managed policy that stops
+  hooks is different. Claude still runs a session's hooks; on Codex, `open` fails when a
+  session needs them.

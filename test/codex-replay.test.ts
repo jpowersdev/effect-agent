@@ -47,7 +47,7 @@ describe("CodexAgent over replays", () => {
     Effect.gen(function* () {
       const a = yield* Agent
       const caps = yield* a.capabilities
-      expect(caps).toMatchObject({ provider: "codex", version: "0.162.1", steer: true, queue: true, resume: true, cost: "none", spendCap: "none", resetTimes: true, hooks: false, reattach: false, disable: { askUser: true, subagents: false, tools: "some" } })
+      expect(caps).toMatchObject({ provider: "codex", version: "0.162.1", steer: true, queue: true, resume: true, cost: "none", spendCap: "none", resetTimes: true, hooks: true, reattach: false, disable: { askUser: true, subagents: true, tools: "any" } })
       const session = yield* a.open(base)
       expect(Option.getOrNull(session.location)).toMatch(/sessions\/.*rollout-.*\.jsonl$/)
       const { events, fiber } = yield* collect(session)
@@ -220,10 +220,10 @@ describe("CodexAgent over replays", () => {
     }).pipe(Effect.provide(agent("simple"))),
   )
 
-  it.live("hooks are refused before anything starts", () =>
+  it.live("hooks and refused tools open on a replay, which runs no commands", () =>
     Effect.gen(function* () {
-      const error = yield* (yield* Agent).open({ ...base, hooks: { beforeTool: () => Effect.succeedNone } }).pipe(Effect.flip)
-      expect(error).toMatchObject({ _tag: "AgentError", message: expect.stringMatching(/hooks.*config-only/) })
+      const session = yield* (yield* Agent).open({ ...base, hooks: { beforeTool: () => Effect.succeedNone }, disable: { subagents: true, tools: ["apply_patch"] } })
+      expect(yield* session.pid).toEqual(Option.none())
     }).pipe(Effect.provide(agent("simple"))),
   )
 

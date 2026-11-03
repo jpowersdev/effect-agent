@@ -8,7 +8,7 @@
  * Runs in /tmp/effect-agent-live/codex/ with tiny prompts at effort `low`.
  */
 import { execSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { NodeServices } from "@effect/platform-node"
 import { Deferred, Duration, Effect, Fiber, Layer, Option, Scope, Stream } from "effect"
 import type { AgentEvent, AgentSession, RunOptions } from "../src/index.ts"
@@ -520,12 +520,71 @@ const stall: Scenario = Effect.gen(function* () {
 }).pipe(Effect.provide(agentLayer("stall")))
 
 const hooks: Scenario = Effect.gen(function* () {
-  const error = yield* (yield* Agent)
-    .open({ ...base, hooks: { beforeStop: () => Effect.succeedNone } })
-    .pipe(Effect.flip)
-  check(error._tag === "AgentError" && /hooks/.test(error.message), `got ${error._tag}`)
-  return `open refused: ${error.message}`
+  const before: Array<string> = []
+  const after: Array<boolean> = []
+  let stops = 0
+  const session = yield* (yield* Agent).open({
+    ...base,
+    hooks: {
+      beforeTool: (call) =>
+        Effect.sync(() => {
+          before.push(call.name)
+          return Option.none()
+        }),
+      afterTool: (call) =>
+        Effect.sync(() => {
+          after.push(call.isError)
+          return Option.some("The hook saw that command.")
+        }),
+      beforeStop: () =>
+        Effect.sync(() => {
+          stops++
+          return stops === 1 ? Option.some("Now reply with exactly the word: continued") : Option.none()
+        }),
+    },
+  })
+  const ended = yield* session.turn("Run the shell command `false` once, then say finished.")
+  yield* session.end
+  check(before.length > 0, "beforeTool ran")
+  check(after.includes(true), `afterTool saw the failure: ${after}`)
+  check(stops === 2, `beforeStop ran twice, got ${stops}`)
+  check(/continued/i.test(ended.finalText ?? ""), `the turn continued, final text "${ended.finalText}"`)
+  return `tools ${before.join(", ")}; isError ${after.join(", ")}; final "${ended.finalText}"`
 }).pipe(Effect.provide(agentLayer("hooks")))
+
+/** The model can't do what `disable` refuses, on a new thread and on a resumed one. */
+const disabled: Scenario = Effect.gen(function* () {
+  const agent = yield* Agent
+  let attempted: Array<string> = []
+  const spawned = (events: ReadonlyArray<AgentEvent>) =>
+    events.filter((e) => e._tag === "Other" && /"type":"collabAgentToolCall"/.test(JSON.stringify(e.raw)) && /"status":"completed"/.test(JSON.stringify(e.raw))).length
+  const beforeTool = (call: { readonly name: string }) =>
+    Effect.sync(() => {
+      attempted.push(call.name)
+      return Option.none<string>()
+    })
+  const file = `${cwd}/refused-${Date.now()}.txt`
+  const refused = { subagents: true, tools: ["apply_patch"] }
+  const fresh = yield* agent.open({ ...base, disable: refused, hooks: { beforeTool } })
+  const events = yield* collect(fresh)
+  yield* fresh.turn(`Create ${file} with apply_patch, using no other tool. If you can't, say so.`)
+  yield* fresh.turn("Spawn a sub-agent with spawn_agent to say hi. Try once; if you can't, say unavailable.")
+  yield* fresh.end
+  check(!existsSync(file), "apply_patch was refused")
+  check(spawned(events) === 0, "no sub-agent ran on a new thread")
+  const onNew = attempted
+  attempted = []
+
+  const plain = yield* agent.open(base)
+  yield* plain.turn("Say ok.")
+  yield* plain.end
+  const resumed = yield* agent.open({ ...base, resume: plain.sessionId, disable: refused, hooks: { beforeTool } })
+  const later = yield* collect(resumed)
+  yield* resumed.turn("Spawn a sub-agent with spawn_agent to say hi. Try once; if you can't, say unavailable.")
+  yield* resumed.end
+  check(spawned(later) === 0, "no sub-agent ran on a resumed thread")
+  return `attempted on a new thread: ${onNew.join(", ") || "nothing"}; on a resumed one: ${attempted.join(", ") || "nothing"}`
+}).pipe(Effect.provide(agentLayer("disabled")))
 
 const scenarios: Record<string, Scenario> = {
   simple,
@@ -547,6 +606,7 @@ const scenarios: Record<string, Scenario> = {
   history,
   stall,
   hooks,
+  disabled,
 }
 
 const appServers = () => {

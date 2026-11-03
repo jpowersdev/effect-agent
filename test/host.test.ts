@@ -10,7 +10,7 @@ import { Cause, DateTime, Duration, Effect, Exit, Fiber, Layer, Option, Stream }
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Agent, AgentError, ConnectionLost, MessageId, SessionClosed, SessionId, SessionNotFound, type TurnId, UsageLimited } from "../src/index.ts"
+import { Agent, ConnectionLost, MessageId, SessionClosed, SessionId, SessionNotFound, type TurnId, UsageLimited } from "../src/index.ts"
 import { AgentHosts, EventsTrimmed, HostSpec, DetachedAgent } from "../src/host/index.ts"
 import { host } from "./support/hostCommand.ts"
 
@@ -351,21 +351,10 @@ for (const p of providers) {
       timeout,
     )
 
-    it.live("capabilities.hooks follows the provider; Codex refuses hooks without starting a host", () =>
+    it.live("capabilities: every provider has hooks, forwarded to the client", () =>
       Effect.gen(function* () {
         const caps = yield* (yield* Agent).capabilities
-        expect(caps).toMatchObject({ provider: p.name, reattach: true, hooks: p.name === "claude" })
-        if (p.name !== "codex") return
-        const before = (yield* (yield* AgentHosts).list).length
-        const failure = failureOf(
-          yield* (yield* Agent).open({ cwd: p.cwd, hooks: { beforeStop: () => Effect.succeedNone } }).pipe(Effect.scoped, Effect.exit),
-        )
-        expect(failure).toBeInstanceOf(AgentError)
-        expect((yield* (yield* AgentHosts).list).length).toBe(before)
-        const attached = failureOf(
-          yield* (yield* AgentHosts).attach(SessionId.make("x"), { hooks: { beforeStop: () => Effect.succeedNone } }).pipe(Effect.scoped, Effect.exit),
-        )
-        expect(attached).toBeInstanceOf(AgentError)
+        expect(caps).toMatchObject({ provider: p.name, reattach: true, hooks: true })
       }).pipe(Effect.provide(layer(p.simple))),
     )
   })
