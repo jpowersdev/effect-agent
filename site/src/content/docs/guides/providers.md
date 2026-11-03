@@ -105,4 +105,4 @@ each on Node.
 - Turning hooks off in config works as on Claude: your own hooks stop, managed ones still
   run, and a session's `hooks` and `disable` keep working. A managed policy that stops
   hooks is different. Claude still runs a session's hooks; on Codex, `open` fails when a
-  session needs them.
+  session needs them. It also fails if `CodexAgent.layer({ config })` would stop them.

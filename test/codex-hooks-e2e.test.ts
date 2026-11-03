@@ -13,6 +13,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Agent, type RunOptions } from "../src/Agent.ts"
 import { CodexAgent, CodexAppServer } from "../src/codex/index.ts"
+import type * as P from "../src/codex/protocol.ts"
 import { AgentHosts, DetachedAgent } from "../src/host/index.ts"
 import { host } from "./support/hostCommand.ts"
 import * as Mock from "./support/mockResponses.ts"
@@ -527,6 +528,34 @@ describe.skipIf(!hasCodex)("hooks on a detached session", () => {
   )
 
   it.live(
+    "with config that would stop hooks, the same: only a session that didn't ask for them opens",
+    () =>
+      Effect.gen(function* () {
+        const mock = yield* Mock.make
+        const box = sandbox()
+        mock.script.push(execCommand(`echo x > ${box.marker}`))
+        yield* Effect.gen(function* () {
+          const hosts = yield* AgentHosts
+          const hooks = { beforeTool: () => Effect.succeedNone }
+          for (const needs of [{ hooks }, { disable: { tools: ["apply_patch"] } }]) {
+            const failed = yield* Effect.flip(hosts.open(box.run(needs)))
+            expect(failed.message).toContain("cannot install hooks")
+          }
+          const session = yield* hosts.open(box.run())
+          expect((yield* session.info).capabilities.hooks).toBe(false)
+          yield* session.turn("go")
+          yield* session.end
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(DetachedAgent.layer({ host, provider: "codex", codex: { args: mock.args, config: { "features.hooks": false } }, dir: join(box.root, "hosts"), onScopeClose: "detach" })),
+          Effect.provide(NodeServices.layer),
+        )
+        expect(existsSync(box.marker)).toBe(true)
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+
+  it.live(
     "where a policy stops hooks, only a session that didn't ask for them opens, and attaching with hooks fails without harming it",
     () =>
       Effect.gen(function* () {
@@ -567,6 +596,13 @@ describe.skipIf(!hasCodex)("hooks on a detached session", () => {
 })
 
 describe.skipIf(!hasCodex)("disable on a real app-server", () => {
+  const turnIn = (box: Sandbox) =>
+    Effect.gen(function* () {
+      const session = yield* (yield* Agent).open(box.run({ model: "gpt-5.5" }))
+      yield* session.turn("go")
+      yield* session.end
+    })
+
   const patchFor = (path: string) => `*** Begin Patch\n*** Add File: ${path}\n+x\n*** End Patch\n`
 
   it.live(
@@ -588,6 +624,59 @@ describe.skipIf(!hasCodex)("disable on a real app-server", () => {
         expect(existsSync(box.marker)).toBe(false)
         expect(existsSync(other)).toBe(true)
         expect(JSON.stringify(mock.requests[1]!.input)).toContain("disabled for this session")
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+
+  it.live(
+    "the layer's config can't undo a refusal: open fails if it would stop hooks once the thread starts",
+    () =>
+      Effect.gen(function* () {
+        const mock = yield* Mock.make
+        const layerWith = (config: Readonly<Record<string, P.JsonValue>>) =>
+          CodexAgent.layer({ config }).pipe(Layer.provide(CodexAppServer.layer({ args: mock.args })), Layer.provide(NodeServices.layer))
+        for (const config of [{ "features.hooks": false }, { features: { hooks: false } }, { "hooks.PreToolUse": [] }, { hooks: { PreToolUse: [] } }]) {
+          const box = sandbox()
+          mock.script.push(Mock.applyPatch(patchFor(box.marker)))
+          const failed = yield* Effect.gen(function* () {
+            const session = yield* (yield* Agent).open(box.run({ model: "gpt-5.5", disable: { tools: ["apply_patch"] } }))
+            yield* session.turn("go")
+          }).pipe(Effect.scoped, Effect.provide(layerWith(config)), Effect.flip)
+          mock.script.length = 0
+          expect(failed.message, JSON.stringify(config)).toContain("cannot install hooks")
+          expect(existsSync(box.marker), JSON.stringify(config)).toBe(false)
+        }
+        // A session that needs no hooks is none of its business.
+        const box = sandbox()
+        mock.script.push(execCommand(`echo x > ${box.marker}`))
+        yield* turnIn(box).pipe(Effect.scoped, Effect.provide(layerWith({ "features.hooks": false })))
+        expect(existsSync(box.marker)).toBe(true)
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+
+  it.live(
+    "config files can't undo a refusal either",
+    () =>
+      Effect.gen(function* () {
+        const mock = yield* Mock.make
+        const ownKey = `"/<session-flags>/config.toml:pre_tool_use:0:0"`
+        for (const project of ["[features]\nhooks = false\n", "[hooks]\nPreToolUse = []\n", `[hooks.state.${ownKey}]\nenabled = false\n`]) {
+          const box = sandbox()
+          writeFileSync(join(box.home, "config.toml"), `[projects.${JSON.stringify(box.cwd)}]\ntrust_level = "trusted"\n`)
+          mkdirSync(join(box.cwd, ".codex"))
+          writeFileSync(join(box.cwd, ".codex", "config.toml"), project)
+          mock.script.push(Mock.applyPatch(patchFor(box.marker)))
+          yield* withAgent(
+            mock,
+            Effect.gen(function* () {
+              const session = yield* (yield* Agent).open(box.run({ model: "gpt-5.5", disable: { tools: ["apply_patch"] } }))
+              yield* session.turn("go")
+              yield* session.end
+            }),
+          )
+          expect(existsSync(box.marker), project).toBe(false)
+        }
       }).pipe(Effect.scoped),
     timeout,
   )

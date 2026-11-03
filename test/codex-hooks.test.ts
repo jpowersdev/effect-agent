@@ -3,10 +3,12 @@
  * the answers, and a real relay process talking to a real socket.
  */
 import { describe, expect, it } from "@effect/vitest"
-import { Deferred, Effect, Option } from "effect"
+import { Deferred, Effect, Layer, Option } from "effect"
 import { execFileSync, spawn, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, rmSync } from "node:fs"
-import type { Hooks } from "../src/Agent.ts"
+import { Agent, type Hooks } from "../src/Agent.ts"
+import { AgentError } from "../src/AgentError.ts"
+import { CodexAgent, CodexAppServer } from "../src/codex/index.ts"
 import * as CodexHooks from "../src/codex/CodexHooks.ts"
 import type * as P from "../src/codex/protocol.ts"
 
@@ -276,4 +278,44 @@ describe("the relay process", () => {
       expect(yield* relay(nodePath, socket, `{"hook_event_name":"Stop"}`)).toEqual({ code: 0, stdout: "" })
     }),
   )
+})
+
+describe("a failed open", () => {
+  it.live("stops serving the relay, without waiting for the caller's scope", () =>
+    Effect.gen(function* () {
+      let socket: string | undefined
+      const server = Layer.succeed(
+        CodexAppServer.CodexAppServer,
+        CodexAppServer.CodexAppServer.of({
+          connect: (options) => {
+            socket = options.env?.[CodexHooks.socketVariable]
+            return Effect.fail(new AgentError({ message: "no app-server", provider: "codex" }))
+          },
+          version: Effect.succeed(null),
+        }),
+      )
+      const agent = yield* Agent.pipe(Effect.provide(CodexAgent.layer().pipe(Layer.provide(server))))
+      const failed = yield* Effect.flip(agent.open({ cwd: "/tmp", hooks: { beforeTool } }))
+      expect(failed.message).toBe("no app-server")
+      expect(socket).toBeDefined()
+      expect(existsSync(socket!)).toBe(false)
+    }).pipe(Effect.scoped),
+  )
+})
+
+describe("stoppedByConfig", () => {
+  it("finds what would stop hooks once thread settings apply", () => {
+    expect(CodexHooks.stoppedByConfig({ "features.hooks": false })).toBe("features.hooks")
+    expect(CodexHooks.stoppedByConfig({ features: { hooks: false } })).toBe("features.hooks")
+    expect(CodexHooks.stoppedByConfig({ hooks: {} })).toBe("hooks")
+    expect(CodexHooks.stoppedByConfig({ "hooks.PreToolUse": [] })).toBe("hooks.PreToolUse")
+  })
+
+  it("leaves everything else alone", () => {
+    expect(CodexHooks.stoppedByConfig(undefined)).toBeNull()
+    expect(CodexHooks.stoppedByConfig({})).toBeNull()
+    expect(CodexHooks.stoppedByConfig({ "features.hooks": true })).toBeNull()
+    expect(CodexHooks.stoppedByConfig({ features: { hooks: true, apps: false } })).toBeNull()
+    expect(CodexHooks.stoppedByConfig({ hooks_extra: 1, "features.apps": false })).toBeNull()
+  })
 })

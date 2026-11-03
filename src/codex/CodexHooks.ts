@@ -112,6 +112,22 @@ export interface Plan {
 
 const toml = (s: string) => JSON.stringify(s)
 
+/**
+ * What in `CodexAgent.layer`'s `config` would stop hooks; null if nothing would.
+ * That config applies when the thread starts, after hooks are verified, and
+ * nothing can check them afterwards. A `hooks` key there stops these ones even
+ * if it's empty (verified on 0.162.1).
+ *
+ * @internal
+ */
+export const stoppedByConfig = (config: Readonly<Record<string, P.JsonValue>> | undefined): string | null => {
+  if (config === undefined) return null
+  const features = config["features"]
+  const nested = typeof features === "object" && features !== null ? (features as Readonly<Record<string, P.JsonValue>>) : {}
+  if (config["features.hooks"] === false || nested["hooks"] === false) return "features.hooks"
+  return Object.keys(config).find((key) => key === "hooks" || key.startsWith("hooks.")) ?? null
+}
+
 const group = (matcher: string | null, command: string) =>
   `{${matcher !== null ? `matcher=${toml(matcher)},` : ""}hooks=[{type="command",command=${toml(command)}}]}`
 

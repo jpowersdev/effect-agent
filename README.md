@@ -73,7 +73,7 @@ Where Codex differs:
 - **Tool names.** Hooks see Codex's names (`Bash`, `apply_patch`, `collaborationspawn_agent`); `disable.tools` takes those or the names in `toolSwitches`.
 - **Gaps in Codex's hooks.** It runs none for hosted tools such as web search, or for `write_stdin`, and none after a failed `apply_patch`, so `afterTool` doesn't see those. `isError` is only set for shell commands.
 - **Trust is undocumented.** Codex skips hooks it doesn't trust, and effect-agent marks its own as trusted through the undocumented `hooks.state`. Your own hooks keep the trust they have.
-- **Hooks turned off.** As on Claude with `disableAllHooks`, turning hooks off in config stops your own hooks, and managed ones still run; a session's `RunOptions.hooks` and `disable` keep working. That takes two more app-servers per `open`. Claude runs a session's hooks under any policy. Codex can't under a managed policy that stops them (`features.hooks` in `managed_config.toml` or `requirements.toml`, or `allow_managed_hooks_only`), so `open` fails when a session needs them.
+- **Hooks turned off.** As on Claude with `disableAllHooks`, turning hooks off in config stops your own hooks, and managed ones still run; a session's `RunOptions.hooks` and `disable` keep working. That takes two more app-servers per `open`. Claude runs a session's hooks under any policy. Codex can't under a managed policy that stops them (`features.hooks` in `managed_config.toml` or `requirements.toml`, or `allow_managed_hooks_only`), so `open` fails when a session needs them. It also fails if `CodexAgent.layer({ config })` would stop them (`features.hooks = false`, or any `hooks` key), because that applies after hooks are checked.
 
 ## Platform
 

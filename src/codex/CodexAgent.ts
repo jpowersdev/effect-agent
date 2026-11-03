@@ -21,7 +21,7 @@
  *
  * @since 0.1.0
  */
-import { Cause, Clock, Deferred, Duration, Effect, Exit, Layer, Option, Queue, type Scope, Stream } from "effect"
+import { Cause, Clock, Deferred, Duration, Effect, Exit, Layer, Option, Queue, Scope, Stream } from "effect"
 import { type AccountStatus, Agent, type Capabilities, type Effort, type RunOptions } from "../Agent.ts"
 import { AgentError } from "../AgentError.ts"
 import type { AgentEvent } from "../AgentEvent.ts"
@@ -55,7 +55,10 @@ const provider = "codex"
 export interface CodexAgentOptions {
   /** Token prices for estimated cost and `spendCapUsd`. Without them cost is unknown and spend caps are refused. */
   readonly pricing?: Pricing.PriceTable
-  /** Extra per-thread config overrides (dotted config.toml keys). effect-agent's own settings win on conflict. */
+  /**
+   * Extra per-thread config overrides (dotted config.toml keys). effect-agent's own settings win on conflict.
+   * `open` fails if a session needs hooks and this would stop them (`features.hooks = false`, or any `hooks` key).
+   */
   readonly config?: Readonly<Record<string, P.JsonValue>>
   /** Default for `RunOptions.watchdog.grace` (10 seconds when neither is set). */
   readonly stallGrace?: Duration.Input
@@ -752,6 +755,11 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
   }
 
   const hookPlan = Hooks.plan(options.hooks, refusedTools(options))
+  const stopper = hookPlan !== null ? Hooks.stoppedByConfig(agentOptions.config) : null
+  if (stopper !== null) {
+    const problem = `CodexAgent.layer's config sets ${stopper}, which would stop them`
+    return yield* agentError(`cannot install hooks: ${problem}`, new Session.HooksNotRun(problem))
+  }
   /** Commands that failed, until `afterTool` asks about them. */
   const failedCalls = new Set<string>()
   const socket =
@@ -1434,7 +1442,14 @@ export const make = (options: CodexAgentOptions = {}) =>
     return Agent.of({
       provider,
       capabilities,
-      open: (runOptions) => openSession(server, options, runOptions, trustCache),
+      open: (runOptions) =>
+        // What a failed open acquired goes with it, not when the caller's scope closes.
+        Effect.flatMap(Effect.flatMap(Effect.scope, Scope.fork), (scope) =>
+          openSession(server, options, runOptions, trustCache).pipe(
+            Scope.provide(scope),
+            Effect.onError(() => Scope.close(scope, Exit.void)),
+          ),
+        ),
       status: (statusOptions = {}) => readStatus(server, statusOptions.env),
       history: (sessionId, historyOptions) => readHistory(server, sessionId, historyOptions),
     })
