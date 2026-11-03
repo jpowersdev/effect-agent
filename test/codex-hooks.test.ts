@@ -3,9 +3,10 @@
  * the answers, and a real relay process talking to a real socket.
  */
 import { describe, expect, it } from "@effect/vitest"
-import { Deferred, Effect, Layer, Option } from "effect"
+import { Deferred, Effect, Exit, Layer, Option, Scope } from "effect"
 import { execFileSync, spawn, spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, rmSync } from "node:fs"
+import { connect } from "node:net"
 import { Agent, type Hooks } from "../src/Agent.ts"
 import { AgentError } from "../src/AgentError.ts"
 import { CodexAgent, CodexAppServer } from "../src/codex/index.ts"
@@ -276,6 +277,40 @@ describe("the relay process", () => {
       const socket = yield* CodexHooks.serve({ beforeTool }, () => false).pipe(Effect.scoped)
       expect(existsSync(socket)).toBe(false)
       expect(yield* relay(nodePath, socket, `{"hook_event_name":"Stop"}`)).toEqual({ code: 0, stdout: "" })
+    }),
+  )
+})
+
+describe("closing the relay", () => {
+  it.live("waits for a running hook's cleanup, so that it can still use what the caller holds", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      let cleanedUp = false
+      const scope = yield* Scope.make()
+      const socket = yield* CodexHooks.serve(
+        {
+          beforeTool: () =>
+            Deferred.succeed(started, undefined).pipe(
+              Effect.andThen(Effect.never),
+              Effect.onInterrupt(() =>
+                Effect.sleep("50 millis").pipe(
+                  Effect.andThen(
+                    Effect.sync(() => {
+                      cleanedUp = true
+                    }),
+                  ),
+                ),
+              ),
+            ),
+        },
+        () => false,
+      ).pipe(Scope.provide(scope))
+      const client = connect(socket)
+      client.on("error", () => {})
+      client.write(`${JSON.stringify({ hook_event_name: "PreToolUse", tool_name: "Bash", tool_use_id: "c", tool_input: {} })}\n`)
+      yield* Deferred.await(started)
+      yield* Scope.close(scope, Exit.void)
+      expect(cleanedUp).toBe(true)
     }),
   )
 })

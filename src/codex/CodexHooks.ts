@@ -267,7 +267,8 @@ export const answer = (hooks: Hooks, line: string, consumeFailed: (callId: strin
 /**
  * Serves the relay for the session's scope, and returns the socket's path. A
  * relay that goes away (Codex stopped the hook) interrupts its call, as the
- * abort signal does on Claude.
+ * abort signal does on Claude. Closing the scope interrupts the calls still
+ * running and waits for their cleanup.
  *
  * @internal
  */
@@ -275,10 +276,11 @@ export const serve = (hooks: Hooks, consumeFailed: (callId: string) => boolean):
   Effect.gen(function* () {
     const run = Effect.runForkWith(Context.omit(Tracer.ParentSpan)(yield* Effect.context<never>()))
     return yield* Effect.acquireRelease(
-      Effect.callback<{ readonly path: string; readonly stop: () => void }, AgentError>((resume) => {
+      Effect.callback<{ readonly path: string; readonly stop: () => void; readonly running: Set<Fiber.Fiber<void>> }, AgentError>((resume) => {
         const dir = mkdtempSync(join(tmpdir(), "ea-hooks-"))
         const path = join(dir, "s")
         const sockets = new Set<Socket>()
+        const running = new Set<Fiber.Fiber<void>>()
         const server = createServer((socket) => {
           sockets.add(socket)
           let input = ""
@@ -293,7 +295,11 @@ export const serve = (hooks: Hooks, consumeFailed: (callId: string) => boolean):
             input += data
             const end = input.indexOf("\n")
             if (end < 0 || fiber !== null) return
-            fiber = run(Effect.map(answer(hooks, input.slice(0, end), consumeFailed), (output) => void socket.end(output)))
+            // Not started until it's in `running`: a hook's first step could end up closing this scope.
+            const call = run(Effect.andThen(Effect.yieldNow, Effect.map(answer(hooks, input.slice(0, end), consumeFailed), (output) => void socket.end(output))))
+            fiber = call
+            running.add(call)
+            call.addObserver(() => running.delete(call))
           })
         })
         const stop = () => {
@@ -305,8 +311,8 @@ export const serve = (hooks: Hooks, consumeFailed: (callId: string) => boolean):
           stop()
           resume(Effect.fail(new AgentError({ message: `cannot serve hooks on ${path}`, provider: "codex", cause })))
         })
-        server.listen(path, () => resume(Effect.succeed({ path, stop })))
+        server.listen(path, () => resume(Effect.succeed({ path, stop, running })))
       }),
-      ({ stop }) => Effect.sync(stop),
+      ({ stop, running }) => Effect.andThen(Effect.sync(stop), Fiber.interruptAll(running)),
     ).pipe(Effect.map(({ path }) => path))
   })
