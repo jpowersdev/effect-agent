@@ -130,8 +130,8 @@ Any client can answer any hook, whether or not `open` had it. The client that at
 most recently answers. With nobody to answer, or no answer within `hookTimeout`
 (5 seconds), the hook adds nothing and the turn carries on.
 
-If a managed policy stops Codex running hooks, a session whose `open` had none opens
-without them, and `attach` with hooks fails.
+If a managed policy stops Codex running hooks, a session whose `open` had none, and whose
+`disable` doesn't need them, opens without them. `attach` with hooks then fails.
 
 ## Keep hosts out of a supervisor's reach
 

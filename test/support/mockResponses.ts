@@ -69,7 +69,9 @@ export const make: Effect.Effect<MockResponses, never, Scope.Scope> = Effect.acq
           return
         }
         const parsed = JSON.parse(body) as { tools?: ReadonlyArray<Tool>; input?: ModelRequest["input"] }
-        requests.push({ tools: (parsed.tools ?? []).flatMap(toolNames), input: parsed.input ?? [] })
+        // A model whose catalog entry sets `use_responses_lite` is sent its tools in the input instead.
+        const additional = (parsed.input ?? []).flatMap((item) => (item.type === "additional_tools" ? (item.tools as ReadonlyArray<Tool>) : []))
+        requests.push({ tools: [...(parsed.tools ?? []), ...additional].flatMap(toolNames), input: parsed.input ?? [] })
         const id = `r${requests.length}`
         const item = script.shift() ?? { type: "message", role: "assistant", id: `m${requests.length}`, content: [{ type: "output_text", text: "done" }] }
         res.writeHead(200, { "content-type": "text/event-stream" })

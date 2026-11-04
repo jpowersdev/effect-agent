@@ -6,12 +6,13 @@
  */
 import { NodeServices } from "@effect/platform-node"
 import { afterAll, describe, expect, it } from "@effect/vitest"
-import { Effect, Layer, Option, type Scope } from "effect"
+import { Effect, Layer, Option, type Scope, Stream } from "effect"
 import { spawnSync } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Agent, type RunOptions } from "../src/Agent.ts"
+import type { AgentSession } from "../src/AgentSession.ts"
 import { CodexAgent, CodexAppServer } from "../src/codex/index.ts"
 import type * as P from "../src/codex/protocol.ts"
 import { AgentHosts, DetachedAgent } from "../src/host/index.ts"
@@ -63,6 +64,17 @@ const inputOf = (mock: Mock.MockResponses) => JSON.stringify(mock.requests.at(-1
 const agentTools = (mock: Mock.MockResponses) => mock.requests.at(-1)!.tools.filter((t) => /agent|followup_task|send_message/.test(t))
 
 const execCommand = (cmd: string, callId?: string) => Mock.functionCall("exec_command", { cmd }, callId !== undefined ? { callId } : {})
+
+/** Stands in for a managed policy, which needs a system path: Codex never sees our hooks. */
+const codexWithPolicy = (box: Sandbox): string => {
+  const path = join(box.root, "codex-with-policy")
+  writeFileSync(
+    path,
+    `#!/bin/sh\nn=$#\nwhile [ "$n" -gt 0 ]; do\n  a=$1; shift; n=$((n-1))\n  if [ "$a" = "-c" ]; then\n    case "$1" in hooks.*|features.hooks=*) shift; n=$((n-1)); continue ;; esac\n  fi\n  set -- "$@" "$a"\ndone\nexec codex "$@"\n`,
+  )
+  chmodSync(path, 0o755)
+  return path
+}
 
 /** Puts a hook in the user's config, trusted the way `/hooks` would, and returns the file that shows it ran. */
 const userHook = (box: Sandbox, mock: Mock.MockResponses, config = "") =>
@@ -537,7 +549,7 @@ describe.skipIf(!hasCodex)("hooks on a detached session", () => {
         yield* Effect.gen(function* () {
           const hosts = yield* AgentHosts
           const hooks = { beforeTool: () => Effect.succeedNone }
-          for (const needs of [{ hooks }, { disable: { tools: ["apply_patch"] } }]) {
+          for (const needs of [{ hooks }, { disable: { tools: ["apply_patch"] } }, { disable: { askUser: true } }]) {
             const failed = yield* Effect.flip(hosts.open(box.run(needs)))
             expect(failed.message).toContain("cannot install hooks")
           }
@@ -561,18 +573,13 @@ describe.skipIf(!hasCodex)("hooks on a detached session", () => {
       Effect.gen(function* () {
         const mock = yield* Mock.make
         const box = sandbox()
-        // Stands in for a managed policy, which needs a system path: Codex never sees our hooks.
-        const codexPath = join(box.root, "codex-with-policy")
-        writeFileSync(
-          codexPath,
-          `#!/bin/sh\nn=$#\nwhile [ "$n" -gt 0 ]; do\n  a=$1; shift; n=$((n-1))\n  if [ "$a" = "-c" ]; then\n    case "$1" in hooks.*|features.hooks=*) shift; n=$((n-1)); continue ;; esac\n  fi\n  set -- "$@" "$a"\ndone\nexec codex "$@"\n`,
-        )
-        chmodSync(codexPath, 0o755)
+        const codexPath = codexWithPolicy(box)
         mock.script.push(execCommand(`echo x > ${box.marker}`))
         yield* Effect.gen(function* () {
           const hosts = yield* AgentHosts
           const hooks = { beforeTool: () => Effect.succeedNone }
-          for (const needs of [{ hooks }, { disable: { subagents: true } }]) {
+          // The host retries these without the hooks a client might want, and their own `disable` fails that too.
+          for (const needs of [{ hooks }, { disable: { subagents: true } }, { disable: { askUser: true } }]) {
             const failed = yield* Effect.flip(hosts.open(box.run(needs)))
             expect(failed.message).toContain("cannot install hooks")
             expect(failed.message).toContain("managed policy")
@@ -793,3 +800,220 @@ describe.skipIf(!hasCodex)("disable on a real app-server", () => {
   )
 })
 
+describe.skipIf(!hasCodex)("disable.askUser on a real app-server", () => {
+  const question = "Which colour?"
+  const ask = Mock.functionCall("request_user_input_async", { questions: [{ title: question, options: ["red", "blue"] }] }, { namespace: "functions" })
+  const tell = Mock.functionCall("send_message_to_user_async", { message: question }, { namespace: "functions" })
+  const askTool = "functions/request_user_input_async"
+  const tellTool = "functions/send_message_to_user_async"
+  const tellOn = ["-c", "features.send_message_to_user_async=true"]
+
+  /** The flags for a model whose catalog entry selects these tools, as the gpt-6 family's do with `send_user_message_async`. */
+  const catalog = (box: Sandbox, tools: ReadonlyArray<string> = ["send_user_message_async"]) => {
+    const path = join(box.root, "catalog.json")
+    writeFileSync(
+      path,
+      JSON.stringify({
+        models: [
+          {
+            slug: "asks",
+            display_name: "asks",
+            supported_reasoning_levels: [],
+            shell_type: "default",
+            visibility: "list",
+            supported_in_api: true,
+            priority: 1,
+            support_verbosity: false,
+            truncation_policy: { mode: "bytes", limit: 10000 },
+            base_instructions: "You are a test.",
+            use_responses_lite: true,
+            experimental_supported_tools: tools,
+          },
+        ],
+      }),
+    )
+    return ["-c", `model_catalog_json=${JSON.stringify(path)}`]
+  }
+
+  /** One turn, and the text the session reported as the agent's. */
+  const turnIn = (session: AgentSession) =>
+    Effect.gen(function* () {
+      const text: Array<string> = []
+      const events = yield* session.subscribe
+      yield* events.pipe(
+        Stream.runForEach((e) => Effect.sync(() => (e._tag === "Text" ? void text.push(e.text) : undefined))),
+        Effect.ignore,
+        Effect.forkScoped,
+      )
+      yield* session.turn("go")
+      yield* session.end
+      return text
+    })
+
+  const opened = (options: Partial<RunOptions>, box: Sandbox) =>
+    Effect.gen(function* () {
+      return yield* (yield* Agent).open(box.run({ model: "asks", ...options }))
+    })
+
+  it.live(
+    "control: without it the call is accepted, and the question reaches Text as if the agent had said it",
+    () =>
+      Effect.gen(function* () {
+        const mock = yield* Mock.make
+        const box = sandbox()
+        mock.script.push(ask)
+        const text = yield* withAgent(mock, Effect.flatMap(opened({}, box), turnIn), catalog(box))
+        expect(mock.requests[0]!.tools).toContain(askTool)
+        expect(Mock.toolOutputs(mock)).toEqual([`{"accepted":true}`])
+        expect(text.join("\n")).toContain(question)
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+
+  it.live(
+    "the model still sees the tool, but a call is refused, the question goes nowhere, and other tools run",
+    () =>
+      Effect.gen(function* () {
+        const mock = yield* Mock.make
+        const box = sandbox()
+        mock.script.push(ask, execCommand(`echo x > ${box.marker}`))
+        const text = yield* withAgent(mock, Effect.flatMap(opened({ disable: { askUser: true } }, box), turnIn), catalog(box))
+        expect(mock.requests[0]!.tools).toContain(askTool)
+        expect(inputOf(mock)).toContain("Do not ask the user")
+        const outputs = Mock.toolOutputs(mock)
+        expect(outputs[0]).toContain("disabled for this session")
+        expect(outputs.join()).not.toContain("accepted")
+        expect(text.join("\n")).not.toContain(question)
+        expect(existsSync(box.marker)).toBe(true)
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+
+  it.live(
+    "a resumed thread that was started without it refuses the call too",
+    () =>
+      Effect.gen(function* () {
+        const mock = yield* Mock.make
+        const box = sandbox()
+        const flags = catalog(box)
+        const threadId = yield* withAgent(
+          mock,
+          Effect.gen(function* () {
+            const session = yield* opened({}, box)
+            yield* turnIn(session)
+            return session.sessionId
+          }),
+          flags,
+        )
+        mock.script.push(ask)
+        const text = yield* withAgent(mock, Effect.flatMap(opened({ resume: threadId, disable: { askUser: true } }, box), turnIn), flags)
+        expect(Mock.toolOutputs(mock).join()).toContain("disabled for this session")
+        expect(text.join("\n")).not.toContain(question)
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+
+  it.live(
+    "a detached session refuses the call too",
+    () =>
+      Effect.gen(function* () {
+        const mock = yield* Mock.make
+        const box = sandbox()
+        mock.script.push(ask)
+        const text = yield* Effect.flatMap(opened({ disable: { askUser: true } }, box), turnIn).pipe(
+          Effect.scoped,
+          Effect.provide(DetachedAgent.layer({ host, provider: "codex", codex: { args: [...mock.args, ...catalog(box)] }, dir: join(box.root, "hosts") })),
+          Effect.provide(NodeServices.layer),
+        )
+        expect(mock.requests[0]!.tools).toContain(askTool)
+        expect(Mock.toolOutputs(mock).join()).toContain("disabled for this session")
+        expect(text.join("\n")).not.toContain(question)
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+
+  it.live(
+    "a client's hook sees the attempt, and the refusal holds",
+    () =>
+      Effect.gen(function* () {
+        const mock = yield* Mock.make
+        const box = sandbox()
+        const seen: Array<string> = []
+        mock.script.push(ask)
+        yield* Effect.flatMap(
+          opened({ disable: { askUser: true }, hooks: { beforeTool: (call) => Effect.sync(() => (seen.push(call.name), Option.none())) } }, box),
+          turnIn,
+        ).pipe(
+          Effect.scoped,
+          Effect.provide(DetachedAgent.layer({ host, provider: "codex", codex: { args: [...mock.args, ...catalog(box)] }, dir: join(box.root, "hosts") })),
+          Effect.provide(NodeServices.layer),
+        )
+        expect(Mock.toolOutputs(mock).join()).toContain("disabled for this session")
+        expect(seen).toEqual(["request_user_input_async"])
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+
+  it.live(
+    "the sibling tool: its switch takes it away, new or resumed, and a catalog that selects it anyway is refused",
+    () =>
+      Effect.gen(function* () {
+        const mock = yield* Mock.make
+        const box = sandbox()
+        // Control: the user's config turns it on, and it does what the other one does.
+        mock.script.push(tell)
+        const threadId = yield* withAgent(
+          mock,
+          Effect.gen(function* () {
+            const session = yield* opened({}, box)
+            const text = yield* turnIn(session)
+            expect(text.join("\n")).toContain(question)
+            return session.sessionId
+          }),
+          [...catalog(box), ...tellOn],
+        )
+        expect(mock.requests.at(-1)!.tools).toContain(tellTool)
+        expect(Mock.toolOutputs(mock)).toEqual([`{"accepted":true}`])
+
+        yield* withAgent(mock, Effect.flatMap(opened({ disable: { askUser: true } }, box), turnIn), [...catalog(box), ...tellOn])
+        expect(mock.requests.at(-1)!.tools).not.toContain(tellTool)
+
+        mock.script.push(tell)
+        const resumed = yield* withAgent(mock, Effect.flatMap(opened({ resume: threadId, disable: { askUser: true } }, box), turnIn), [...catalog(box), ...tellOn])
+        expect(mock.requests.at(-1)!.tools).not.toContain(tellTool)
+        // The thread's history holds the control's answer; this is the newest.
+        expect(Mock.toolOutputs(mock).at(-1)).toContain("unsupported call")
+        expect(resumed.join("\n")).not.toContain(question)
+
+        const other = sandbox()
+        mock.script.push(tell)
+        const text = yield* withAgent(mock, Effect.flatMap(opened({ disable: { askUser: true } }, other), turnIn), catalog(other, ["send_message_to_user_async"]))
+        expect(mock.requests.at(-1)!.tools).toContain(tellTool)
+        expect(Mock.toolOutputs(mock).join()).toContain("disabled for this session")
+        expect(text.join("\n")).not.toContain(question)
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+
+  it.live(
+    "where a policy or the layer's config stops hooks, open fails: nothing would stop the tool",
+    () =>
+      Effect.gen(function* () {
+        const mock = yield* Mock.make
+        const box = sandbox()
+        const failedWith = (layer: Layer.Layer<Agent>) =>
+          opened({ disable: { askUser: true } }, box).pipe(Effect.scoped, Effect.provide(layer), Effect.flip)
+        const policy = yield* failedWith(
+          CodexAgent.layer().pipe(Layer.provide(CodexAppServer.layer({ codexPath: codexWithPolicy(box), args: mock.args })), Layer.provide(NodeServices.layer)),
+        )
+        expect(policy.message).toContain("cannot install hooks")
+        expect(policy.message).toContain("managed policy")
+        const config = yield* failedWith(
+          CodexAgent.layer({ config: { "features.hooks": false } }).pipe(Layer.provide(CodexAppServer.layer({ args: mock.args })), Layer.provide(NodeServices.layer)),
+        )
+        expect(config.message).toContain("cannot install hooks")
+        expect(mock.requests).toEqual([])
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+})
