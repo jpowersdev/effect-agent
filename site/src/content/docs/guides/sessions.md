@@ -89,7 +89,7 @@ agent.open({ cwd, spendCapUsd: 5 })
 
 ## Run it unattended
 
-Nobody is there to answer questions, so turn off the ask-the-user tool. You can turn
+Nobody is there to answer questions, so turn off the ask-the-user tools. You can turn
 off subagents and named tools too.
 
 ```ts

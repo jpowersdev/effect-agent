@@ -60,6 +60,7 @@ Each provider is two layers: a transport (`ClaudeSdk`, `CodexAppServer`) and an 
 | Spend cap | ✅ native (`maxBudgetUsd`) | 🟡 estimated, enforced by interrupting |
 | Usage-limit reset times | ✅ | ✅ |
 | Hooks | ✅ also detached (see Reattach) | ✅ also detached, through Codex's command hooks (see below) |
+| `disable.askUser` | ✅ | ✅ refused when called, on models that have an asynchronous ask tool (the model may still see it) |
 | `disable.subagents` | ✅ | ✅ refused when called (the model may still see the tools) |
 | `disable.tools` | ✅ any tool | ✅ any tool: removed where Codex has a switch, otherwise refused when called |
 | Account `status` | ✅ via the SDK's experimental usage API | ✅ |
@@ -68,12 +69,12 @@ Each provider is two layers: a transport (`ClaudeSdk`, `CodexAppServer`) and an 
 
 Where Codex differs:
 
-- **Hooks need one more process.** The first `open` with hooks or refused tools, per layer, starts an extra app-server to read the hooks' hashes, and each hook call starts a short-lived process of your runtime (node or bun). `open` fails if Codex won't run the hooks, rather than running without them. A detached session pays this even if it never uses hooks: each host has its own layer, so every `open` starts the extra app-server, and all three hooks are registered, so every tool call starts two of those processes.
-- **Refused isn't removed.** The model still sees a tool that is only refused, and gets the refusal as its result. That includes subagent tools on current models, whose catalog entry selects them regardless of Codex's switches; the session's instructions also tell the model not to use them.
+- **Hooks need one more process.** The first `open` with hooks or refused tools, per layer, starts an extra app-server to read the hooks' hashes, and each hook call starts a short-lived process of your runtime (node or bun). `disable.askUser` and `disable.subagents` always refuse tools, so they count. A refusal runs no process unless the tool is called. `open` fails if Codex won't run the hooks, rather than running without them. A detached session pays this even if it never uses hooks: each host has its own layer, so every `open` starts the extra app-server, and all three hooks are registered, so every tool call starts two of those processes.
+- **Refused isn't removed.** The model still sees a tool that is only refused, and gets the refusal as its result. That includes subagent tools on current models, whose catalog entry selects them regardless of Codex's switches, and `request_user_input_async`, which the gpt-6 family's catalog entries add and no switch removes. The session's instructions also tell the model not to use either.
 - **Tool names.** Hooks see Codex's names (`Bash`, `apply_patch`, `collaborationspawn_agent`); `disable.tools` takes those or the names in `toolSwitches`.
 - **Gaps in Codex's hooks.** It runs none for hosted tools such as web search, or for `write_stdin`, and none after a failed `apply_patch`, so `afterTool` doesn't see those. `isError` is only set for shell commands.
 - **Trust is undocumented.** Codex skips hooks it doesn't trust, and effect-agent marks its own as trusted through the undocumented `hooks.state`. Your own hooks keep the trust they have.
-- **Hooks turned off.** As on Claude with `disableAllHooks`, turning hooks off in config stops your own hooks, and managed ones still run; a session's `RunOptions.hooks` and `disable` keep working. That takes two more app-servers per `open`. Claude runs a session's hooks under any policy. Codex can't under a managed policy that stops them (`features.hooks` in `managed_config.toml` or `requirements.toml`, or `allow_managed_hooks_only`), so `open` fails when a session needs them. It also fails if `CodexAgent.layer({ config })` would stop them (`features.hooks = false`, or any `hooks` key), because that applies after hooks are checked.
+- **Hooks turned off.** As on Claude with `disableAllHooks`, turning hooks off in config stops your own hooks, and managed ones still run; a session's `RunOptions.hooks` and `disable` keep working. That takes two more app-servers per `open`. Claude runs a session's hooks under any policy. Codex can't under a managed policy that stops them (`features.hooks` in `managed_config.toml` or `requirements.toml`, or `allow_managed_hooks_only`), so `open` fails when a session needs them, which any `disable.askUser` or `disable.subagents` does. It also fails if `CodexAgent.layer({ config })` would stop them (`features.hooks = false`, or any `hooks` key), because that applies after hooks are checked.
 
 ## Platform
 
@@ -241,7 +242,7 @@ const session = yield* (yield* AgentHosts).attach(sessionId, {
 })
 ```
 
-- **Hooks stopped by policy.** Where a managed policy stops Codex running them, a session whose `open` passed none opens without them, `session.info` reports `capabilities.hooks: false`, and `attach` with hooks fails.
+- **Hooks stopped by policy.** Where a managed policy stops Codex running them, a session whose `open` passed none, and whose `disable` doesn't need them, opens without them, `session.info` reports `capabilities.hooks: false`, and `attach` with hooks fails.
 - **Who answers.** Of the attached clients that have that hook, the one that attached most recently. When it detaches, the one before it answers again. A client attached without hooks never answers.
 - **No answer adds nothing.** With no such client attached, the host answers "nothing" at once, in-process. On Claude that makes an unanswered hook cost next to nothing per tool call. On Codex the hook is a command, so it still starts a process and makes a socket round trip to the host: about 20 ms on Node, twice per tool call, whether or not anyone answers. A client that doesn't answer within `hookTimeout` (default 5 seconds; set on the layer, or per session in `open`/`attach`) adds nothing either, and the host logs the timeout, so the agent never waits longer. A hook that fails or defects adds nothing, as locally.
 - **Reconnects.** A call still waiting when its client's connection drops is delivered again once the client reconnects, until its timeout. The client runs each call once.

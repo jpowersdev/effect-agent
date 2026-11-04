@@ -238,12 +238,13 @@ describe("helpers", () => {
       "features.apps": false,
       model_reasoning_effort: "xhigh",
       "features.default_mode_request_user_input": false,
+      "features.send_message_to_user_async": false,
       "features.multi_agent": false,
       "features.multi_agent_v2": false,
       web_search: "disabled",
       "features.shell_tool": false,
     })
-    expect(overrides.developerInstructions).toMatch(/^Be brief\.\n\nDo not spawn sub-agents/)
+    expect(overrides.developerInstructions).toMatch(/^Be brief\.\n\nDo not ask the user .*\n\nDo not spawn sub-agents/)
     expect("baseInstructions" in overrides).toBe(false)
   })
 
@@ -251,6 +252,10 @@ describe("helpers", () => {
     expect(CodexAgent.refusedTools({ cwd: "/w" })).toEqual([])
     expect(CodexAgent.refusedTools({ cwd: "/w", disable: { tools: ["web_search", "apply_patch"] } })).toEqual(["apply_patch"])
     expect(CodexAgent.refusedTools({ cwd: "/w", disable: { subagents: true, tools: ["spawn_agent"] } })).toEqual(CodexAgent.subagentTools)
+    expect(CodexAgent.refusedTools({ cwd: "/w", disable: { askUser: true } })).toEqual(CodexAgent.askUserTools)
+    expect(CodexAgent.refusedTools({ cwd: "/w", disable: { askUser: false } })).toEqual([])
+    expect(CodexAgent.refusedTools({ cwd: "/w", disable: { askUser: true, tools: ["request_user_input_async"] } })).toEqual(CodexAgent.askUserTools)
+    expect(CodexAgent.askUserTools).toContain("request_user_input_async")
   })
 
   it("removes the same nesting markers as Claude, and Claude's login token", () => {

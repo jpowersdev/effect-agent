@@ -21,7 +21,8 @@
  * run anyway and the user's stay off: hooks go on for this process, and
  * `hooks.state` disables every hook but these and managed ones. A managed policy
  * that stops these from running can't be overridden, unlike on Claude: `open`
- * fails, and a detached session that didn't ask for hooks opens without them.
+ * fails, and a detached session that needs them for neither `hooks` nor `disable`
+ * opens without them.
  * The agent's commands inherit the variable and could call the socket; they
  * run with full access anyway, as the same user.
  * All of this was verified on 0.162.1 by `test/codex-hooks-e2e.test.ts`.

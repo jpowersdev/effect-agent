@@ -95,8 +95,23 @@ export const toolSwitches: Readonly<Record<string, Readonly<Record<string, P.Jso
   request_user_input: { "features.default_mode_request_user_input": false },
 }
 
+const askUserNote =
+  "Do not ask the user with request_user_input or request_user_input_async; choose the most reasonable option yourself and carry on."
+
 const subagentNote =
   "Do not spawn sub-agents or use the collaboration tools (spawn_agent, send_message, followup_task, wait_agent); do the work yourself."
+
+/**
+ * The tools that ask the user without waiting for an answer, as of 0.162.1. Each
+ * returns `{"accepted":true}` and the turn carries on, so with nobody there the
+ * question goes nowhere. A model's catalog entry adds `request_user_input_async`
+ * (`experimental_supported_tools`, as the gpt-6 family's do), and no feature takes
+ * it away: verified by turning each of Codex's features the other way. They can't
+ * be called from code mode's `exec`, so a hook sees every call.
+ *
+ * @internal
+ */
+export const askUserTools: ReadonlyArray<string> = ["request_user_input_async", "send_message_to_user_async"]
 
 /**
  * The multi-agent tools of both generations (`features.multi_agent` and
@@ -121,13 +136,14 @@ export const subagentTools: ReadonlyArray<string> = [
  * because the switches can't be relied on: a model's catalog entry can select
  * multi-agent v2 regardless of them (`multi_agent_version`, as `gpt-6.1-sol`
  * does), and a resumed thread keeps the tools it started with (both verified on
- * 0.162.1).
+ * 0.162.1). Likewise `askUserTools`, whatever the model.
  *
  * @internal
  */
 export const refusedTools = (options: RunOptions): ReadonlyArray<string> => [
   ...new Set([
     ...(options.disable?.tools ?? []).filter((name) => toolSwitches[name] === undefined),
+    ...(options.disable?.askUser ? askUserTools : []),
     ...(options.disable?.subagents ? subagentTools : []),
   ]),
 ]
@@ -147,12 +163,12 @@ export const threadOverrides = (options: RunOptions, extraConfig: Readonly<Recor
     "features.apps": false,
     ...(options.effort !== undefined ? { model_reasoning_effort: codexEffort(options.effort) } : {}),
     // `request_user_input` is already refused in Default mode; this keeps it off if the default changes.
-    ...(options.disable?.askUser ? { "features.default_mode_request_user_input": false } : {}),
+    ...(options.disable?.askUser ? { "features.default_mode_request_user_input": false, "features.send_message_to_user_async": false } : {}),
     // Removes the tools where Codex honors these. Where it doesn't (see `refusedTools`), the refusal hook enforces it.
     ...(options.disable?.subagents ? { "features.multi_agent": false, "features.multi_agent_v2": false } : {}),
     ...tools,
   }
-  const instructions = [options.appendSystemPrompt, options.disable?.subagents ? subagentNote : undefined].filter(
+  const instructions = [options.appendSystemPrompt, options.disable?.askUser ? askUserNote : undefined, options.disable?.subagents ? subagentNote : undefined].filter(
     (s): s is string => s !== undefined && s !== "",
   )
   return {
@@ -1435,7 +1451,7 @@ export const make = (options: CodexAgentOptions = {}) =>
         resetTimes: true,
         hooks: true,
         reattach: false,
-        // request_user_input is off in Default mode. Tools with no switch, and subagents, are refused by a hook.
+        // request_user_input is off in Default mode. Tools with no switch, askUserTools and subagents are refused by a hook.
         disable: { askUser: true, subagents: true, tools: "any" },
       })),
     )

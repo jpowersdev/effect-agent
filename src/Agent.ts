@@ -53,7 +53,7 @@ export const RunSettings = Schema.Struct({
   appendSystemPrompt: Schema.optionalKey(Schema.String),
   disable: Schema.optionalKey(
     Schema.Struct({
-      /** The agent's ask-the-user tool (Claude `AskUserQuestion`). */
+      /** The agent's ask-the-user tools (Claude `AskUserQuestion`, Codex `request_user_input`); on Codex, some are refused when called. */
       askUser: Schema.optionalKey(Schema.Boolean),
       /** Subagent tools (Claude `Agent`/`Task`, Codex multi-agent). */
       subagents: Schema.optionalKey(Schema.Boolean),

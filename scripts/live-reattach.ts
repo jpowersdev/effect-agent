@@ -4,6 +4,7 @@
  *   node scripts/live-reattach.ts            # claude, then codex
  *   node scripts/live-reattach.ts codex      # one provider
  *   node scripts/live-reattach.ts hooks      # hooks on a detached session (Claude)
+ *   node scripts/live-reattach.ts askUser    # disable.askUser on a detached session (Codex)
  *
  * For each provider:
  *   1. Process A (a child node process) opens a session with
@@ -25,6 +26,10 @@
  * `beforeTool` adds a secret word the reply must contain; a `beforeStop`
  * that answers once keeps the turn going; and with only a hookless client
  * attached, a hooked turn completes with the hook adding nothing.
+ *
+ * `askUser`: a detached Codex session with `disable.askUser` on a model whose
+ * catalog entry offers a tool that asks without waiting: no question gets out,
+ * with or without the instructions that tell the model not to try.
  *
  * Runs in /tmp/effect-agent-live/reattach/ (Claude `claude-haiku-5-5`, Codex at
  * effort `low`); each provider costs two short command turns.
@@ -321,6 +326,39 @@ const hooksScenario = Effect.gen(function* () {
   console.log(`  hooks passed in ${Date.now() - t0} ms`)
 }).pipe(Effect.provide(DetachedAgent.layer({ ...options("claude"), onScopeClose: "stop" })), Effect.provide(NodeServices.layer))
 
+const askUserScenario = Effect.gen(function* () {
+  console.log("\n== codex: disable.askUser on a detached session ==")
+  const t0 = Date.now()
+  const hosts = yield* AgentHosts
+  const prompt = `This tests a tool. Before you reply, call request_user_input_async once, with exactly {"questions":[{"title":"Red or blue?","options":["Red","Blue"]}]}. Don't wait for an answer, and whatever it returns, then reply with what it returned.`
+  const created: Array<string> = []
+  for (const disable of [{ askUser: true }, { tools: ["request_user_input_async"] }]) {
+    yield* Effect.gen(function* () {
+      const attempted: Array<string> = []
+      const session = yield* hosts.open({
+        ...run("codex"),
+        model: "gpt-6-luna",
+        disable,
+        hooks: { beforeTool: (call) => Effect.sync(() => (attempted.push(call.name), Option.none<string>())) },
+      })
+      created.push(session.sessionId)
+      const events = yield* session.subscribe
+      const collected = yield* events.pipe(Stream.runCollect, Effect.forkScoped)
+      const done = yield* session.turn(prompt).pipe(Effect.timeout(Duration.seconds(120)))
+      yield* session.end
+      const all = yield* Fiber.join(collected)
+      console.log(`  ${JSON.stringify(disable)}: attempted ${attempted.join(",") || "nothing"}; reply ${JSON.stringify(done.finalText)}`)
+      check(!all.some((e) => /"delivery":"async"/.test(JSON.stringify(e.raw))), "no question was delivered")
+    }).pipe(Effect.scoped)
+  }
+  check((yield* hosts.list).length === 0, "no hosts left")
+  for (const id of created) {
+    rmSync(HostSpec.eventsPath(dir, id), { force: true })
+    rmSync(HostSpec.logPath(dir, id), { force: true })
+  }
+  console.log(`  askUser passed in ${Date.now() - t0} ms`)
+}).pipe(Effect.provide(DetachedAgent.layer({ ...options("codex"), onScopeClose: "stop" })), Effect.provide(NodeServices.layer))
+
 // ---------------------------------------------------------------------------
 
 const args = process.argv.slice(2)
@@ -331,8 +369,8 @@ if (args[0] === "--process-a") {
   })
 } else {
   mkdirSync(dir, { recursive: true })
-  const providers = (args.length > 0 ? args : ["claude", "codex"]) as Array<Provider | "hooks">
-  const scenario = (name: Provider | "hooks") => (name === "hooks" ? hooksScenario : processB(name))
+  const providers = (args.length > 0 ? args : ["claude", "codex"]) as Array<Provider | "hooks" | "askUser">
+  const scenario = (name: Provider | "hooks" | "askUser") => (name === "hooks" ? hooksScenario : name === "askUser" ? askUserScenario : processB(name))
   Effect.runPromise(Effect.forEach(providers, scenario, { discard: true })).then(
     () => {
       rmSync(join(dir, "hosts.stderr.log"), { force: true })

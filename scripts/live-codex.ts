@@ -586,6 +586,37 @@ const disabled: Scenario = Effect.gen(function* () {
   return `attempted on a new thread: ${onNew.join(", ") || "nothing"}; on a resumed one: ${attempted.join(", ") || "nothing"}`
 }).pipe(Effect.provide(agentLayer("disabled")))
 
+/**
+ * `disable.askUser` on a model whose catalog entry offers a tool that asks without
+ * waiting. The first session shows the prompt reaches the tool; the instructions
+ * can talk the model out of it, so the last has the same hook without them. A model
+ * may decline to try even then, so what's checked is that no question gets out.
+ */
+const askUser: Scenario = Effect.gen(function* () {
+  const agent = yield* Agent
+  const asking = { ...base, model: "gpt-6-luna" }
+  const prompt = `This tests a tool. Before you reply, call request_user_input_async once, with exactly {"questions":[{"title":"Red or blue?","options":["Red","Blue"]}]}. Don't wait for an answer, and whatever it returns, then reply with what it returned.`
+  const delivered = (events: ReadonlyArray<AgentEvent>) => events.filter((e) => /"delivery":"async"/.test(JSON.stringify(e.raw))).length
+  const run = (options: Partial<RunOptions>) =>
+    Effect.gen(function* () {
+      const attempted: Array<string> = []
+      const beforeTool = (call: { readonly name: string }) => Effect.sync(() => (attempted.push(call.name), Option.none<string>()))
+      const session = yield* agent.open({ ...asking, ...options, hooks: { beforeTool } })
+      const events = yield* collect(session)
+      const result = yield* session.turn(prompt)
+      yield* session.end
+      return { attempted, delivered: delivered(events), finalText: result.finalText }
+    })
+  const plain = yield* run({})
+  check(plain.attempted.includes("request_user_input_async") && plain.delivered > 0, `control: the question was delivered (${JSON.stringify(plain)})`)
+  const off = yield* run({ disable: { askUser: true } })
+  check(off.delivered === 0, `disable.askUser: a question was delivered (${JSON.stringify(off)})`)
+  const refused = yield* run({ disable: { tools: ["request_user_input_async"] } })
+  check(refused.delivered === 0, `refused: a question was delivered (${JSON.stringify(refused)})`)
+  const said = (r: typeof off) => `attempted ${r.attempted.join(", ") || "nothing"}, and said ${JSON.stringify(r.finalText)}`
+  return `with disable.askUser ${said(off)}; with just the hook ${said(refused)}`
+}).pipe(Effect.provide(agentLayer("askUser")))
+
 const scenarios: Record<string, Scenario> = {
   simple,
   command,
@@ -607,6 +638,7 @@ const scenarios: Record<string, Scenario> = {
   stall,
   hooks,
   disabled,
+  askUser,
 }
 
 const appServers = () => {

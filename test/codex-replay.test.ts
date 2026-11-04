@@ -222,7 +222,7 @@ describe("CodexAgent over replays", () => {
 
   it.live("hooks and refused tools open on a replay, which runs no commands", () =>
     Effect.gen(function* () {
-      const session = yield* (yield* Agent).open({ ...base, hooks: { beforeTool: () => Effect.succeedNone }, disable: { subagents: true, tools: ["apply_patch"] } })
+      const session = yield* (yield* Agent).open({ ...base, hooks: { beforeTool: () => Effect.succeedNone }, disable: { askUser: true, subagents: true, tools: ["apply_patch"] } })
       expect(yield* session.pid).toEqual(Option.none())
     }).pipe(Effect.provide(agent("simple"))),
   )

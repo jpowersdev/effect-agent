@@ -415,6 +415,7 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       let sessionScope = yield* Scope.fork(hostScope)
       let opened = yield* agent.open(runOptions).pipe(Scope.provide(sessionScope), Effect.exit)
       // Hooks only `attach` might want aren't worth failing a session over (a managed policy can stop them on Codex). `Info` says they're missing.
+      // A session whose `disable` needs them fails this second `open` too: it was promised those tools are stopped.
       let hooksRun = hasHooks
       if (spec.hooks !== true && Exit.isFailure(opened)) {
         const failure = Cause.findErrorOption(opened.cause)
