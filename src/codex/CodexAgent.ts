@@ -11,8 +11,11 @@
  * ```
  *
  * Every thread runs with approvals and the sandbox off
- * (`approvalPolicy: "never"`, `sandbox: "danger-full-access"`) and with MCP
- * isolated (no configured MCP servers, no built-in `codex_apps`).
+ * (`approvalPolicy: "never"`, `sandbox: "danger-full-access"`), without the
+ * built-in `codex_apps`, and asks for no configured MCP servers unless
+ * `RunOptions.mcp` is set. Codex 0.162.1 ignores that request for the servers
+ * in `config.toml` (and any per-session `mcp_servers` setting), so only `mcp`
+ * stops their calls.
  *
  * `status` and `history` each start a short-lived app-server (through the
  * `Launcher`, if any) and stop it before returning. `RunOptions.hooks`, and
@@ -37,6 +40,7 @@ import {
   parseUserAgentVersion,
 } from "./CodexAppServer.ts"
 import * as Env from "../internal/env.ts"
+import * as Mcp from "../internal/mcp.ts"
 import * as Session from "../internal/session.ts"
 import * as Pricing from "../Pricing.ts"
 import type * as Watchdog from "../Watchdog.ts"
@@ -132,11 +136,21 @@ export const subagentTools: ReadonlyArray<string> = [
 ]
 
 /**
+ * The tools that read MCP resources, which name a server in their arguments
+ * rather than in the tool's name, so `mcp.allow` can't allow them.
+ *
+ * @internal
+ */
+export const mcpResourceTools: ReadonlyArray<string> = ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]
+
+/**
  * Tools to refuse when called. Subagents are always among them when disabled,
  * because the switches can't be relied on: a model's catalog entry can select
  * multi-agent v2 regardless of them (`multi_agent_version`, as `gpt-6.1-sol`
  * does), and a resumed thread keeps the tools it started with (both verified on
- * 0.162.1). Likewise `askUserTools`, whatever the model.
+ * 0.162.1). Likewise `askUserTools`, whatever the model, and with `mcp`, the
+ * `mcpResourceTools` (calls to MCP tools are checked by a hook of their own;
+ * see `CodexHooks.mcpCommand`).
  *
  * @internal
  */
@@ -145,6 +159,7 @@ export const refusedTools = (options: RunOptions): ReadonlyArray<string> => [
     ...(options.disable?.tools ?? []).filter((name) => toolSwitches[name] === undefined),
     ...(options.disable?.askUser ? askUserTools : []),
     ...(options.disable?.subagents ? subagentTools : []),
+    ...(options.mcp !== undefined ? mcpResourceTools : []),
   ]),
 ]
 
@@ -158,8 +173,10 @@ export const threadOverrides = (options: RunOptions, extraConfig: Readonly<Recor
   for (const name of options.disable?.tools ?? []) Object.assign(tools, toolSwitches[name])
   const config: Record<string, P.JsonValue> = {
     ...extraConfig,
-    // MCP isolation: no configured servers, and no built-in codex_apps (ChatGPT apps/connectors).
-    mcp_servers: {},
+    // MCP isolation: no built-in codex_apps (ChatGPT apps/connectors), and no configured servers unless
+    // `mcp` lets them load (a hook checks their calls; see `refusedTools`). 0.162.1 ignores
+    // `mcp_servers` here for the servers in config.toml, which load regardless.
+    ...(options.mcp === undefined && { mcp_servers: {} }),
     "features.apps": false,
     ...(options.effort !== undefined ? { model_reasoning_effort: codexEffort(options.effort) } : {}),
     // `request_user_input` is already refused in Default mode; this keeps it off if the default changes.
@@ -770,7 +787,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
     }
   }
 
-  const hookPlan = Hooks.plan(options.hooks, refusedTools(options))
+  const hookPlan = Hooks.plan(options.hooks, refusedTools(options), options.mcp !== undefined)
   const stopper = hookPlan !== null ? Hooks.stoppedByConfig(agentOptions.config) : null
   if (stopper !== null) {
     const problem = `CodexAgent.layer's config sets ${stopper}, which would stop them`
@@ -779,8 +796,8 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
   /** Commands that failed, until `afterTool` asks about them. */
   const failedCalls = new Set<string>()
   const socket =
-    hookPlan?.relay === true && options.hooks !== undefined
-      ? yield* Hooks.serve(options.hooks, (callId) => failedCalls.delete(callId))
+    hookPlan?.relay === true
+      ? yield* Hooks.serve(options.hooks ?? {}, (callId) => failedCalls.delete(callId), options.mcp !== undefined ? Mcp.policy(options.mcp) : undefined)
       : null
   const env = { ...sessionEnv(Env.host(), options.env), ...(socket !== null && { [Hooks.socketVariable]: socket }) }
   const connect = (args: ReadonlyArray<string>) => server.connect({ cwd: options.cwd, env, ...(args.length > 0 && { args }) })

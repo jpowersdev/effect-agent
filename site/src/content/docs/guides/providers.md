@@ -83,12 +83,13 @@ const session = yield* agent.open(
 | `disable.askUser` | ✅ | ✅ refused when called, on models that have an asynchronous ask tool |
 | `disable.subagents` | ✅ | ✅ refused when called |
 | `disable.tools` | ✅ any tool | ✅ any tool: removed, or refused when called |
+| `mcp` | ✅ servers and claude.ai connectors | ✅ servers in Codex's config, checked by a hook |
 | Account `status` | ✅ | ✅ |
 
 ## How Codex differs
 
 Codex runs hooks as commands, so a session with hooks or refused tools costs more than
-one without, and `disable.askUser` and `disable.subagents` always refuse tools. The first
+one without, and `disable.askUser`, `disable.subagents` and `mcp` always refuse tools. The first
 `open` per layer starts an extra `codex app-server`, and each hook call starts a short-lived
 process of your runtime. `open` fails if Codex won't run the hooks, rather than running
 without them.
@@ -104,10 +105,14 @@ each on Node.
   which the gpt-6 family's catalog entries add and no switch removes. The session's
   instructions also tell the model not to use either.
 - Hooks see Codex's tool names, such as `Bash` and `apply_patch`.
+- Codex 0.162.1 loads the MCP servers in its `config.toml` whatever a session says: it
+  ignores `mcp_servers` in thread config and in `-c` flags, even `enabled = false` there.
+  Only `enabled = false` in the file stops one. So a Codex session without `mcp` can still
+  call them; `mcp: { allow: [] }` refuses every call. ChatGPT apps are turned off either way.
 - Codex runs no hooks for hosted tools like web search, or after a failed `apply_patch`.
   `isError` is only set for shell commands.
 - Turning hooks off in config works as on Claude: your own hooks stop, managed ones still
   run, and a session's `hooks` and `disable` keep working. A managed policy that stops
   hooks is different. Claude still runs a session's hooks; on Codex, `open` fails when a
-  session needs them, which any `disable.askUser` or `disable.subagents` does. It also
+  session needs them, which any `disable.askUser`, `disable.subagents` or `mcp` does. It also
   fails if `CodexAgent.layer({ config })` would stop them.

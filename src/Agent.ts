@@ -61,6 +61,31 @@ export const RunSettings = Schema.Struct({
       tools: Schema.optionalKey(Schema.Array(Schema.String)),
     }),
   ),
+  /**
+   * MCP servers and connectors from the machine's own setup. Without this, a
+   * session asks for none: no MCP servers, no claude.ai connectors, no ChatGPT
+   * apps (Codex 0.162.1 still loads the servers in its `config.toml`). With
+   * it, the session loads the servers its provider is configured with (on
+   * Claude, also the account's claude.ai connectors), and checks every call to
+   * their tools in this process: refused unless its `server/tool` name matches
+   * an `allow` glob and no `deny` glob. On Codex the check is a hook, so `open`
+   * fails where hooks can't run.
+   *
+   * `server/tool` is the provider's `mcp__<server>__<tool>` split at the first
+   * `__`, with every character outside `[A-Za-z0-9_-]` already `_`; a claude.ai
+   * connector's server is `claude_ai_<Name>`, as `claude_ai_Slack`. A name
+   * with another `__` must pass under every reading. Globs are `effect/Glob`'s:
+   * `*` stays within the server or the tool, `{a,b}` is either. Reading MCP
+   * resources is always refused. Built-in tools are unaffected.
+   */
+  mcp: Schema.optionalKey(
+    Schema.Struct({
+      /** `server/tool` globs a call must match, as `claude_ai_Slack/slack_{read,search}_*`. `[]` loads the servers, but nothing can be called. */
+      allow: Schema.Array(Schema.String),
+      /** Refused even when allowed, as `*\/*{send,reply,delete,trash}*`. */
+      deny: Schema.optionalKey(Schema.Array(Schema.String)),
+    }),
+  ),
   /** Spend cap in USD. Native for Claude; estimated from tokens for Codex. */
   spendCapUsd: Schema.optionalKey(Schema.Number),
   /** Resume an existing session; fails with `SessionNotFound` if the provider has no record of it. */

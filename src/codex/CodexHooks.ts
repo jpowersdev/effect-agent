@@ -11,6 +11,14 @@
  * shell command that exits 2, matched by tool name. The model still sees the
  * tool, and gets the refusal as its result.
  *
+ * `RunOptions.mcp` is checked through the relay, so that the session's own
+ * process decides each MCP call, but by a command that fails closed: it lets
+ * the call run only if the session says so, and refuses it if the session
+ * can't be reached, or the runtime can't start. Codex names an MCP tool
+ * `mcp__<server>__<tool>` in a hook, even where the model sees it in a
+ * namespace or (with `features.non_prefixed_mcp_tool_names`) unprefixed, and
+ * runs the hook for calls from code mode's `exec` too.
+ *
  * Hooks can't be set per thread, so they are `-c` flags on app-server. Codex
  * skips hooks it doesn't trust: `hooks.state` records a hook's hash as trusted
  * (undocumented; `--dangerously-bypass-hook-trust` isn't accepted by
@@ -40,6 +48,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Hooks } from "../Agent.ts"
 import { AgentError } from "../AgentError.ts"
+import * as Mcp from "../internal/mcp.ts"
 import * as P from "./protocol.ts"
 
 /**
@@ -68,6 +77,24 @@ const relayScript = [
   `process.stdin.on("end",()=>{c.write(i.replace(/\\n/g," ")+"\\n")});`,
 ].join("")
 
+/**
+ * Sends stdin to the socket as an MCP check, and exits 0 only if the answer is
+ * `allow`; otherwise it prints the answer (the refusal) and fails, which
+ * `mcpCommand` turns into a refusal. No single quotes (see `relayCommand`).
+ */
+const mcpScript = [
+  `process.on("uncaughtException",()=>process.exit(1));`,
+  `const c=require("node:net").connect(process.env.${socketVariable});`,
+  `let i="",o="";`,
+  `c.setEncoding("utf8");`,
+  `c.on("data",(d)=>{o+=d});`,
+  `c.on("error",()=>{});`,
+  `c.on("close",()=>{if(o==="allow")process.exit(0);process.stderr.write(o||"This MCP tool call was refused: effect-agent could not check it.");process.exit(1)});`,
+  `process.stdin.setEncoding("utf8");`,
+  `process.stdin.on("data",(d)=>{i+=d});`,
+  `process.stdin.on("end",()=>{c.write("mcp "+i.replace(/\\n/g," ")+"\\n")});`,
+].join("")
+
 const shellQuote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`
 
 /**
@@ -78,6 +105,23 @@ const shellQuote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`
 export const relayCommand = (execPath: string = process.execPath): string =>
   // In an Electron app or a compiled Bun binary, `execPath` is the app; these make it the runtime, for this command only.
   `ELECTRON_RUN_AS_NODE=1 BUN_BE_BUN=1 ${shellQuote(execPath)} -e ${shellQuote(relayScript)}`
+
+/**
+ * The hook command that checks an MCP call against `RunOptions.mcp`. Anything
+ * but the session's `allow`, including a runtime that won't start, exits 2,
+ * which refuses the call.
+ *
+ * @internal
+ */
+export const mcpCommand = (execPath: string = process.execPath): string =>
+  `ELECTRON_RUN_AS_NODE=1 BUN_BE_BUN=1 ${shellQuote(execPath)} -e ${shellQuote(mcpScript)} || exit 2`
+
+/**
+ * Matches MCP tools by the name a hook sees.
+ *
+ * @internal
+ */
+export const mcpMatcher = "^mcp__"
 
 /**
  * The hook command that refuses a tool call.
@@ -133,24 +177,27 @@ const group = (matcher: string | null, command: string) =>
   `{${matcher !== null ? `matcher=${toml(matcher)},` : ""}hooks=[{type="command",command=${toml(command)}}]}`
 
 /**
- * The flags for `hooks` and the tools to refuse; null if there's nothing to install.
+ * The flags for `hooks`, the tools to refuse and, with `mcp`, the MCP check;
+ * null if there's nothing to install.
  *
  * @internal
  */
-export const plan = (hooks: Hooks | undefined, refused: ReadonlyArray<string>, execPath?: string): Plan | null => {
+export const plan = (hooks: Hooks | undefined, refused: ReadonlyArray<string>, mcp = false, execPath?: string): Plan | null => {
   const command = relayCommand(execPath)
+  const check = mcpCommand(execPath)
   const refuse = refused.length > 0 ? [group(refuseMatcher(refused), refuseCommand)] : []
+  const checks = mcp ? [group(mcpMatcher, check)] : []
   const before = hooks?.beforeTool !== undefined ? [group("*", command)] : []
   const after = hooks?.afterTool !== undefined ? [group("*", command)] : []
   const stop = hooks?.beforeStop !== undefined ? [group(null, command)] : []
   const relayed = before.length + after.length + stop.length
-  if (relayed + refuse.length === 0) return null
+  if (relayed + refuse.length + checks.length === 0) return null
   const flag = (event: string, groups: ReadonlyArray<string>) => (groups.length > 0 ? ["-c", `hooks.${event}=[${groups.join(",")}]`] : [])
   return {
-    flags: [...flag("PreToolUse", [...refuse, ...before]), ...flag("PostToolUse", after), ...flag("Stop", stop)],
-    hookCount: relayed + refuse.length,
-    commands: new Set([...(refuse.length > 0 ? [refuseCommand] : []), ...(relayed > 0 ? [command] : [])]),
-    relay: relayed > 0,
+    flags: [...flag("PreToolUse", [...refuse, ...checks, ...before]), ...flag("PostToolUse", after), ...flag("Stop", stop)],
+    hookCount: relayed + refuse.length + checks.length,
+    commands: new Set([...(refuse.length > 0 ? [refuseCommand] : []), ...(checks.length > 0 ? [check] : []), ...(relayed > 0 ? [command] : [])]),
+    relay: relayed + checks.length > 0,
   }
 }
 
@@ -235,14 +282,28 @@ const addContext = (hookEventName: string, additionalContext: string) => ({ hook
 const none = Effect.succeed(Option.none<string>())
 
 /**
- * The JSON to print for one hook call, or "" to add nothing. A hook that
- * fails or defects adds nothing. `consumeFailed` says whether the call's
- * command failed.
+ * The answer to an MCP check: `allow`, or the refusal. Fails closed: without
+ * a policy, or a tool name, the call is refused.
  *
  * @internal
  */
-export const answer = (hooks: Hooks, line: string, consumeFailed: (callId: string) => boolean): Effect.Effect<string> =>
+export const checkMcp = (policy: Mcp.Policy | undefined, line: string): string => {
+  const name = Option.flatMap(decodeCall(line), (call) => Option.fromUndefinedOr(call.tool_name))
+  if (policy === undefined || Option.isNone(name)) return Mcp.refusalMessage("effect-agent could not check it")
+  const reason = Mcp.refusal(policy, name.value)
+  return reason === null ? "allow" : Mcp.refusalMessage(reason)
+}
+
+/**
+ * The JSON to print for one hook call, or "" to add nothing (for an MCP
+ * check against `mcp`, see `checkMcp`). A hook that fails or defects adds
+ * nothing. `consumeFailed` says whether the call's command failed.
+ *
+ * @internal
+ */
+export const answer = (hooks: Hooks, line: string, consumeFailed: (callId: string) => boolean, mcp?: Mcp.Policy): Effect.Effect<string> =>
   Effect.suspend(() => {
+    if (line.startsWith("mcp ")) return Effect.succeed(checkMcp(mcp, line.slice("mcp ".length)))
     const decoded = decodeCall(line)
     if (Option.isNone(decoded)) return Effect.succeed("")
     const call = decoded.value
@@ -263,18 +324,18 @@ export const answer = (hooks: Hooks, line: string, consumeFailed: (callId: strin
       default:
         return Effect.succeed("")
     }
-  }).pipe(Effect.catchCause(() => Effect.succeed("")))
+  }).pipe(Effect.catchCause(() => Effect.succeed(line.startsWith("mcp ") ? Mcp.refusalMessage("effect-agent could not check it") : "")))
 
 /**
- * Serves the relay for the session's scope, and returns the socket's path. A
- * relay that goes away (Codex stopped the hook) interrupts its call, as the
- * abort signal does on Claude. Closing the scope interrupts the calls still
- * running and waits for their cleanup, except a call that is itself closing it,
- * as with `Effect.forkIn`.
+ * Serves the relay (hooks, and MCP checks against `mcp`) for the session's
+ * scope, and returns the socket's path. A relay that goes away (Codex stopped
+ * the hook) interrupts its call, as the abort signal does on Claude. Closing
+ * the scope interrupts the calls still running and waits for their cleanup,
+ * except a call that is itself closing it, as with `Effect.forkIn`.
  *
  * @internal
  */
-export const serve = (hooks: Hooks, consumeFailed: (callId: string) => boolean): Effect.Effect<string, AgentError, Scope.Scope> =>
+export const serve = (hooks: Hooks, consumeFailed: (callId: string) => boolean, mcp?: Mcp.Policy): Effect.Effect<string, AgentError, Scope.Scope> =>
   Effect.gen(function* () {
     const run = Effect.runForkWith(Context.omit(Tracer.ParentSpan)(yield* Effect.context<never>()))
     return yield* Effect.acquireRelease(
@@ -298,7 +359,7 @@ export const serve = (hooks: Hooks, consumeFailed: (callId: string) => boolean):
             const end = input.indexOf("\n")
             if (end < 0 || fiber !== null) return
             // Not started until it's in `running`: a hook's first step could end up closing this scope.
-            const call = run(Effect.andThen(Effect.yieldNow, Effect.map(answer(hooks, input.slice(0, end), consumeFailed), (output) => void socket.end(output))))
+            const call = run(Effect.andThen(Effect.yieldNow, Effect.map(answer(hooks, input.slice(0, end), consumeFailed, mcp), (output) => void socket.end(output))))
             fiber = call
             running.add(call)
             call.addObserver(() => running.delete(call))
