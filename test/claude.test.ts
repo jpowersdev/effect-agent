@@ -123,6 +123,13 @@ describe("ClaudeAgent.buildOptions", () => {
     expect(options).not.toHaveProperty("allowDangerouslySkipPermissions")
   })
 
+  it("settings passes no permission mode, so the settings files decide", () => {
+    const options = ClaudeAgent.buildOptions({ cwd: "/x" }, { permissionMode: "settings", allowedTools: ["Read"] }, sessionId, {})
+    expect(options).not.toHaveProperty("permissionMode")
+    expect(options).not.toHaveProperty("allowDangerouslySkipPermissions")
+    expect(options.allowedTools).toEqual(["Read"])
+  })
+
   it("passes mcpServers as the SDK's, isolated without mcp and beside the machine's with it", () => {
     const mcpServers = { task: { type: "http" as const, url: "http://127.0.0.1:1/mcp", headers: { Authorization: "Bearer t" } } }
     expect(ClaudeAgent.buildOptions({ cwd: "/x", mcpServers }, {}, sessionId, {})).toMatchObject({ strictMcpConfig: true, mcpServers })

@@ -53,7 +53,7 @@ export type EnvSpec = typeof EnvSpec.Type
 export const ClaudeOptionsSpec = Schema.Struct({
   settingSources: Schema.optionalKey(Schema.Array(Schema.Literals(["user", "project", "local"]))),
   pathToClaudeCodeExecutable: Schema.optionalKey(Schema.String),
-  permissionMode: Schema.optionalKey(Schema.Literals(["bypassPermissions", "dontAsk"])),
+  permissionMode: Schema.optionalKey(Schema.Literals(["bypassPermissions", "dontAsk", "settings"])),
   allowedTools: Schema.optionalKey(Schema.Array(Schema.String)),
   model: Schema.optionalKey(Schema.String),
   checkResume: Schema.optionalKey(Schema.Boolean),
