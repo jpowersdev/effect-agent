@@ -22,6 +22,7 @@ describe("schemas", () => {
       env: { KEEP: "1", DROP: undefined },
       effort: "high",
       disable: { tools: ["Bash"] },
+      mcp: { allow: ["claude_ai_Slack/slack_read_*"], deny: ["*/*send*"] },
       resume: SessionId.make("s-1"),
       watchdog: { idle: "30 seconds", grace: Duration.seconds(2) },
       hooks: { beforeStop: () => null as never },
@@ -32,6 +33,7 @@ describe("schemas", () => {
       env: { KEEP: "1", DROP: null },
       effort: "high",
       disable: { tools: ["Bash"] },
+      mcp: { allow: ["claude_ai_Slack/slack_read_*"], deny: ["*/*send*"] },
       resume: "s-1",
       watchdog: { idle: 30_000, grace: 2_000 },
     })

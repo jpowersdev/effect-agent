@@ -151,7 +151,7 @@ export type ProviderSpec = typeof ProviderSpec.Type
 export const HostSpec = Schema.Struct({
   ...ProviderSpec.fields,
   run: RunSpec,
-  /** `open` passed hooks, so it fails if the provider can't run them. Otherwise the session opens without them, unless `run.disable` needs them. */
+  /** `open` passed hooks, so it fails if the provider can't run them. Otherwise the session opens without them, unless `run.disable` or `run.mcp` needs them. */
   hooks: Schema.optionalKey(Schema.Boolean),
   /** Where the socket, manifest and log go. */
   dir: Schema.String,

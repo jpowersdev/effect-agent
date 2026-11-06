@@ -549,7 +549,7 @@ describe.skipIf(!hasCodex)("hooks on a detached session", () => {
         yield* Effect.gen(function* () {
           const hosts = yield* AgentHosts
           const hooks = { beforeTool: () => Effect.succeedNone }
-          for (const needs of [{ hooks }, { disable: { tools: ["apply_patch"] } }, { disable: { askUser: true } }]) {
+          for (const needs of [{ hooks }, { disable: { tools: ["apply_patch"] } }, { disable: { askUser: true } }, { mcp: { allow: [] } }]) {
             const failed = yield* Effect.flip(hosts.open(box.run(needs)))
             expect(failed.message).toContain("cannot install hooks")
           }
@@ -579,7 +579,7 @@ describe.skipIf(!hasCodex)("hooks on a detached session", () => {
           const hosts = yield* AgentHosts
           const hooks = { beforeTool: () => Effect.succeedNone }
           // The host retries these without the hooks a client might want, and their own `disable` fails that too.
-          for (const needs of [{ hooks }, { disable: { subagents: true } }, { disable: { askUser: true } }]) {
+          for (const needs of [{ hooks }, { disable: { subagents: true } }, { disable: { askUser: true } }, { mcp: { allow: [] } }]) {
             const failed = yield* Effect.flip(hosts.open(box.run(needs)))
             expect(failed.message).toContain("cannot install hooks")
             expect(failed.message).toContain("managed policy")

@@ -99,8 +99,44 @@ agent.open({
 })
 ```
 
-Sessions always run with permission checks off (Claude's `bypassPermissions`) and with
-no MCP servers: none of the user's, and no claude.ai connectors or ChatGPT apps.
+Sessions always run with permission checks off (Claude's `bypassPermissions`). Without
+`mcp` (below) they load no MCP servers: none of the user's, and no claude.ai connectors or
+ChatGPT apps. One exception: Codex still loads the servers in its `config.toml`, because
+no per-session setting turns those off (see [How Codex differs](../providers/#how-codex-differs)).
+
+## Let it use the machine's MCP servers
+
+`mcp` lets a session use the MCP servers and claude.ai connectors already set up on the
+machine, limited by globs. Each call to an MCP tool is checked in the session's own
+process before it reaches the server, permissions bypassed or not, and refused unless its
+name matches an `allow` glob and no `deny` glob.
+
+```ts
+agent.open({
+  cwd,
+  mcp: {
+    allow: ["claude_ai_Slack/slack_{read,search}_*", "claude_ai_Notion/notion-{search,fetch}"],
+    deny: ["*/*{send,reply,delete,trash}*"]
+  }
+})
+```
+
+Globs are matched against `server/tool`: the provider's `mcp__<server>__<tool>`, split at
+the first `__`. A claude.ai connector's server is `claude_ai_<Name>`, as
+`claude_ai_Slack` or `claude_ai_Google_Calendar`, and characters outside `[A-Za-z0-9_-]`
+are already `_`. The globs are `effect/Glob`'s, so `*` stays within the server or the tool,
+and `{a,b}` is either.
+
+- A refused call reaches the model as the tool's result, with the reason ("is not in
+  mcp.allow", or "matches mcp.deny pattern …"). The model may still see the tool.
+- `allow: []` loads the servers, but nothing can be called.
+- A name with a second `__`, which could belong to another server, must pass under every
+  reading: `mcp__a__b__c` is checked as both `a/b__c` and `a__b/c`.
+- Reading MCP resources is always refused, because those tools name the server in their
+  input.
+- Built-in tools are unaffected. `disable.tools` governs those.
+- On Codex the check is a hook, so it costs what `disable.askUser` does, and `open` fails
+  where hooks can't run. claude.ai connectors are Claude's; ChatGPT apps stay off.
 
 ## Set its environment
 

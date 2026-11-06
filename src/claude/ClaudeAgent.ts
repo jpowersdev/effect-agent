@@ -65,6 +65,7 @@ import {
 import type { TokenUsage } from "../Usage.ts"
 import type { LimitWindow, LimitWindowStatus } from "../UsageLimit.ts"
 import * as Env from "../internal/env.ts"
+import * as Mcp from "../internal/mcp.ts"
 import * as Session from "../internal/session.ts"
 import * as Launcher from "../Launcher.ts"
 import * as ClaudeSdk from "./ClaudeSdk.ts"
@@ -82,7 +83,7 @@ export const provider = "claude"
  * @category models
  */
 export interface ClaudeAgentOptions {
-  /** Filesystem settings to load. Defaults to the CLI default (all sources, so project `CLAUDE.md` loads). MCP isolation holds regardless. */
+  /** Filesystem settings to load. Defaults to the CLI default (all sources, so project `CLAUDE.md` loads). MCP isolation holds regardless, unless `RunOptions.mcp` is set. */
   readonly settingSources?: ReadonlyArray<SettingSource>
   /** Use this `claude` binary instead of the one bundled with the SDK. */
   readonly pathToClaudeCodeExecutable?: string
@@ -123,10 +124,12 @@ export const nestingMarkers: ReadonlyArray<string> = Env.nestingMarkers
 export const buildEnv = (
   host: Readonly<Record<string, string | undefined>>,
   overrides: Readonly<Record<string, string | undefined>> = {},
+  /** False for a session with `RunOptions.mcp`, which may use the claude.ai connectors. */
+  isolateMcp = true,
 ): Record<string, string> => ({
   ...Env.resolve(host, overrides),
   // MCP isolation: no claude.ai connectors, whatever the caller passed.
-  ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+  ...(isolateMcp && { ENABLE_CLAUDEAI_MCP_SERVERS: "false" }),
 })
 
 /**
@@ -141,8 +144,10 @@ export const toEffortLevel = (effort: Effort): EffortLevel => (effort === "minim
  *
  * @internal
  */
-export const disallowedTools = (disable: RunOptions["disable"]): Array<string> => {
+export const disallowedTools = (disable: RunOptions["disable"], mcp: RunOptions["mcp"] = undefined): Array<string> => {
   const tools = new Set<string>()
+  // MCP resources bypass `mcp.allow`; `mcpHooks` refuses them too, should this list go stale.
+  if (mcp !== undefined) for (const t of mcpResourceTools) tools.add(t)
   if (disable?.askUser) tools.add("AskUserQuestion")
   // `Task` is the legacy name of `Agent`; `Workflow` runs multi-agent scripts.
   if (disable?.subagents) for (const t of ["Agent", "Task", "Workflow"]) tools.add(t)
@@ -260,6 +265,36 @@ export const sdkHooks = (hooks: Hooks, run: RunHook = Effect.runPromise): NonNul
   return out
 }
 
+/**
+ * The tools that read MCP resources, which name a server in their input
+ * rather than in the tool's name, so `mcp.allow` can't allow them.
+ *
+ * @internal
+ */
+export const mcpResourceTools: ReadonlyArray<string> = ["ListMcpResourcesTool", "ReadMcpResourceTool", "ReadMcpResourceDirTool"]
+
+/**
+ * `RunOptions.mcp` as a PreToolUse hook that refuses MCP calls it doesn't
+ * allow. It runs in this process, before the call reaches the server, and a
+ * hook's deny holds under `bypassPermissions`.
+ *
+ * @internal
+ */
+export const mcpHooks = (mcp: NonNullable<RunOptions["mcp"]>): Array<HookCallbackMatcher> => {
+  const policy = Mcp.policy(mcp)
+  const resources = new Set(mcpResourceTools)
+  return matcher("PreToolUse", async (input) => {
+    const reason = resources.has(input.tool_name)
+      ? `${input.tool_name} reads MCP resources, which mcp.allow can't allow`
+      : Mcp.isMcpTool(input.tool_name)
+        ? Mcp.refusal(policy, input.tool_name)
+        : null
+    return reason === null
+      ? {}
+      : { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: Mcp.refusalMessage(reason) } }
+  })
+}
+
 // ---------------------------------------------------------------------------
 // RunOptions -> SDK Options (continued)
 // ---------------------------------------------------------------------------
@@ -277,11 +312,14 @@ export const buildOptions = (
   runHookEffect?: RunHook,
 ): Options => {
   const model = run.model ?? config.model
-  const disallowed = disallowedTools(run.disable)
+  const disallowed = disallowedTools(run.disable, run.mcp)
+  const hooks = run.hooks !== undefined ? sdkHooks(run.hooks, runHookEffect) : undefined
   return {
     cwd: run.cwd,
-    env: buildEnv(hostEnv, { ...config.env, ...run.env }),
-    ...(run.hooks !== undefined && { hooks: sdkHooks(run.hooks, runHookEffect) }),
+    env: buildEnv(hostEnv, { ...config.env, ...run.env }, run.mcp === undefined),
+    ...(run.mcp !== undefined
+      ? { hooks: { ...hooks, PreToolUse: [...mcpHooks(run.mcp), ...(hooks?.PreToolUse ?? [])] } }
+      : hooks !== undefined && { hooks }),
     ...(run.resume !== undefined ? { resume: run.resume } : { sessionId }),
     ...(model !== undefined && { model }),
     ...(run.effort !== undefined && { effort: toEffortLevel(run.effort) }),
@@ -293,9 +331,8 @@ export const buildOptions = (
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
     ...(disallowed.length > 0 && { disallowedTools: disallowed }),
-    strictMcpConfig: true,
-    mcpServers: {},
-    settings: { disableClaudeAiConnectors: true },
+    // MCP isolation, unless `mcp` lets the machine's own servers and connectors load (checked by `mcpHooks`).
+    ...(run.mcp === undefined && { strictMcpConfig: true, mcpServers: {}, settings: { disableClaudeAiConnectors: true } }),
     ...(config.settingSources !== undefined && { settingSources: [...config.settingSources] }),
     ...(run.spendCapUsd !== undefined && { maxBudgetUsd: run.spendCapUsd }),
     ...(config.pathToClaudeCodeExecutable !== undefined && {

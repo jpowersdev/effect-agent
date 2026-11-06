@@ -24,7 +24,7 @@ describe("plan", () => {
   })
 
   it("refused tools need no relay", () => {
-    const plan = CodexHooks.plan(undefined, ["apply_patch"], "/bin/node")!
+    const plan = CodexHooks.plan(undefined, ["apply_patch"], false, "/bin/node")!
     expect(plan).toMatchObject({ relay: false, hookCount: 1 })
     expect([...plan.commands]).toEqual([CodexHooks.refuseCommand])
     expect(flagsOf(plan)).toEqual([
@@ -34,7 +34,7 @@ describe("plan", () => {
 
   it("installs one hook per event, on the relay", () => {
     const hooks: Hooks = { beforeTool, afterTool: () => Effect.succeedNone, beforeStop: () => Effect.succeedNone }
-    const plan = CodexHooks.plan(hooks, ["x"], "/bin/node")!
+    const plan = CodexHooks.plan(hooks, ["x"], false, "/bin/node")!
     const relay = JSON.stringify(CodexHooks.relayCommand("/bin/node"))
     expect(plan).toMatchObject({ relay: true, hookCount: 4 })
     expect(plan.commands.size).toBe(2)
@@ -60,7 +60,7 @@ describe("plan", () => {
 })
 
 describe("trust", () => {
-  const plan = CodexHooks.plan({ beforeTool }, [], "/bin/node")!
+  const plan = CodexHooks.plan({ beforeTool }, [], false, "/bin/node")!
   const command = [...plan.commands][0]!
   const hook = (over: Partial<P.HookMetadata> = {}): P.HookMetadata => ({
     key: "/<session-flags>/config.toml:pre_tool_use:0:0",
