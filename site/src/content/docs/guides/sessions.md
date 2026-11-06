@@ -193,6 +193,25 @@ const beforeTool = (call: ToolHookInput) =>
   )
 ```
 
+## Refuse a tool call
+
+`beforeTool` can return `refuseTool(reason)` instead: the tool doesn't run, and the model
+gets the reason as its result. It holds with permissions bypassed, for built-in tools
+(Claude's Bash and Write, Codex's commands and `apply_patch`) and MCP tools alike.
+
+```ts
+const beforeTool = (_call: ToolHookInput) =>
+  Ref.get(paused).pipe(
+    Effect.map((on) => (on ? refuseTool("The board is paused; stop here.") : Option.none()))
+  )
+```
+
+A refusal fails open: a hook that fails or times out, or on a detached session has no
+client to answer it, refuses nothing. It stops a call before it starts; a command that's
+already running, in the background too, runs on. `capabilities.refuseTool` says whether
+a session can refuse. A host from a release before 0.7.0 can't, and adds the reason as a
+note instead, while the tool runs.
+
 ## Continue an earlier session
 
 Pass the session id to `resume`. It fails with `SessionNotFound` if the provider has no

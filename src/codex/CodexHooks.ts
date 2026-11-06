@@ -33,6 +33,7 @@
  * opens without them.
  * The agent's commands inherit the variable and could call the socket; they
  * run with full access anyway, as the same user.
+ * `beforeTool`'s refusal is PreToolUse's JSON deny, through the same relay.
  * All of this was verified on 0.162.1 by `test/codex-hooks-e2e.test.ts`.
  *
  * Not covered, because Codex runs no hooks for them: hosted tools such as web
@@ -46,7 +47,7 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { createServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Hooks } from "../Agent.ts"
+import { type Hooks, isToolRefusal } from "../Agent.ts"
 import { AgentError } from "../AgentError.ts"
 import * as Mcp from "../internal/mcp.ts"
 import * as P from "./protocol.ts"
@@ -279,6 +280,11 @@ const toolResponseText = (response: unknown): string => {
 
 const addContext = (hookEventName: string, additionalContext: string) => ({ hookSpecificOutput: { hookEventName, additionalContext } })
 
+/** PreToolUse's deny, which Codex gives the model as "Command blocked by PreToolUse hook: <reason>". Its reason can't be empty. */
+const refusal = (reason: string) => ({
+  hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason },
+})
+
 const none = Effect.succeed(Option.none<string>())
 
 /**
@@ -296,8 +302,9 @@ export const checkMcp = (policy: Mcp.Policy | undefined, line: string): string =
 
 /**
  * The JSON to print for one hook call, or "" to add nothing (for an MCP
- * check against `mcp`, see `checkMcp`). A hook that fails or defects adds
- * nothing. `consumeFailed` says whether the call's command failed.
+ * check against `mcp`, see `checkMcp`). `beforeTool`'s refusal is a deny. A
+ * hook that fails or defects adds nothing, and refuses nothing.
+ * `consumeFailed` says whether the call's command failed.
  *
  * @internal
  */
@@ -312,7 +319,15 @@ export const answer = (hooks: Hooks, line: string, consumeFailed: (callId: strin
       Effect.map(hook, (text) => (Option.isSome(text) && text.value !== "" ? JSON.stringify(output(text.value)) : ""))
     switch (call.hook_event_name) {
       case "PreToolUse":
-        return respond(hooks.beforeTool?.(tool) ?? none, (text) => addContext("PreToolUse", text))
+        return hooks.beforeTool === undefined
+          ? Effect.succeed("")
+          : Effect.map(hooks.beforeTool(tool), (result) =>
+              isToolRefusal(result)
+                ? JSON.stringify(refusal(result.reason))
+                : Option.isSome(result) && result.value !== ""
+                  ? JSON.stringify(addContext("PreToolUse", result.value))
+                  : "",
+            )
       case "PostToolUse":
         return respond(
           hooks.afterTool?.({ ...tool, output: toolResponseText(call.tool_response), isError: consumeFailed(tool.callId) }) ?? none,

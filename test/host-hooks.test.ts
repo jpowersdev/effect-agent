@@ -8,14 +8,14 @@
  */
 import { NodeServices, NodeSocket } from "@effect/platform-node"
 import { afterAll, describe, expect, it } from "@effect/vitest"
-import { Cause, Duration, Effect, Exit, Fiber, Layer, Option, Ref, Schedule } from "effect"
+import { Cause, Duration, Effect, Exit, Fiber, Layer, Option, Ref, Schedule, Schema } from "effect"
 import { RpcClient, RpcClientError, RpcSerialization } from "effect/rpc"
 import { Socket } from "effect/socket"
 import { randomUUID } from "node:crypto"
 import { mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { Hooks } from "../src/index.ts"
+import { type Hooks, refuseTool } from "../src/index.ts"
 import { AgentHosts, HostProtocol, HostSpec, DetachedAgent } from "../src/host/index.ts"
 import { host } from "./support/hostCommand.ts"
 
@@ -111,6 +111,30 @@ describe("hooks on detached sessions", () => {
       }).pipe(Effect.scoped, Effect.provide(layer())),
     timeout,
   )
+
+  it.live(
+    "beforeTool's refusal reaches the host as a refusal, and the host says it can refuse",
+    () =>
+      Effect.gen(function* () {
+        const session = yield* open({
+          beforeTool: () => Effect.succeed(refuseTool("The board is paused.")),
+          afterTool: () => Effect.succeed(Option.some("after")),
+        })
+        expect((yield* invoke(session.socket, "beforeTool", bash)).result).toEqual({ _tag: "ToolRefusal", reason: "The board is paused." })
+        expect((yield* invoke(session.socket, "afterTool", { ...bash, output: "", isError: false })).result).toBe("after")
+        expect((yield* session.info).capabilities.refuseTool).toBe(true)
+        yield* session.stop
+      }).pipe(Effect.scoped, Effect.provide(layer())),
+    timeout,
+  )
+
+  it("a host before 0.7.0 takes a refusing HookResponse, without its refuse", () => {
+    const old = Schema.Struct({ hookId: Schema.String, result: Schema.NullOr(Schema.String) })
+    expect(Schema.decodeUnknownSync(old)({ hookId: "h", result: "The board is paused.", refuse: true })).toEqual({
+      hookId: "h",
+      result: "The board is paused.",
+    })
+  })
 
   it.live(
     "with no client with hooks attached, a hook adds nothing at once",

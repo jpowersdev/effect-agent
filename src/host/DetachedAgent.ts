@@ -54,7 +54,7 @@ import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
 import { closeSync, existsSync, openSync, readdirSync, rmSync } from "node:fs"
 import { join } from "node:path"
-import { Agent, type Hooks, type RunOptions, settingsOf } from "../Agent.ts"
+import { Agent, type BeforeToolResult, type Hooks, isToolRefusal, type RunOptions, settingsOf } from "../Agent.ts"
 import { AgentError } from "../AgentError.ts"
 import { HooksNotRun } from "../internal/session.ts"
 import type { AgentEvent } from "../AgentEvent.ts"
@@ -289,14 +289,29 @@ interface HookChannel {
     readonly hooks: ReadonlyArray<HookName>
     readonly timeoutMs: number
   }) => Stream.Stream<HookStreamItem, unknown>
-  readonly respond: (hookId: string, result: string | null) => Effect.Effect<void>
+  readonly respond: (hookId: string, answer: HookAnswer) => Effect.Effect<void>
   /** Hooks run here, so they outlive the request that delivered them. */
   readonly scope: Scope.Scope
   readonly agentError: (message: string) => AgentError
 }
 
+/** What a client sends back for one hook call: `HookResponse`'s payload, less its id. */
+interface HookAnswer {
+  readonly result: string | null
+  readonly refuse?: boolean
+}
+
+const nothing: HookAnswer = { result: null }
+
+const answerOf = (result: BeforeToolResult): HookAnswer =>
+  isToolRefusal(result)
+    ? { result: result.reason, refuse: true }
+    : Option.isSome(result) && result.value !== ""
+      ? { result: result.value }
+      : nothing
+
 /** A hook request run with this client's hooks. */
-const runHook = (hooks: Hooks, request: HookRequest): Effect.Effect<Option.Option<string>> => {
+const runHook = (hooks: Hooks, request: HookRequest): Effect.Effect<BeforeToolResult> => {
   const c = request.call
   switch (request.hook) {
     case "beforeTool":
@@ -324,23 +339,23 @@ const answerHooks = (channel: HookChannel, hooks: Hooks, timeout: Duration.Durat
     const clientId = randomUUID()
     const timeoutMs = Duration.toMillis(timeout)
     /** Results by hook id: a request delivered again after a reconnect doesn't run twice. */
-    const runs = new Map<string, Deferred.Deferred<string | null>>()
+    const runs = new Map<string, Deferred.Deferred<HookAnswer>>()
     const answer = (request: HookRequest) =>
       Effect.gen(function* () {
         let result = runs.get(request.hookId)
         if (result === undefined) {
-          result = Deferred.makeUnsafe<string | null>()
+          result = Deferred.makeUnsafe<HookAnswer>()
           runs.set(request.hookId, result)
           if (runs.size > 1_000) runs.delete(runs.keys().next().value!)
-          // As locally: a failure, defect or timeout adds nothing. The host's timer
+          // As locally: a failure, defect or timeout adds nothing, and refuses nothing. The host's timer
           // decides (and logs) a timeout; this one, a second later, only stops a hook
           // that is still running. With the same deadline, a busy host could take
           // this "nothing" as the answer and never log the timeout.
           yield* Effect.suspend(() => runHook(hooks, request)).pipe(
             Effect.timeoutOption(Duration.sum(timeout, Duration.seconds(1))),
-            Effect.map((text) => (Option.isSome(text) && Option.isSome(text.value) && text.value.value !== "" ? text.value.value : null)),
-            Effect.catchCause(() => Effect.succeed(null)),
-            Effect.flatMap((text) => Deferred.succeed(result!, text)),
+            Effect.map((answer) => (Option.isSome(answer) ? answerOf(answer.value) : nothing)),
+            Effect.catchCause(() => Effect.succeed(nothing)),
+            Effect.flatMap((answer) => Deferred.succeed(result!, answer)),
             Effect.forkIn(channel.scope),
           )
         }
@@ -827,7 +842,7 @@ export const layer = (
             yield* answerHooks(
               {
                 requests: (registration) => follow((client) => client.HookRequests(registration)),
-                respond: (hookId, result) => call((c) => c.HookResponse({ hookId, result })).pipe(Effect.ignore),
+                respond: (hookId, answer) => call((c) => c.HookResponse({ hookId, ...answer })).pipe(Effect.ignore),
                 scope: sessionScope,
                 agentError,
               },

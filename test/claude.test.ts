@@ -3,7 +3,7 @@ import { describe, expect, it } from "@effect/vitest"
 import { DateTime, Effect, Option, Schema } from "effect"
 import { join } from "node:path"
 import { ClaudeAgent, ClaudeReplay, ClaudeSdk } from "../src/claude/index.ts"
-import { AccountStatus, AgentEvent, SessionId, TurnId } from "../src/index.ts"
+import { AccountStatus, AgentEvent, refuseTool, SessionId, TurnId } from "../src/index.ts"
 
 const sessionId = SessionId.make("11111111-1111-4111-8111-111111111111")
 const turnId = TurnId.make("t1")
@@ -414,6 +414,7 @@ describe("capabilities", () => {
       spendCap: "native",
       resetTimes: true,
       hooks: true,
+      refuseTool: true,
       reattach: false,
       disable: { askUser: true, subagents: true, tools: "any" },
     })
@@ -459,6 +460,17 @@ describe("ClaudeAgent.sdkHooks", () => {
       { callId: "toolu_1", name: "Bash", input: { command: "ls" }, output: "a.txt", isError: false },
       { callId: "toolu_1", name: "Bash", input: { command: "ls" }, output: "exit 1", isError: true },
     ])
+  })
+
+  it("makes beforeTool's refusal a deny, with its reason", async () => {
+    const hooks = ClaudeAgent.sdkHooks({ beforeTool: () => Effect.succeed(refuseTool("The board is paused.")) })
+    expect(await call(hooks.PreToolUse![0]!.hooks[0], pre)).toEqual({
+      hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "The board is paused." },
+    })
+    const blank = ClaudeAgent.sdkHooks({ beforeTool: () => Effect.succeed(refuseTool(" ")) })
+    expect(await call(blank.PreToolUse![0]!.hooks[0], pre)).toMatchObject({
+      hookSpecificOutput: { permissionDecision: "deny", permissionDecisionReason: "This tool call was refused." },
+    })
   })
 
   it("adds nothing for None, empty text, failures, defects and aborts", async () => {
