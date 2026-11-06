@@ -65,7 +65,7 @@ Each provider is two layers: a transport (`ClaudeSdk`, `CodexAppServer`) and an 
 | `disable.tools` | ✅ any tool | ✅ any tool: removed where Codex has a switch, otherwise refused when called |
 | `mcp` (the machine's MCP servers, by allow/deny globs) | ✅ servers and claude.ai connectors | ✅ servers in Codex's config, checked by a hook (see below) |
 | `mcpServers` (a session's own MCP servers) | ✅ HTTP and stdio | ✅ HTTP and stdio, as thread config; names keep to `[A-Za-z0-9_]` |
-| Permissions | `ClaudeAgentOptions.permissionMode`: `bypassPermissions` (default) or `dontAsk` with `allowedTools` | `CodexAgentOptions.sandbox`: none by default, or `{ mode: "workspace-write" \| "read-only", mcpServerTools: "approve" }`; approvals always `never` (see `CodexSandbox`) |
+| Permissions | `ClaudeAgentOptions.permissionMode`: `bypassPermissions` (default), `dontAsk` with `allowedTools`, or `settings` (the settings files' `defaultMode` decides, as for `claude -p`) | `CodexAgentOptions.sandbox`: none by default, or `{ mode: "workspace-write" \| "read-only", mcpServerTools: "approve" }`; approvals always `never` (see `CodexSandbox`) |
 | Account `status` | ✅ via the SDK's experimental usage API | ✅ |
 
 ✅ supported · 🟡 partly or estimated · ❌ not supported. `agent.capabilities` reports the same at runtime, plus the tool's version.

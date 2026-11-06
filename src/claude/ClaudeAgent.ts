@@ -102,13 +102,16 @@ export interface ClaudeAgentOptions {
    * tool that isn't disabled or refused. `dontAsk` runs only what a permission
    * rule allows, from `allowedTools` or the settings files
    * (`settingSources`), and denies the rest: nobody is there to ask.
-   * `disable`, `mcp` and `beforeTool` refusals hold in both.
+   * `settings` passes no mode, so the settings files' `permissions.defaultMode`
+   * decides, as for `claude -p`: with none, what a rule (or `allowedTools`)
+   * doesn't allow is denied. `disable`, `mcp` and `beforeTool` refusals hold in
+   * all three.
    */
-  readonly permissionMode?: "bypassPermissions" | "dontAsk"
+  readonly permissionMode?: "bypassPermissions" | "dontAsk" | "settings"
   /**
    * Permission rules that allow a tool without asking, in Claude Code's
    * syntax: `Read`, `Bash(git log:*)`, `Edit(/repo/src/**)`,
-   * `mcp__task__progress`. Only matters with `permissionMode: "dontAsk"`.
+   * `mcp__task__progress`. Matters unless `permissionMode` bypasses them.
    */
   readonly allowedTools?: ReadonlyArray<string>
   /** Model when `RunOptions.model` is not set. */
@@ -370,9 +373,11 @@ export const buildOptions = (
       preset: "claude_code",
       ...(run.appendSystemPrompt !== undefined && { append: run.appendSystemPrompt }),
     },
-    ...(config.permissionMode === "dontAsk"
-      ? { permissionMode: "dontAsk" as const }
-      : { permissionMode: "bypassPermissions" as const, allowDangerouslySkipPermissions: true }),
+    ...(config.permissionMode === "settings"
+      ? {}
+      : config.permissionMode === "dontAsk"
+        ? { permissionMode: "dontAsk" as const }
+        : { permissionMode: "bypassPermissions" as const, allowDangerouslySkipPermissions: true }),
     ...(config.allowedTools !== undefined && { allowedTools: [...config.allowedTools] }),
     ...(disallowed.length > 0 && { disallowedTools: disallowed }),
     // MCP isolation, unless `mcp` lets the machine's own servers and connectors load (checked by `mcpHooks`).

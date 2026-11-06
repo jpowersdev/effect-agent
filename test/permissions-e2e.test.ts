@@ -10,7 +10,7 @@ import { NodeServices } from "@effect/platform-node"
 import { afterAll, describe, expect, it } from "@effect/vitest"
 import { Effect, Layer } from "effect"
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Agent } from "../src/Agent.ts"
@@ -48,7 +48,11 @@ const turn = (run: Parameters<Agent["Service"]["open"]>[0]) =>
   })
 
 describe("claude", () => {
-  const world = (optionsFor: (paths: { readonly allowed: string }) => ClaudeAgent.ClaudeAgentOptions) =>
+  const world = (
+    optionsFor: (paths: { readonly allowed: string }) => ClaudeAgent.ClaudeAgentOptions,
+    /** The agent user's `settings.json`, if any. */
+    userSettings?: (paths: { readonly allowed: string }) => unknown,
+  ) =>
     Effect.gen(function* () {
       const mock = yield* MockMessages.make
       const { root, cwd, home } = dirs("ea-perm-claude-")
@@ -63,6 +67,7 @@ describe("claude", () => {
       const allowed = join(cwd, "allowed.txt")
       const denied = join(cwd, "denied.txt")
       const options = optionsFor({ allowed })
+      if (userSettings !== undefined) writeFileSync(join(home, "settings.json"), JSON.stringify(userSettings({ allowed })))
       mock.script.push({ name: "Bash", input: { command: `touch ${denied}` } }, { name: "Bash", input: { command: `touch ${allowed}` } })
       return {
         mock,
@@ -101,6 +106,36 @@ describe("claude", () => {
       timeout,
     )
   }
+
+  for (const where of ["local", "detached"] as const) {
+    it.live(
+      `settings lets the agent user's settings decide: a rule there allows one command (${where})`,
+      () =>
+        Effect.gen(function* () {
+          const w = yield* world(
+            () => ({ permissionMode: "settings" }),
+            (paths) => ({ permissions: { allow: [`Bash(touch ${paths.allowed})`] } }),
+          )
+          yield* turn(w.run).pipe(Effect.scoped, Effect.provide(where === "local" ? w.local : w.detached))
+          expect([existsSync(w.denied), existsSync(w.allowed)]).toEqual([false, true])
+        }).pipe(Effect.scoped),
+      timeout,
+    )
+  }
+
+  it.live(
+    "settings lets the agent user's settings decide: their defaultMode applies",
+    () =>
+      Effect.gen(function* () {
+        const w = yield* world(
+          () => ({ permissionMode: "settings" }),
+          () => ({ permissions: { defaultMode: "acceptEdits" } }),
+        )
+        yield* turn(w.run).pipe(Effect.scoped, Effect.provide(w.local))
+        expect([existsSync(w.denied), existsSync(w.allowed)]).toEqual([true, true])
+      }).pipe(Effect.scoped),
+    timeout,
+  )
 })
 
 describe.skipIf(!hasCodex)("codex", () => {
