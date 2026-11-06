@@ -11,7 +11,7 @@ import { spawnSync } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { Agent, type RunOptions } from "../src/Agent.ts"
+import { Agent, refuseTool, type RunOptions } from "../src/Agent.ts"
 import type { AgentSession } from "../src/AgentSession.ts"
 import { CodexAgent, CodexAppServer } from "../src/codex/index.ts"
 import type * as P from "../src/codex/protocol.ts"
@@ -197,6 +197,48 @@ describe.skipIf(!hasCodex)("hooks on a real app-server", () => {
         expect(mock.requests.length).toBe(2)
         expect(inputOf(mock)).toContain("STOP_MARK")
         expect(result).toMatchObject({ finalText: "done" })
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+
+  it.live(
+    "beforeTool's refusal stops a command and a patch from running, and the model gets the reason",
+    () =>
+      Effect.gen(function* () {
+        const mock = yield* Mock.make
+        const box = sandbox()
+        const patched = join(box.cwd, "patched.txt")
+        const allowed = join(box.cwd, "allowed.txt")
+        mock.script.push(
+          execCommand(`echo x > ${box.marker}`, "call_refused"),
+          Mock.applyPatch(`*** Begin Patch\n*** Add File: ${patched}\n+x\n*** End Patch\n`),
+          execCommand(`echo x > ${allowed}`, "call_allowed"),
+        )
+        const seen: Array<string> = []
+        yield* withAgent(
+          mock,
+          Effect.gen(function* () {
+            const session = yield* (yield* Agent).open(
+              box.run({
+                model: "gpt-5.5",
+                hooks: {
+                  beforeTool: (call) =>
+                    Effect.sync(() => {
+                      seen.push(call.name)
+                      return call.callId === "call_allowed" ? Option.none() : refuseTool("PAUSED_MARK: the board is paused")
+                    }),
+                },
+              }),
+            )
+            yield* session.turn("go")
+            yield* session.end
+          }),
+        )
+        expect(seen).toEqual(["Bash", "apply_patch", "Bash"])
+        expect(existsSync(box.marker)).toBe(false)
+        expect(existsSync(patched)).toBe(false)
+        expect(existsSync(allowed)).toBe(true)
+        expect(Mock.toolOutputs(mock).filter((output) => output.includes("PAUSED_MARK"))).toHaveLength(2)
       }).pipe(Effect.scoped),
     timeout,
   )
@@ -535,6 +577,30 @@ describe.skipIf(!hasCodex)("hooks on a detached session", () => {
         )
         expect(before).toEqual(["call_hosted"])
         expect(inputOf(mock)).toContain("HOSTED_MARK")
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+
+  it.live(
+    "the client's refusal holds on the host's Codex session",
+    () =>
+      Effect.gen(function* () {
+        const mock = yield* Mock.make
+        const box = sandbox()
+        mock.script.push(execCommand(`echo x > ${box.marker}`, "call_hosted"))
+        yield* Effect.gen(function* () {
+          const session = yield* (yield* Agent).open(
+            box.run({ hooks: { beforeTool: () => Effect.succeed(refuseTool("PAUSED_MARK: the board is paused")) } }),
+          )
+          yield* session.turn("go")
+          yield* session.end
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(DetachedAgent.layer({ host, provider: "codex", codex: { args: mock.args }, dir: join(box.root, "hosts") })),
+          Effect.provide(NodeServices.layer),
+        )
+        expect(existsSync(box.marker)).toBe(false)
+        expect(inputOf(mock)).toContain("PAUSED_MARK")
       }).pipe(Effect.scoped),
     timeout,
   )

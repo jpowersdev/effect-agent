@@ -47,7 +47,7 @@ describe("CodexAgent over replays", () => {
     Effect.gen(function* () {
       const a = yield* Agent
       const caps = yield* a.capabilities
-      expect(caps).toMatchObject({ provider: "codex", version: "0.162.1", steer: true, queue: true, resume: true, cost: "none", spendCap: "none", resetTimes: true, hooks: true, reattach: false, disable: { askUser: true, subagents: true, tools: "any" } })
+      expect(caps).toMatchObject({ provider: "codex", version: "0.162.1", steer: true, queue: true, resume: true, cost: "none", spendCap: "none", resetTimes: true, hooks: true, refuseTool: true, reattach: false, disable: { askUser: true, subagents: true, tools: "any" } })
       const session = yield* a.open(base)
       expect(Option.getOrNull(session.location)).toMatch(/sessions\/.*rollout-.*\.jsonl$/)
       const { events, fiber } = yield* collect(session)

@@ -6,7 +6,8 @@
  * - Who answers: of the registered clients that have that hook, the one that
  *   attached most recently (ranked by its first registration, so a client
  *   that only reconnects keeps its place).
- * - No such client: the hook adds nothing, at once.
+ * - What it answers: text, nothing, or (for `beforeTool`) a refusal.
+ * - No such client: the hook adds nothing, and refuses nothing, at once.
  * - Timeout: the chosen client's `timeoutMs`, from when the call was made. On
  *   timeout the hook adds nothing (and it is logged); the agent never waits
  *   longer.
@@ -16,6 +17,7 @@
  */
 import { type Cause, Deferred, Duration, Effect, Exit, Option, Queue, Stream } from "effect"
 import { randomUUID } from "node:crypto"
+import { type BeforeToolResult, refuseTool } from "../Agent.ts"
 import type { HookCall, HookName, HookRequest, HookStreamItem } from "./protocol.ts"
 
 export interface Answerer {
@@ -34,7 +36,7 @@ interface Registration {
 
 interface Pending {
   readonly request: HookRequest
-  readonly result: Deferred.Deferred<Option.Option<string>>
+  readonly result: Deferred.Deferred<BeforeToolResult>
   assigned: Registration | null
 }
 
@@ -95,7 +97,7 @@ export const make = (options: {
         }),
       )
 
-    const call = (hook: HookName, input: HookCall | null): Effect.Effect<Option.Option<string>> =>
+    const call = (hook: HookName, input: HookCall | null): Effect.Effect<BeforeToolResult> =>
       Effect.suspend(() => {
         const answerer = best(hook)
         if (closed || answerer === null) return Effect.succeedNone
@@ -110,7 +112,7 @@ export const make = (options: {
               ? Effect.succeed(answer.value)
               : Effect.as(
                   Effect.logWarning(`hook ${hook} (${hookId}) timed out after ${answerer.timeoutMs} ms; it adds nothing`),
-                  Option.none<string>(),
+                  Option.none<string>() as BeforeToolResult,
                 ),
           ),
           Effect.ensuring(Effect.sync(() => pending.delete(hookId))),
@@ -119,19 +121,25 @@ export const make = (options: {
         )
       })
 
-    /** A client's answer; unknown (late, or repeated) ids are ignored. */
-    const respond = (hookId: string, result: string | null) =>
+    /** A client's answer; unknown (late, or repeated) ids are ignored. `refuse` counts only for `beforeTool`. */
+    const respond = (hookId: string, result: string | null, refuse = false) =>
       Effect.sync(() => {
         const p = pending.get(hookId)
         if (p === undefined) return
-        Deferred.doneUnsafe(p.result, Exit.succeed(result === null || result === "" ? Option.none() : Option.some(result)))
+        const answer: BeforeToolResult =
+          refuse && p.request.hook === "beforeTool"
+            ? refuseTool(result ?? "")
+            : result === null || result === ""
+              ? Option.none()
+              : Option.some(result)
+        Deferred.doneUnsafe(p.result, Exit.succeed(answer))
       })
 
     /** The session ended: end every registration's stream; waiting calls add nothing. */
     const close = Effect.sync(() => {
       closed = true
       for (const r of registrations) Queue.endUnsafe(r.queue)
-      for (const p of pending.values()) Deferred.doneUnsafe(p.result, Exit.succeed(Option.none()))
+      for (const p of pending.values()) Deferred.doneUnsafe(p.result, Exit.succeed(Option.none<string>()))
     })
 
     return { register, call, respond, close, answerers: () => registrations.size }

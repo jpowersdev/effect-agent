@@ -1467,6 +1467,7 @@ export const make = (options: CodexAgentOptions = {}) =>
         spendCap: options.pricing !== undefined ? ("estimated" as const) : ("none" as const),
         resetTimes: true,
         hooks: true,
+        refuseTool: true,
         reattach: false,
         // request_user_input is off in Default mode. Tools with no switch, askUserTools and subagents are refused by a hook.
         disable: { askUser: true, subagents: true, tools: "any" },

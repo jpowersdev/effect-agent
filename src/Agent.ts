@@ -144,14 +144,63 @@ export interface ToolHookInput {
 }
 
 /**
+ * What `Hooks.beforeTool` returns to stop a call: the tool doesn't run, and the
+ * model gets `reason` as its result. Make one with `refuseTool`.
+ *
+ * @since 0.7.0
+ * @category models
+ */
+export interface ToolRefusal {
+  readonly _tag: "ToolRefusal"
+  readonly reason: string
+}
+
+/**
+ * Refuse a tool call from `Hooks.beforeTool`, with the reason the model gets
+ * as the tool's result. An empty reason is replaced, as Codex needs one.
+ *
+ * @since 0.7.0
+ * @category constructors
+ */
+export const refuseTool = (reason: string): ToolRefusal => ({
+  _tag: "ToolRefusal",
+  reason: reason.trim() === "" ? "This tool call was refused." : reason,
+})
+
+/**
+ * Whether a `beforeTool` result refuses the call.
+ *
+ * @since 0.7.0
+ * @category guards
+ */
+export const isToolRefusal = (u: unknown): u is ToolRefusal =>
+  typeof u === "object" && u !== null && (u as { readonly _tag?: unknown })._tag === "ToolRefusal"
+
+/**
+ * What `Hooks.beforeTool` returns: text to add to the model's context (or
+ * none), or a `ToolRefusal`.
+ *
+ * @since 0.7.0
+ * @category models
+ */
+export type BeforeToolResult = Option.Option<string> | ToolRefusal
+
+/**
  * Each hook may return text that is added to the model's context. Hooks run
  * inside the agent's tool loop, so keep them fast; a failing hook adds nothing.
+ *
+ * `beforeTool` may instead refuse the call (`refuseTool`): the tool doesn't
+ * run, and the model gets the reason as its result. A refusal holds with
+ * permissions bypassed, as for `mcp`. It fails open: a hook that fails, times
+ * out, or (on a detached session) has no client to answer it refuses nothing.
+ * Where `capabilities.refuseTool` isn't true, as on a host from an older
+ * release, a refusal is only added to the model's context, and the tool runs.
  *
  * @since 0.1.0
  * @category models
  */
 export interface Hooks {
-  readonly beforeTool?: (call: ToolHookInput) => Effect.Effect<Option.Option<string>>
+  readonly beforeTool?: (call: ToolHookInput) => Effect.Effect<BeforeToolResult>
   readonly afterTool?: (
     call: ToolHookInput & { readonly output: string; readonly isError: boolean },
   ) => Effect.Effect<Option.Option<string>>
@@ -176,6 +225,8 @@ export const Capabilities = Schema.Struct({
   spendCap: Schema.Literals(["native", "estimated", "none"]),
   resetTimes: Schema.Boolean,
   hooks: Schema.Boolean,
+  /** `beforeTool` can refuse a call (`refuseTool`). Absent from a host on a release before 0.7.0. */
+  refuseTool: Schema.optionalKey(Schema.Boolean),
   reattach: Schema.Boolean,
   /** Which `RunOptions.disable` settings are enforced (not merely requested). */
   disable: Schema.Struct({

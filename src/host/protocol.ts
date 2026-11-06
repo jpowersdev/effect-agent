@@ -181,12 +181,18 @@ export class HostRpcs extends RpcGroup.make(
     success: HookStreamItem,
     stream: true,
   }),
-  /** A hook's result: text to add, or null for none. Late or repeated answers are ignored. */
-  Rpc.make("HookResponse", { payload: { hookId: Schema.String, result: Schema.NullOr(Schema.String) } }),
+  /**
+   * A hook's result: text to add, or null for none; with `refuse`, `result` is
+   * the reason `beforeTool` refused the call. A host before 0.7.0 ignores
+   * `refuse`, and adds the reason as text. Late or repeated answers are ignored.
+   */
+  Rpc.make("HookResponse", {
+    payload: { hookId: Schema.String, result: Schema.NullOr(Schema.String), refuse: Schema.optionalKey(Schema.Boolean) },
+  }),
   /** Internal, tests only (`HostSpec.testInvokeHook`): run a hook through the bridge as the agent would. */
   Rpc.make("TestInvokeHook", {
     payload: { requestId: Schema.String, hook: HookName, call: Schema.NullOr(HookCall) },
-    success: Schema.NullOr(Schema.String),
+    success: Schema.Union([Schema.NullOr(Schema.String), Schema.TaggedStruct("ToolRefusal", { reason: Schema.String })]),
     error: AgentError,
   }),
 ) {}

@@ -22,7 +22,7 @@ import { RpcSerialization, RpcServer } from "effect/rpc"
 import { SocketServer } from "effect/socket"
 import type { Socket as NetSocket } from "node:net"
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
-import { Agent, type Hooks, type RunOptions } from "../Agent.ts"
+import { Agent, type BeforeToolResult, type Hooks, isToolRefusal, type RunOptions } from "../Agent.ts"
 import { AgentError } from "../AgentError.ts"
 import type { AgentEvent } from "../AgentEvent.ts"
 import { type AgentSession, type SessionClosed, SessionNotFound } from "../AgentSession.ts"
@@ -368,9 +368,12 @@ const settle = (outcome: TurnOutcome): Effect.Effect<TurnSucceeded, TurnFailure>
  */
 export const clientHooks = (bridge: HookBridge.HookBridge): Hooks => ({
   beforeTool: (call) => bridge.call("beforeTool", call),
-  afterTool: (call) => bridge.call("afterTool", call),
-  beforeStop: () => bridge.call("beforeStop", null),
+  afterTool: (call) => Effect.map(bridge.call("afterTool", call), textOf),
+  beforeStop: () => Effect.map(bridge.call("beforeStop", null), textOf),
 })
+
+/** A hook's text; only `beforeTool` can refuse, so the bridge never refuses the others. */
+const textOf = (result: BeforeToolResult): Option.Option<string> => (isToolRefusal(result) ? Option.none() : result)
 
 const describe = (cause: Cause.Cause<unknown>): string => {
   const error = Cause.squash(cause)
@@ -552,7 +555,7 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
               location: Option.getOrNull(session.location),
               pid: Option.getOrNull(pid),
               hostPid: process.pid,
-              capabilities: { ...capabilities, hooks: hooksRun, reattach: true },
+              capabilities: { ...capabilities, hooks: hooksRun, refuseTool: hooksRun, reattach: true },
               lastSeq: log.lastSeq(),
               oldestSeq: log.oldest(),
               ended: log.ended() !== null,
@@ -577,10 +580,16 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
         AwaitTurn: ({ turnId }) => log.awaitTurn(turnId).pipe(Effect.flatMap(settle), replyOrDrop("AwaitTurn"), traced("AwaitTurn")),
         AwaitMessage: ({ messageId }) => log.awaitMessage(messageId).pipe(Effect.flatMap(settle), replyOrDrop("AwaitMessage"), traced("AwaitMessage")),
         HookRequests: (answerer) => hookBridge.register(answerer),
-        HookResponse: ({ hookId, result }) => hookBridge.respond(hookId, result),
+        HookResponse: ({ hookId, result, refuse }) => hookBridge.respond(hookId, result, refuse),
         TestInvokeHook: ({ requestId, hook, call }) =>
           spec.testInvokeHook === true
-            ? once("TestInvokeHook", requestId, hookBridge.call(hook, call).pipe(Effect.map(Option.getOrNull)))
+            ? once(
+                "TestInvokeHook",
+                requestId,
+                hookBridge.call(hook, call).pipe(
+                  Effect.map((result) => (isToolRefusal(result) ? { _tag: "ToolRefusal" as const, reason: result.reason } : Option.getOrNull(result))),
+                ),
+              )
             : Effect.fail(agentError("TestInvokeHook is for tests only")),
       })
 

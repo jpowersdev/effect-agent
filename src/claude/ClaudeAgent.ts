@@ -43,7 +43,16 @@ import type {
 import { Cause, Clock, Context, DateTime, type Duration, Effect, Fiber, Layer, Option, Stream, Tracer } from "effect"
 import { randomUUID } from "node:crypto"
 import { tmpdir } from "node:os"
-import { type AccountStatus, Agent, type Capabilities, type Effort, type Hooks, type RunOptions } from "../Agent.ts"
+import {
+  type AccountStatus,
+  Agent,
+  type BeforeToolResult,
+  type Capabilities,
+  type Effort,
+  type Hooks,
+  isToolRefusal,
+  type RunOptions,
+} from "../Agent.ts"
 import { AgentError } from "../AgentError.ts"
 import type { AgentEvent } from "../AgentEvent.ts"
 import { type AgentSession, SessionId, SessionNotFound } from "../AgentSession.ts"
@@ -165,7 +174,7 @@ export const disallowedTools = (disable: RunOptions["disable"], mcp: RunOptions[
  *
  * @internal
  */
-export type RunHook = (effect: Effect.Effect<string | undefined>, options: { readonly signal: AbortSignal }) => Promise<string | undefined>
+export type RunHook = <A>(effect: Effect.Effect<A>, options: { readonly signal: AbortSignal }) => Promise<A>
 
 /** Run a hook to completion; a failure, defect, throw or abort adds nothing. */
 const runHook = (run: RunHook, hook: () => Effect.Effect<Option.Option<string>>, signal: AbortSignal): Promise<string | undefined> =>
@@ -176,6 +185,26 @@ const runHook = (run: RunHook, hook: () => Effect.Effect<Option.Option<string>>,
     ),
     { signal },
   ).catch(() => undefined)
+
+/** `beforeTool` as PreToolUse's answer: a deny for a refusal, else its text as context. Fails open, as `runHook`. */
+const runBeforeTool = (run: RunHook, hook: () => Effect.Effect<BeforeToolResult>, signal: AbortSignal): Promise<SyncHookJSONOutput> =>
+  run(
+    Effect.suspend(hook).pipe(
+      Effect.map((result): SyncHookJSONOutput =>
+        isToolRefusal(result)
+          ? {
+              hookSpecificOutput: {
+                hookEventName: "PreToolUse",
+                permissionDecision: "deny",
+                permissionDecisionReason: result.reason,
+              },
+            }
+          : addContext("PreToolUse", Option.isSome(result) && result.value !== "" ? result.value : undefined),
+      ),
+      Effect.catchCause(() => Effect.succeed({})),
+    ),
+    { signal },
+  ).catch(() => ({}))
 
 /**
  * Tool output as text for `afterTool`: Bash's stdout/stderr, content blocks, or JSON.
@@ -212,7 +241,8 @@ const matcher = <E extends HookEvent>(
 ]
 
 /**
- * `RunOptions.hooks` as SDK hooks: `beforeTool` is PreToolUse, `afterTool`
+ * `RunOptions.hooks` as SDK hooks: `beforeTool` is PreToolUse (its refusal a
+ * deny, which holds under `bypassPermissions`), `afterTool`
  * PostToolUse (and PostToolUseFailure, with `isError`), `beforeStop` Stop.
  * Text a hook returns goes back as `additionalContext`; for Stop the CLI then
  * keeps the turn going so the model can act on it.
@@ -223,11 +253,8 @@ export const sdkHooks = (hooks: Hooks, run: RunHook = Effect.runPromise): NonNul
   const out: NonNullable<Options["hooks"]> = {}
   const { beforeTool, afterTool, beforeStop } = hooks
   if (beforeTool !== undefined) {
-    out.PreToolUse = matcher("PreToolUse", async (input, signal) =>
-      addContext(
-        "PreToolUse",
-        await runHook(run, () => beforeTool({ callId: input.tool_use_id, name: input.tool_name, input: input.tool_input }), signal),
-      ),
+    out.PreToolUse = matcher("PreToolUse", (input, signal) =>
+      runBeforeTool(run, () => beforeTool({ callId: input.tool_use_id, name: input.tool_name, input: input.tool_input }), signal),
     )
   }
   if (afterTool !== undefined) {
@@ -1421,6 +1448,7 @@ export const capabilities = (version: string | null): Capabilities => ({
   spendCap: "native",
   resetTimes: true,
   hooks: true,
+  refuseTool: true,
   reattach: false,
   disable: { askUser: true, subagents: true, tools: "any" },
 })
