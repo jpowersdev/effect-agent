@@ -172,11 +172,18 @@ describe("Codex", () => {
       local: { type: "stdio" as const, command: "node", args: ["s.ts"], env: { A: "1" } },
     }
     const expected = {
-      task: { url: "http://127.0.0.1:1/mcp", http_headers: { Authorization: "Bearer t" }, default_tools_approval_mode: "approve" },
-      local: { command: "node", args: ["s.ts"], env: { A: "1" }, default_tools_approval_mode: "approve" },
+      task: { url: "http://127.0.0.1:1/mcp", http_headers: { Authorization: "Bearer t" } },
+      local: { command: "node", args: ["s.ts"], env: { A: "1" } },
     }
     expect(CodexAgent.threadOverrides({ cwd: "/x", mcpServers }).config!["mcp_servers"]).toEqual(expected)
     expect(CodexAgent.threadOverrides({ cwd: "/x", mcpServers, mcp: { allow: [] } }).config!["mcp_servers"]).toEqual(expected)
+    // Approved only where a sandbox says so; without one Codex asks for no approval.
+    const approved = CodexAgent.threadOverrides({ cwd: "/x", mcpServers }, {}, { mode: "workspace-write", mcpServerTools: "approve" }).config!["mcp_servers"]
+    expect(approved).toEqual({
+      task: { ...expected.task, default_tools_approval_mode: "approve" },
+      local: { ...expected.local, default_tools_approval_mode: "approve" },
+    })
+    expect(CodexAgent.threadOverrides({ cwd: "/x", mcpServers }, {}, { mode: "read-only", mcpServerTools: "refuse" }).config!["mcp_servers"]).toEqual(expected)
   })
 
   it("plans an MCP check on the relay", () => {

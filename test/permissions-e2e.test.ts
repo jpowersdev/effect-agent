@@ -146,7 +146,7 @@ describe.skipIf(!hasCodex)("codex", () => {
   )
 
   it.live(
-    "in a sandbox, a session's own mcpServers can still be called (their tools are approved)",
+    'in a sandbox with mcpServerTools: "approve", a session\'s own mcpServers can be called',
     () =>
       Effect.gen(function* () {
         const mock = yield* MockResponses.make
@@ -160,7 +160,12 @@ describe.skipIf(!hasCodex)("codex", () => {
           mcpServers: { task_tools: { type: "http", url: task.url, headers: { Authorization: `Bearer ${task.token}` } } },
         }).pipe(
           Effect.scoped,
-          Effect.provide(CodexAgent.layer({ sandbox: "workspace-write" }).pipe(Layer.provide(CodexAppServer.layer({ args: mock.args })), Layer.provide(NodeServices.layer))),
+          Effect.provide(
+            CodexAgent.layer({ sandbox: { mode: "workspace-write", mcpServerTools: "approve" } }).pipe(
+              Layer.provide(CodexAppServer.layer({ args: mock.args })),
+              Layer.provide(NodeServices.layer),
+            ),
+          ),
         )
         expect(task.reached()).toEqual(["read_note"])
       }).pipe(Effect.scoped),
@@ -169,11 +174,28 @@ describe.skipIf(!hasCodex)("codex", () => {
 
   for (const where of ["local", "detached"] as const) {
     it.live(
+      `a sandbox with mcpServerTools: "refuse" fails open for a session with mcpServers (${where})`,
+      () =>
+        Effect.gen(function* () {
+          const w = yield* world({ sandbox: { mode: "workspace-write", mcpServerTools: "refuse" } })
+          const failed = yield* Effect.flip(
+            turn({ ...w.run, mcpServers: { task_tools: { type: "stdio", command: "true" } } }).pipe(
+              Effect.scoped,
+              Effect.provide(where === "local" ? w.local : w.detached),
+            ),
+          )
+          expect(failed.message).toContain('mcpServerTools: "refuse", so it takes no mcpServers')
+          expect([existsSync(w.outside), existsSync(w.inside)]).toEqual([false, false])
+        }).pipe(Effect.scoped),
+      timeout,
+    )
+
+    it.live(
       `workspace-write lets a command write in cwd and nowhere else (${where})`,
       () =>
         Effect.gen(function* () {
           // The test's dirs are under the temp dir, which workspace-write also lets commands write to by default.
-          const w = yield* world({ sandbox: "workspace-write", config: tmpExcluded })
+          const w = yield* world({ sandbox: { mode: "workspace-write", mcpServerTools: "refuse" }, config: tmpExcluded })
           yield* turn(w.run).pipe(Effect.scoped, Effect.provide(where === "local" ? w.local : w.detached))
           expect([existsSync(w.outside), existsSync(w.inside)]).toEqual([false, true])
         }).pipe(Effect.scoped),

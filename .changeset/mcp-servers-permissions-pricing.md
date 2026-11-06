@@ -21,7 +21,10 @@ agent.open({
 **Permissions, per provider.**
 
 - `ClaudeAgentOptions.permissionMode`: `"bypassPermissions"` (the default, as before) or `"dontAsk"`, which runs only what a permission rule allows and denies the rest; `ClaudeAgentOptions.allowedTools` takes the rules (`Read`, `Bash(git log:*)`, `mcp__task_tools__progress`).
-- `CodexAgentOptions.sandbox`: `"danger-full-access"` (the default, as before), `"workspace-write"` or `"read-only"`. Approvals stay `never`. In a sandbox Codex asks to approve every MCP call, so `mcpServers` approve their own tools (`default_tools_approval_mode = "approve"`, with `mcp.allow` as their check); a server in `config.toml` is callable in a sandbox only if its own config approves its tools.
+- `CodexAgentOptions.sandbox` is a `CodexSandbox`: `{ mode: "danger-full-access" }` (as when omitted, the default as before), or `{ mode: "workspace-write" | "read-only", mcpServerTools: "approve" | "refuse" }`. Approvals stay `never`.
+  - In a sandbox Codex asks to approve every MCP call, so a sandbox must say what happens to the tools of a session's `mcpServers`, and the types won't take one without it (or take it without a sandbox, where Codex asks for no approval). `HostSpec` decodes it with the same Schema.
+  - `"approve"` sets `default_tools_approval_mode = "approve"` on them, with `mcp.allow` still their check. `"refuse"` takes none: `open` fails for a session that passes `mcpServers`.
+  - A server in `config.toml` is callable in a sandbox only if its own config approves its tools.
 - Both are in `HostSpec`'s `claude` and `codex` options, so detached sessions take them too.
 
 **Codex prices.** **Breaking:** `CodexAgentOptions.pricing` and `HostSpec`'s `codex.pricing` are gone. Codex costs are estimated from `CodexAgent.CodexPricing`, a `Context.Reference` read when a session opens, which defaults to `CodexAgent.defaultPrices`: OpenAI's standard-tier text-token rates on `CodexAgent.defaultPricesAsOf`, with no `"*"` entry.

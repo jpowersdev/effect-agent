@@ -48,6 +48,7 @@ import type * as Watchdog from "../Watchdog.ts"
 import * as Events from "./CodexEvents.ts"
 import * as Prices from "./CodexPrices.ts"
 import * as PricingRef from "./CodexPricingRef.ts"
+import * as SandboxSchema from "./CodexSandboxSchema.ts"
 import * as Hooks from "./CodexHooks.ts"
 import * as P from "./protocol.ts"
 
@@ -67,21 +68,48 @@ export interface CodexAgentOptions {
   readonly config?: Readonly<Record<string, P.JsonValue>>
   /** Default for `RunOptions.watchdog.grace` (10 seconds when neither is set). */
   readonly stallGrace?: Duration.Input
-  /**
-   * Codex's sandbox for the commands the agent runs. `danger-full-access`
-   * (the default) has none. `workspace-write` lets commands write only in
-   * `cwd`, `/tmp` and `$TMPDIR` (more roots: `sandbox_workspace_write.writable_roots`
-   * in `config`; no temp dirs: `sandbox_workspace_write.exclude_slash_tmp` and
-   * `exclude_tmpdir_env_var`) and turns off their network unless `config`
-   * allows it; `read-only` lets them write nowhere. Approvals stay `never` either way: nobody is there to
-   * approve, so a command the sandbox stops fails, and the model is told.
-   * In a sandbox Codex also asks to approve every MCP call, so one is refused
-   * unless its server approves its tools: `RunOptions.mcpServers` do
-   * (`default_tools_approval_mode = "approve"`); a server in `config.toml`
-   * only if its own config says so.
-   */
-  readonly sandbox?: "danger-full-access" | "workspace-write" | "read-only"
+  /** Codex's sandbox for the commands the agent runs; none (`danger-full-access`) when omitted. See `CodexSandbox`. */
+  readonly sandbox?: CodexSandbox
 }
+
+/**
+ * Codex's sandbox for the commands the agent runs, for
+ * `CodexAgentOptions.sandbox`. Approvals are always `never`: nobody is there
+ * to approve, so a command the sandbox stops fails, and the model is told.
+ *
+ * - `danger-full-access`: no sandbox, as when `sandbox` is omitted.
+ * - `workspace-write`: commands write only in `cwd`, `/tmp` and `$TMPDIR`
+ *   (more roots: `sandbox_workspace_write.writable_roots` in `config`; no temp
+ *   dirs: `sandbox_workspace_write.exclude_slash_tmp` and
+ *   `exclude_tmpdir_env_var`), with no network unless `config` allows it.
+ * - `read-only`: commands write nowhere.
+ *
+ * In a sandbox Codex asks to approve every MCP call, so a sandbox must say
+ * what happens to the tools of a session's `mcpServers`: `approve` approves
+ * them (`default_tools_approval_mode = "approve"`; `mcp.allow` is still their
+ * check), and `refuse` takes none: `open` fails for a session that passes
+ * `mcpServers`. Either way a server in `config.toml` is callable in a sandbox
+ * only if its own config approves its tools. Without a sandbox Codex asks for
+ * no approval, so the field isn't there to set.
+ *
+ * @example
+ * ```ts
+ * import { CodexAgent } from "@jpowersdev/effect-agent/codex"
+ *
+ * const options: CodexAgent.CodexAgentOptions = {
+ *   sandbox: { mode: "workspace-write", mcpServerTools: "approve" }
+ * }
+ * ```
+ *
+ * @since 0.8.0
+ * @category models
+ */
+export const CodexSandbox = SandboxSchema.CodexSandbox
+/**
+ * @since 0.8.0
+ * @category models
+ */
+export type CodexSandbox = typeof CodexSandbox.Type
 
 /**
  * The prices shipped with this release: OpenAI's pricing page on
@@ -225,11 +253,10 @@ export const refusedTools = (options: RunOptions): ReadonlyArray<string> => [
 ]
 
 /**
- * `RunSettings.mcpServers` as Codex's `mcp_servers` config. Their tools are
- * approved: in a sandbox Codex asks to approve every MCP call, and with
- * approvals `never` an unapproved one is refused. `mcp.allow` is their check.
+ * `RunSettings.mcpServers` as Codex's `mcp_servers` config, their tools
+ * approved where the sandbox says so (`CodexSandbox`).
  */
-const codexServers = (servers: NonNullable<RunOptions["mcpServers"]>): Record<string, P.JsonValue> =>
+const codexServers = (servers: NonNullable<RunOptions["mcpServers"]>, approve: boolean): Record<string, P.JsonValue> =>
   Object.fromEntries(
     Object.entries(servers).map(([name, s]): [string, P.JsonValue] => [
       name,
@@ -237,7 +264,7 @@ const codexServers = (servers: NonNullable<RunOptions["mcpServers"]>): Record<st
         ...(s.type === "http"
           ? { url: s.url, ...(s.headers !== undefined && { http_headers: { ...s.headers } }) }
           : { command: s.command, ...(s.args !== undefined && { args: [...s.args] }), ...(s.env !== undefined && { env: { ...s.env } }) }),
-        default_tools_approval_mode: "approve",
+        ...(approve && { default_tools_approval_mode: "approve" }),
       },
     ]),
   )
@@ -250,8 +277,9 @@ const codexServers = (servers: NonNullable<RunOptions["mcpServers"]>): Record<st
 export const threadOverrides = (
   options: RunOptions,
   extraConfig: Readonly<Record<string, P.JsonValue>> = {},
-  sandbox: NonNullable<CodexAgentOptions["sandbox"]> = "danger-full-access",
+  sandbox: CodexSandbox = { mode: "danger-full-access" },
 ): P.ThreadOverrides => {
+  const approve = sandbox.mode !== "danger-full-access" && sandbox.mcpServerTools === "approve"
   const tools: Record<string, P.JsonValue> = {}
   for (const name of options.disable?.tools ?? []) Object.assign(tools, toolSwitches[name])
   const config: Record<string, P.JsonValue> = {
@@ -260,7 +288,7 @@ export const threadOverrides = (
     // `mcp` lets them load (a hook checks their calls; see `refusedTools`). 0.162.1 ignores
     // `mcp_servers` here for the servers in config.toml, which load regardless.
     // The session's own servers join them: the only ones (but those) without `mcp`, beside the configured ones with it.
-    ...((options.mcp === undefined || options.mcpServers !== undefined) && { mcp_servers: codexServers(options.mcpServers ?? {}) }),
+    ...((options.mcp === undefined || options.mcpServers !== undefined) && { mcp_servers: codexServers(options.mcpServers ?? {}, approve) }),
     "features.apps": false,
     ...(options.effort !== undefined ? { model_reasoning_effort: codexEffort(options.effort) } : {}),
     // `request_user_input` is already refused in Default mode; this keeps it off if the default changes.
@@ -276,7 +304,7 @@ export const threadOverrides = (
     cwd: options.cwd,
     ...(options.model !== undefined ? { model: options.model } : {}),
     approvalPolicy: "never",
-    sandbox,
+    sandbox: sandbox.mode,
     config,
     // Appends to Codex's instructions; `baseInstructions` would replace them.
     ...(instructions.length > 0 ? { developerInstructions: instructions.join("\n\n") } : {}),
@@ -863,6 +891,10 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
 ) {
   const renamed = Mcp.serverNameProblem(options.mcpServers, provider)
   if (renamed !== null) return yield* agentError(renamed)
+  const sandbox = agentOptions.sandbox
+  if (sandbox !== undefined && sandbox.mode !== "danger-full-access" && sandbox.mcpServerTools === "refuse" && Object.keys(options.mcpServers ?? {}).length > 0) {
+    return yield* agentError(`mcpServers: this layer's ${sandbox.mode} sandbox has mcpServerTools: "refuse", so it takes no mcpServers (their tools couldn't be called)`)
+  }
   const overrides = threadOverrides(options, agentOptions.config, agentOptions.sandbox)
   const pricing = yield* CodexPricing
   const capUsd = options.spendCapUsd

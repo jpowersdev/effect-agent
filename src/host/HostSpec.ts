@@ -13,6 +13,7 @@ import { chmodSync, mkdirSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { RunSettings } from "../Agent.ts"
+import { CodexSandbox } from "../codex/CodexSandboxSchema.ts"
 import { AgentError } from "../AgentError.ts"
 import { SessionId, SessionNotFound } from "../AgentSession.ts"
 import { DurationInput, EnvOverrides } from "../internal/schema.ts"
@@ -81,7 +82,7 @@ const ModelPrice = Schema.Struct({
 export const CodexOptionsSpec = Schema.Struct({
   config: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   stallGrace: Schema.optionalKey(DurationSpec),
-  sandbox: Schema.optionalKey(Schema.Literals(["danger-full-access", "workspace-write", "read-only"])),
+  sandbox: Schema.optionalKey(CodexSandbox),
   codexPath: Schema.optionalKey(Schema.String),
   args: Schema.optionalKey(Schema.Array(Schema.String)),
   forceKillAfter: Schema.optionalKey(DurationSpec),
