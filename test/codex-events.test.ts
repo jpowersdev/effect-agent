@@ -224,6 +224,20 @@ describe("helpers", () => {
     )
   })
 
+  it("passes the layer's sandbox mode, approvals still never", () => {
+    expect(CodexAgent.threadOverrides({ cwd: "/w" }, {}, { mode: "workspace-write", mcpServerTools: "approve" })).toMatchObject({
+      approvalPolicy: "never",
+      sandbox: "workspace-write",
+    })
+  })
+
+  it("a sandbox must approve mcpServers' tools, and no sandbox can't", () => {
+    const decode = Schema.decodeUnknownExit(CodexAgent.CodexSandbox)
+    expect(decode({ mode: "read-only" })._tag).toBe("Failure")
+    expect(decode({ mode: "danger-full-access", mcpServerTools: "approve" })).toMatchObject({ _tag: "Success", value: { mode: "danger-full-access" } })
+    expect(decode({ mode: "read-only", mcpServerTools: "approve" })._tag).toBe("Success")
+  })
+
   it("builds thread overrides", () => {
     const overrides = CodexAgent.threadOverrides({
       cwd: "/w",

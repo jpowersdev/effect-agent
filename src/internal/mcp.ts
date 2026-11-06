@@ -4,9 +4,11 @@
  *
  * Globs are matched with `effect/Glob` against `server/tool`, so a `*` stays
  * within the server or the tool. Both providers name an MCP tool
- * `mcp__<server>__<tool>`, with every character outside `[A-Za-z0-9_-]`
- * replaced by `_` (a claude.ai connector's server is `claude_ai_<Name>`, as
- * `claude_ai_Slack` or `claude_ai_Google_Calendar`). The server ends at the
+ * `mcp__<server>__<tool>` with the names rewritten: Claude replaces every
+ * character outside `[A-Za-z0-9_-]` by `_`, Codex every character outside
+ * `[A-Za-z0-9_]` (and adds a hash to servers whose rewritten names collide).
+ * A claude.ai connector's server is `claude_ai_<Name>`, as `claude_ai_Slack`
+ * or `claude_ai_Google_Calendar`. The server ends at the
  * first `__`, as both providers read it. But a server may itself contain `__`,
  * so a name with another `__` after that one could belong to another server:
  * every reading counts. A call is refused if any reading matches a deny glob,
@@ -37,6 +39,19 @@ export const policy = (mcp: NonNullable<RunSettings["mcp"]>): Policy => ({
   allow: mcp.allow.map((pattern) => Glob.make(pattern, { dot: true })),
   deny: (mcp.deny ?? []).map((pattern) => Glob.make(pattern, { dot: true })),
 })
+
+/**
+ * Why `open` refuses `mcpServers`, or null.
+ *
+ * @internal
+ */
+export const serverNameProblem = (mcpServers: RunSettings["mcpServers"], provider: "claude" | "codex"): string | null => {
+  // The characters each provider keeps in a server name; any other becomes `_`.
+  const [keeps, kept] = provider === "claude" ? [/^[A-Za-z0-9_-]+$/, "[A-Za-z0-9_-]"] : [/^[A-Za-z0-9_]+$/, "[A-Za-z0-9_]"]
+  const name = Object.keys(mcpServers ?? {}).find((n) => !keeps.test(n))
+  if (name === undefined) return null
+  return `mcpServers: ${provider === "claude" ? "Claude" : "Codex"} would rename the server ${JSON.stringify(name)}, so mcp globs couldn't match it; use only ${kept}`
+}
 
 /**
  * Whether a provider-native tool name is an MCP tool's.

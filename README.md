@@ -56,7 +56,7 @@ Each provider is two layers: a transport (`ClaudeSdk`, `CodexAppServer`) and an 
 | Transport | `@anthropic-ai/claude-agent-sdk` with its bundled Claude Code | `codex app-server` JSON-RPC, one process per session (via `ChildProcessSpawner`) |
 | Steer into the running turn | ✅ lands at the next tool boundary | ✅ `turn/steer` |
 | Resume, history | ✅ | ✅ |
-| Cost | ✅ reported | 🟡 estimated from a `pricing` table you supply |
+| Cost | ✅ reported | 🟡 estimated: tokens × `CodexAgent.CodexPricing` (this release's prices unless you provide others) |
 | Spend cap | ✅ native (`maxBudgetUsd`) | 🟡 estimated, enforced by interrupting |
 | Usage-limit reset times | ✅ | ✅ |
 | Hooks | ✅ also detached (see Reattach) | ✅ also detached, through Codex's command hooks (see below) |
@@ -64,6 +64,8 @@ Each provider is two layers: a transport (`ClaudeSdk`, `CodexAppServer`) and an 
 | `disable.subagents` | ✅ | ✅ refused when called (the model may still see the tools) |
 | `disable.tools` | ✅ any tool | ✅ any tool: removed where Codex has a switch, otherwise refused when called |
 | `mcp` (the machine's MCP servers, by allow/deny globs) | ✅ servers and claude.ai connectors | ✅ servers in Codex's config, checked by a hook (see below) |
+| `mcpServers` (a session's own MCP servers) | ✅ HTTP and stdio | ✅ HTTP and stdio, as thread config; names keep to `[A-Za-z0-9_]` |
+| Permissions | `ClaudeAgentOptions.permissionMode`: `bypassPermissions` (default) or `dontAsk` with `allowedTools` | `CodexAgentOptions.sandbox`: none by default, or `{ mode: "workspace-write" \| "read-only", mcpServerTools: "approve" }`; approvals always `never` (see `CodexSandbox`) |
 | Account `status` | ✅ via the SDK's experimental usage API | ✅ |
 
 ✅ supported · 🟡 partly or estimated · ❌ not supported. `agent.capabilities` reports the same at runtime, plus the tool's version.
@@ -72,6 +74,8 @@ Where Codex differs:
 
 - **Hooks need one more process.** The first `open` with hooks or refused tools, per layer, starts an extra app-server to read the hooks' hashes, and each hook call starts a short-lived process of your runtime (node or bun). `disable.askUser`, `disable.subagents` and `mcp` always refuse tools, so they count. A refusal runs no process unless the tool is called. `open` fails if Codex won't run the hooks, rather than running without them. A detached session pays this even if it never uses hooks: each host has its own layer, so every `open` starts the extra app-server, and all three hooks are registered, so every tool call starts two of those processes.
 - **Refused isn't removed.** The model still sees a tool that is only refused, and gets the refusal as its result. That includes subagent tools on current models, whose catalog entry selects them regardless of Codex's switches, and `request_user_input_async`, which the gpt-6 family's catalog entries add and no switch removes. The session's instructions also tell the model not to use either.
+- **Costs are estimates.** Codex reports tokens, not cost, so a Codex `Cost` is always `source: "estimated"`: tokens times the prices in `CodexAgent.CodexPricing`, a `Context.Reference` read when a session opens (a detached session's client sends it to the host). It defaults to `CodexAgent.defaultPrices`, OpenAI's standard-tier text-token rates on `CodexAgent.defaultPricesAsOf`, refreshed by `node scripts/codex-pricing.ts` and the `Codex prices` workflow. Long-context, cache-write, batch and fast-tier rates aren't in it. A model the table doesn't have is unpriced: no cost, and `spendCapUsd` is refused. On a plan that doesn't bill per token (a ChatGPT login) the estimate is a budgeting figure, not a bill. Provide your own with `Effect.provideService(CodexAgent.CodexPricing, table)`, or `Layer.succeed(CodexAgent.CodexPricing, table)` beside the agent layer.
+- **Names are rewritten more.** Codex makes every character outside `[A-Za-z0-9_]` in a server or tool name `_`, `-` included, and adds a hash to servers whose rewritten names collide; `mcp` globs must use that form (`my_server/list_files`). `open` refuses an `mcpServers` name Codex would rewrite.
 - **Tool names.** Hooks see Codex's names (`Bash`, `apply_patch`, `collaborationspawn_agent`); `disable.tools` takes those or the names in `toolSwitches`.
 - **Gaps in Codex's hooks.** It runs none for hosted tools such as web search, or for `write_stdin`, and none after a failed `apply_patch`, so `afterTool` doesn't see those. `isError` is only set for shell commands.
 - **MCP servers in `config.toml` load anyway.** Codex 0.162.1 ignores every per-session way to turn off an MCP server configured in `config.toml` (`mcp_servers` in thread config or `-c`, even `enabled = false` there), so a Codex session without `mcp` can still call them. Only `enabled = false` in the file itself stops one. ChatGPT apps are turned off (`features.apps`). With `mcp`, every call to an MCP tool is checked, so `mcp: { allow: [] }` is the way to make a Codex session refuse them all; it needs hooks, like `disable.askUser`.
@@ -94,7 +98,7 @@ The library imports no platform package; `effect` is a peer dependency. Where Ef
 - `subscribe` / `events`: the normalized event stream; every subscription starts with `SessionStarted`.
 - `sessionId`, `location` (the transcript file), `pid`.
 
-`RunOptions` covers `cwd`, `env` (`undefined` removes a variable; nesting markers such as `CLAUDECODE` are always removed, and Codex sessions also drop Claude Code's `CLAUDE_CODE_OAUTH_TOKEN`, since Codex hands its environment to every command it runs), `model`, `effort`, `appendSystemPrompt` (added to the default, never replacing it), `disable`, `mcp`, `spendCapUsd`, `resume`, `watchdog` and `hooks`. Permissions are always off. Without `mcp`, a session loads no MCP servers: none of the user's, no claude.ai connectors, no ChatGPT apps (but see Codex's `config.toml` above). `RunSettings` is `RunOptions` without `hooks` as a Schema, for storing options or sending them to another process (durations encode as millis); `settingsOf` drops the hooks.
+`RunOptions` covers `cwd`, `env` (`undefined` removes a variable; nesting markers such as `CLAUDECODE` are always removed, and Codex sessions also drop Claude Code's `CLAUDE_CODE_OAUTH_TOKEN`, since Codex hands its environment to every command it runs), `model`, `effort`, `appendSystemPrompt` (added to the default, never replacing it), `disable`, `mcp`, `mcpServers`, `spendCapUsd`, `resume`, `watchdog` and `hooks`. Permissions are off unless the provider layer says otherwise (`ClaudeAgentOptions.permissionMode`, `CodexAgentOptions.sandbox`). Without `mcp`, a session loads no MCP servers but its own `mcpServers`: none of the user's, no claude.ai connectors, no ChatGPT apps (but see Codex's `config.toml` above). `RunSettings` is `RunOptions` without `hooks` as a Schema, for storing options or sending them to another process (durations encode as millis); `settingsOf` drops the hooks.
 
 ### MCP servers and connectors
 
@@ -110,7 +114,7 @@ agent.open({
 })
 ```
 
-- **Names are `server/tool`**: the provider's `mcp__<server>__<tool>`, split at the first `__`. Both providers have already replaced every character outside `[A-Za-z0-9_-]` with `_`, so a claude.ai connector's server is `claude_ai_<Name>` (`claude_ai_Slack`, `claude_ai_Google_Calendar`), and a server from your config keeps its name (`fixture`, `my-server`). Matching is case-sensitive.
+- **Names are `server/tool`**: the provider's `mcp__<server>__<tool>`, split at the first `__`. Claude has already replaced every character outside `[A-Za-z0-9_-]` with `_`, so a claude.ai connector's server is `claude_ai_<Name>` (`claude_ai_Slack`, `claude_ai_Google_Calendar`), and a server from your config keeps its name (`fixture`, `my-server`). Codex replaces `-` too (`my_server`; see "Where Codex differs"). Matching is case-sensitive.
 - **Globs are `effect/Glob`'s**: `*` and `?` stay within the server or the tool, `{a,b}` is either, `**` is anything. `*` alone matches nothing, since every name has a `/`.
 - **A name that could be another server's** (one with another `__` after the first, because a server or tool name contains `__`) must pass under every reading: `mcp__a__b__c` is checked as both `a/b__c` and `a__b/c`.
 - **`allow: []`** loads the servers, but nothing can be called.
@@ -119,6 +123,19 @@ agent.open({
 - **Built-in tools are unaffected**; `disable.tools` governs those.
 - **Without `mcp`, nothing changes**: no MCP servers and no claude.ai connectors load, as before.
 - **On Codex** the check is a hook, so `mcp` costs what `disable.askUser` does, and `open` fails where hooks can't run (a detached session too: its host doesn't retry without them). ChatGPT apps stay off: `mcp` covers the servers in Codex's config.
+
+#### A session's own servers
+
+`mcpServers` adds MCP servers for one session, by name, as a task's own server with a token for that task. HTTP servers take `headers`; stdio servers a `command`, `args` and `env`.
+
+```ts
+agent.open({
+  cwd,
+  mcpServers: { task_tools: { type: "http", url, headers: { Authorization: `Bearer ${taskToken}` } } }
+})
+```
+
+Without `mcp` they are the only servers, and every tool on them can be called. With `mcp` they load beside the machine's, and `mcp.allow` checks their calls too. A name must be one the provider keeps as written, so a glob can match it: `open` fails for a character outside `[A-Za-z0-9_]` on Codex, or `[A-Za-z0-9_-]` on Claude.
 
 `test/mcp-e2e.test.ts` checks all of this on the real CLIs, against a local MCP server with harmless tools in a throwaway config.
 

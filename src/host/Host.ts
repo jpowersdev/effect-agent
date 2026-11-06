@@ -42,6 +42,7 @@ import * as Session from "../internal/session.ts"
 import * as TurnTracker from "../internal/turnTracker.ts"
 import * as ProcessTree from "../ProcessTree.ts"
 import * as EventFile from "./EventFile.ts"
+import { CodexPricing } from "../codex/CodexPricingRef.ts"
 import * as HookBridge from "./HookBridge.ts"
 
 /**
@@ -398,7 +399,10 @@ export const run = (spec: HostSpec, io: HostIO, shutdown: Deferred.Deferred<Reas
       pruneEvents(spec.dir, spec.retainEvents !== undefined ? toDuration(spec.retainEvents) : defaults.retainEvents)
       const agentError = Session.agentError(provider)
 
-      const agent = Context.get(yield* Layer.build(providerLayer(spec)), Agent)
+      const built = Context.get(yield* Layer.build(providerLayer(spec)), Agent)
+      const pricing = spec.codexPricing
+      const agent: typeof built =
+        pricing === undefined ? built : { ...built, open: (run) => built.open(run).pipe(Effect.provideService(CodexPricing, pricing)) }
 
       // ---- hooks: forwarded to an attached client ----
       /** Bound once connections are tracked (below). */

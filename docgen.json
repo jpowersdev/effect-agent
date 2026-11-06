@@ -6,6 +6,9 @@
   "outDir": "site/.docgen",
   "exclude": [
     "src/codex/protocol.ts",
+    "src/codex/CodexPrices.ts",
+    "src/codex/CodexPricingRef.ts",
+    "src/codex/CodexSandboxSchema.ts",
     "src/codex/CodexEvents.ts",
     "src/host/EventFile.ts",
     "src/host/HookBridge.ts",

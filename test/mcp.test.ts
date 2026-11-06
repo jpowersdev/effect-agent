@@ -142,6 +142,17 @@ describe("Claude", () => {
   })
 })
 
+describe("serverNameProblem", () => {
+  it("refuses a name the provider would rename, and only then", () => {
+    const http = { type: "http" as const, url: "http://x" }
+    expect(Mcp.serverNameProblem(undefined, "codex")).toBeNull()
+    expect(Mcp.serverNameProblem({ studio_run: http, Task1: http }, "codex")).toBeNull()
+    expect(Mcp.serverNameProblem({ "studio-run": http }, "codex")).toContain('Codex would rename the server "studio-run"')
+    expect(Mcp.serverNameProblem({ "studio-run": http }, "claude")).toBeNull()
+    expect(Mcp.serverNameProblem({ "studio.run": http }, "claude")).toContain('Claude would rename the server "studio.run"')
+  })
+})
+
 describe("Codex", () => {
   it("without mcp, loads no MCP servers and no ChatGPT apps", () => {
     expect(CodexAgent.threadOverrides({ cwd: "/x" }).config).toMatchObject({ mcp_servers: {}, "features.apps": false })
@@ -153,6 +164,25 @@ describe("Codex", () => {
     expect(config).not.toHaveProperty("mcp_servers")
     expect(config["features.apps"]).toBe(false)
     expect(CodexAgent.refusedTools({ cwd: "/x", mcp: { allow: [] } })).toEqual(CodexAgent.mcpResourceTools)
+  })
+
+  it("mcpServers become the thread's mcp_servers, with or without mcp", () => {
+    const mcpServers = {
+      task: { type: "http" as const, url: "http://127.0.0.1:1/mcp", headers: { Authorization: "Bearer t" } },
+      local: { type: "stdio" as const, command: "node", args: ["s.ts"], env: { A: "1" } },
+    }
+    const expected = {
+      task: { url: "http://127.0.0.1:1/mcp", http_headers: { Authorization: "Bearer t" } },
+      local: { command: "node", args: ["s.ts"], env: { A: "1" } },
+    }
+    expect(CodexAgent.threadOverrides({ cwd: "/x", mcpServers }).config!["mcp_servers"]).toEqual(expected)
+    expect(CodexAgent.threadOverrides({ cwd: "/x", mcpServers, mcp: { allow: [] } }).config!["mcp_servers"]).toEqual(expected)
+    // Approved only where a sandbox says so; without one Codex asks for no approval.
+    const approved = CodexAgent.threadOverrides({ cwd: "/x", mcpServers }, {}, { mode: "workspace-write", mcpServerTools: "approve" }).config!["mcp_servers"]
+    expect(approved).toEqual({
+      task: { ...expected.task, default_tools_approval_mode: "approve" },
+      local: { ...expected.local, default_tools_approval_mode: "approve" },
+    })
   })
 
   it("plans an MCP check on the relay", () => {

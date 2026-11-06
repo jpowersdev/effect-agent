@@ -1,0 +1,63 @@
+name: Codex prices
+
+# Refreshes src/codex/CodexPrices.ts (what CodexAgent.CodexPricing defaults to)
+# from OpenAI's pricing page. When a price changed, it opens (or updates) a PR
+# with a patch changeset, so the new table ships in the next release. A run
+# that finds nothing new does nothing; one that can't read the page fails, so
+# a redesign of the page shows up here, not as wrong prices.
+
+on:
+  schedule:
+    - cron: "17 9 * * 1" # Mondays, 09:17 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  refresh:
+    name: Refresh prices
+    if: github.repository_owner == 'jpowersdev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # the prices branch
+      pull-requests: write # its PR
+    env:
+      BRANCH: chore/codex-prices
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - run: node scripts/codex-pricing.ts
+      - name: Open or update the PR
+        env:
+          # A token of yours, so CI runs on the PR; pushes with the default token don't trigger it.
+          GH_TOKEN: ${{ secrets.CHANGESET_GITHUB_TOKEN || github.token }}
+        run: |
+          if git diff --quiet -- src/codex/CodexPrices.ts; then
+            echo "No price changed."
+            exit 0
+          fi
+          as_of=$(sed -n 's/^export const asOf = "\(.*\)"$/\1/p' src/codex/CodexPrices.ts)
+          cat > .changeset/codex-prices.md <<EOF
+          ---
+          "@jpowersdev/effect-agent": patch
+          ---
+
+          Update \`CodexAgent.defaultPrices\` to OpenAI's prices as of ${as_of}.
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add src/codex/CodexPrices.ts .changeset/codex-prices.md
+          git commit -m "Update Codex prices (${as_of})"
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$BRANCH"
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --head "$BRANCH" --base main --title "Update Codex prices (${as_of})" \
+              --body "From $(sed -n 's/^export const source = "\(.*\)"$/\1/p' src/codex/CodexPrices.ts), by \`node scripts/codex-pricing.ts\`. Check the diff against the page before merging."
+          fi

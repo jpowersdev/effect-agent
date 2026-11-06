@@ -81,7 +81,9 @@ const codexFixtures: Record<Scenario, string> = {
 }
 
 /** Codex prices that make the spend-cap recording hit its cap. */
-const codexPricing = (scenario: Scenario) => (scenario === "spendCap" ? { "*": { input: 1000, output: 1000 } } : undefined)
+/** For `spendCap`, a price that makes any turn cross the cap, provided as `CodexPricing` beside the layer. */
+const withPricing = <A, E, R>(scenario: Scenario, layer: Layer.Layer<A, E, R>) =>
+  scenario === "spendCap" ? Layer.merge(layer, Layer.succeed(CodexAgent.CodexPricing, { "*": { input: 1000, output: 1000 } })) : layer
 
 const claude: Provider = {
   name: "claude",
@@ -111,9 +113,9 @@ const codex: Provider = {
   stored: { sessionId: "01a1896b-e054-7371-b868-b778fad6ea05", cwd: "/tmp/effect-agent-live/codex/work" },
   layer: (scenario) => {
     const name = codexFixtures[scenario]
-    const pricing = codexPricing(scenario)
-    return CodexAgent.layer(pricing ? { pricing } : {}).pipe(
-      Layer.provide(CodexReplay.layer(readFileSync(fixture("codex", name), "utf8"))),
+    return withPricing(
+      scenario,
+      CodexAgent.layer().pipe(Layer.provide(CodexReplay.layer(readFileSync(fixture("codex", name), "utf8")))),
     )
   },
 }
@@ -134,14 +136,14 @@ const detached = (local: Provider): Provider => ({
   timeout: 30_000,
   layer: (scenario) => {
     const fixtures = local.kind === "claude" ? claudeFixtures : codexFixtures
-    const pricing = local.kind === "codex" ? codexPricing(scenario) : undefined
-    return DetachedAgent.layer({ host,
+    const layer = DetachedAgent.layer({ host,
       provider: local.kind,
       replay: fixture(local.kind, fixtures[scenario]),
       dir: hostDir,
       ...(local.kind === "claude" && scenario === "resumeMissing" && { replayKnownSessions: "all" as const }),
-      ...(pricing !== undefined && { codex: { pricing } }),
     }).pipe(Layer.provide(NodeServices.layer))
+    // The client reads CodexPricing when it opens a session and sends it to the host.
+    return local.kind === "codex" ? withPricing(scenario, layer) : layer
   },
 })
 

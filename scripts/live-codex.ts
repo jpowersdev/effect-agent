@@ -312,14 +312,14 @@ const spendCap: Scenario = Effect.gen(function* () {
   saveFixture("spend-cap")
   const f = failure as { spentUsd: number | null; capUsd: number }
   return `SpendCapReached estimated: spent $${f.spentUsd?.toFixed(2)} >= cap $${f.capUsd}`
-}).pipe(Effect.provide(agentLayer("spend-cap", { pricing: { "*": { input: 1000, cachedInput: 1000, output: 1000 } } })))
+}).pipe(Effect.provide(Layer.merge(agentLayer("spend-cap"), Layer.succeed(CodexAgent.CodexPricing, { "*": { input: 1000, cachedInput: 1000, output: 1000 } }))))
 
 const noPrice: Scenario = Effect.gen(function* () {
   const agent = yield* Agent
   const error = yield* agent.open({ ...base, spendCapUsd: 1 }).pipe(Effect.flip)
   check(error._tag === "AgentError", `got ${error._tag}`)
   return `open refused: ${error.message}`
-}).pipe(Effect.provide(agentLayer("no-price", { pricing: { "some-other-model": { input: 1, output: 1 } } })))
+}).pipe(Effect.provide(Layer.merge(agentLayer("no-price"), Layer.succeed(CodexAgent.CodexPricing, { "some-other-model": { input: 1, output: 1 } }))))
 
 /** SIGTERM app-server from outside mid-turn: the turn ends ProcessKilled and its command is gone. */
 const killed: Scenario = Effect.gen(function* () {

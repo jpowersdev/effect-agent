@@ -6,12 +6,15 @@
 import { readFileSync } from "node:fs"
 import { describe, expect, it } from "@effect/vitest"
 import { DateTime, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, Schema, Stream } from "effect"
-import { AccountStatus, Agent, AgentEvent, type AgentSession, type RunOptions, SessionId } from "../src/index.ts"
+import { AccountStatus, Agent, AgentEvent, type AgentSession, type Pricing, type RunOptions, SessionId } from "../src/index.ts"
 import { CodexAgent, CodexReplay } from "../src/codex/index.ts"
 
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/codex/${name}.jsonl`, import.meta.url), "utf8")
 const agent = (name: string, options: CodexAgent.CodexAgentOptions = {}) =>
   CodexAgent.layer(options).pipe(Layer.provide(CodexReplay.layer(fixture(name))))
+
+/** `agent`, with `CodexPricing` provided to the sessions it opens. */
+const priced = (name: string, pricing: Pricing.PriceTable) => Layer.merge(agent(name), Layer.succeed(CodexAgent.CodexPricing, pricing))
 
 const base: RunOptions = { cwd: "/tmp/effect-agent-live/codex/work", effort: "low" }
 
@@ -47,7 +50,7 @@ describe("CodexAgent over replays", () => {
     Effect.gen(function* () {
       const a = yield* Agent
       const caps = yield* a.capabilities
-      expect(caps).toMatchObject({ provider: "codex", version: "0.162.1", steer: true, queue: true, resume: true, cost: "none", spendCap: "none", resetTimes: true, hooks: true, refuseTool: true, reattach: false, disable: { askUser: true, subagents: true, tools: "any" } })
+      expect(caps).toMatchObject({ provider: "codex", version: "0.162.1", steer: true, queue: true, resume: true, cost: "estimated", spendCap: "estimated", resetTimes: true, hooks: true, refuseTool: true, reattach: false, disable: { askUser: true, subagents: true, tools: "any" } })
       const session = yield* a.open(base)
       expect(Option.getOrNull(session.location)).toMatch(/sessions\/.*rollout-.*\.jsonl$/)
       const { events, fiber } = yield* collect(session)
@@ -62,7 +65,7 @@ describe("CodexAgent over replays", () => {
       const landed = events.find(is("MessageLanded"))!
       const ended = events.find(is("TurnEnded"))!
       expect(landed.turnId).toBe(result.turnId)
-      expect(ended).toMatchObject({ turnId: result.turnId, cost: null, outcome: { _tag: "Succeeded" } })
+      expect(ended).toMatchObject({ turnId: result.turnId, cost: { source: "estimated" }, outcome: { _tag: "Succeeded" } })
       expect(ended.usage!.inputTokens).toBeGreaterThan(0)
       expect(events.some(is("LimitsUpdated"))).toBe(true)
       // every event keeps its frame
@@ -176,14 +179,14 @@ describe("CodexAgent over replays", () => {
       expect(ended.outcome).toBe(failure)
       // over the cap: no more turns
       expect(yield* session.turn("again").pipe(Effect.flip)).toMatchObject({ _tag: "SpendCapReached" })
-    }).pipe(Effect.provide(agent("spend-cap", { pricing: { "*": { input: 1000, output: 1000 } } }))),
+    }).pipe(Effect.provide(priced("spend-cap", { "*": { input: 1000, output: 1000 } }))),
   )
 
   it.live("spend cap without a price for the model refuses to open", () =>
     Effect.gen(function* () {
       const error = yield* (yield* Agent).open({ ...base, spendCapUsd: 1 }).pipe(Effect.flip)
       expect(error).toMatchObject({ _tag: "AgentError", message: expect.stringMatching(/no price/) })
-    }).pipe(Effect.provide(agent("simple", { pricing: { "other-model": { input: 1, output: 1 } } }))),
+    }).pipe(Effect.provide(priced("simple", { "other-model": { input: 1, output: 1 } }))),
   )
 
   it.live("usage limit reads the reset time from account/rateLimits/read", () =>

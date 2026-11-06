@@ -4,14 +4,15 @@
  *
  * ```ts skip-type-checking
  * import { CodexAgent, CodexAppServer } from "@jpowersdev/effect-agent/codex"
- * CodexAgent.layer({ pricing }).pipe(
+ * CodexAgent.layer().pipe(
  *   Layer.provide(CodexAppServer.layer()),
  *   Layer.provide(NodeServices.layer),
  * )
  * ```
  *
- * Every thread runs with approvals and the sandbox off
- * (`approvalPolicy: "never"`, `sandbox: "danger-full-access"`), without the
+ * Every thread runs with approvals off (`approvalPolicy: "never"`) and, unless
+ * `CodexAgentOptions.sandbox` says otherwise, the sandbox off
+ * (`sandbox: "danger-full-access"`), without the
  * built-in `codex_apps`, and asks for no configured MCP servers unless
  * `RunOptions.mcp` is set. Codex 0.162.1 ignores that request for the servers
  * in `config.toml` (and any per-session `mcp_servers` setting), so only `mcp`
@@ -24,7 +25,7 @@
  *
  * @since 0.1.0
  */
-import { Cause, Clock, Deferred, Duration, Effect, Exit, Layer, Option, Queue, Scope, Stream } from "effect"
+import { Cause, Clock, type Context, Deferred, Duration, Effect, Exit, Layer, Option, Queue, Scope, Stream } from "effect"
 import { type AccountStatus, Agent, type Capabilities, type Effort, type RunOptions } from "../Agent.ts"
 import { AgentError } from "../AgentError.ts"
 import type { AgentEvent } from "../AgentEvent.ts"
@@ -45,6 +46,9 @@ import * as Session from "../internal/session.ts"
 import * as Pricing from "../Pricing.ts"
 import type * as Watchdog from "../Watchdog.ts"
 import * as Events from "./CodexEvents.ts"
+import * as Prices from "./CodexPrices.ts"
+import * as PricingRef from "./CodexPricingRef.ts"
+import * as SandboxSchema from "./CodexSandboxSchema.ts"
 import * as Hooks from "./CodexHooks.ts"
 import * as P from "./protocol.ts"
 
@@ -57,8 +61,6 @@ const provider = "codex"
  * @category models
  */
 export interface CodexAgentOptions {
-  /** Token prices for estimated cost and `spendCapUsd`. Without them cost is unknown and spend caps are refused. */
-  readonly pricing?: Pricing.PriceTable
   /**
    * Extra per-thread config overrides (dotted config.toml keys). effect-agent's own settings win on conflict.
    * `open` fails if a session needs hooks and this would stop them (`features.hooks = false`, or any `hooks` key).
@@ -66,7 +68,94 @@ export interface CodexAgentOptions {
   readonly config?: Readonly<Record<string, P.JsonValue>>
   /** Default for `RunOptions.watchdog.grace` (10 seconds when neither is set). */
   readonly stallGrace?: Duration.Input
+  /** Codex's sandbox for the commands the agent runs; none (`danger-full-access`) when omitted. See `CodexSandbox`. */
+  readonly sandbox?: CodexSandbox
 }
+
+/**
+ * Codex's sandbox for the commands the agent runs, for
+ * `CodexAgentOptions.sandbox`. Approvals are always `never`: nobody is there
+ * to approve, so a command the sandbox stops fails, and the model is told.
+ *
+ * - `danger-full-access`: no sandbox, as when `sandbox` is omitted.
+ * - `workspace-write`: commands write only in `cwd`, `/tmp` and `$TMPDIR`
+ *   (more roots: `sandbox_workspace_write.writable_roots` in `config`; no temp
+ *   dirs: `sandbox_workspace_write.exclude_slash_tmp` and
+ *   `exclude_tmpdir_env_var`), with no network unless `config` allows it.
+ * - `read-only`: commands write nowhere.
+ *
+ * In a sandbox Codex asks to approve every MCP call, and with approvals
+ * `never` an unapproved one is refused. So a sandbox approves the tools of a
+ * session's `mcpServers` (`default_tools_approval_mode = "approve"`;
+ * `mcp.allow` is still their check), and says so: `mcpServerTools: "approve"`
+ * is required with a sandbox, and has no place without one, where Codex asks
+ * for no approval. A server in `config.toml` is callable in a sandbox only if
+ * its own config approves its tools.
+ *
+ * @example
+ * ```ts
+ * import { CodexAgent } from "@jpowersdev/effect-agent/codex"
+ *
+ * const options: CodexAgent.CodexAgentOptions = {
+ *   sandbox: { mode: "workspace-write", mcpServerTools: "approve" }
+ * }
+ * ```
+ *
+ * @since 0.8.0
+ * @category models
+ */
+export const CodexSandbox = SandboxSchema.CodexSandbox
+/**
+ * @since 0.8.0
+ * @category models
+ */
+export type CodexSandbox = typeof CodexSandbox.Type
+
+/**
+ * The prices shipped with this release: OpenAI's pricing page on
+ * `defaultPricesAsOf` (standard tier, text tokens, short-context rates, USD
+ * per million tokens), with no `"*"` entry.
+ *
+ * @since 0.8.0
+ * @category pricing
+ */
+export const defaultPrices: Pricing.PriceTable = Prices.prices
+
+/**
+ * The date `defaultPrices` last changed, as `YYYY-MM-DD`.
+ *
+ * @since 0.8.0
+ * @category pricing
+ */
+export const defaultPricesAsOf: string = Prices.asOf
+
+/**
+ * The prices a Codex session estimates its cost and `spendCapUsd` with, read
+ * when it opens; `defaultPrices` unless provided. Codex reports tokens, not
+ * cost, so every Codex cost is an estimate (`Cost.source` is `"estimated"`):
+ * tokens times these prices. On a plan that doesn't bill per token (a ChatGPT
+ * login) that is a budgeting figure, not a bill.
+ *
+ * A model the table doesn't have is unpriced: its turns report no cost, and
+ * `spendCapUsd` is refused for it. Add a `"*"` entry to price every model.
+ *
+ * @example
+ * ```ts
+ * import { CodexAgent } from "@jpowersdev/effect-agent/codex"
+ * import { Effect } from "effect"
+ *
+ * // For one session, or a whole program: USD per million tokens
+ * const withOurRates = <A, E, R>(self: Effect.Effect<A, E, R>) =>
+ *   Effect.provideService(self, CodexAgent.CodexPricing, {
+ *     ...CodexAgent.defaultPrices,
+ *     "gpt-5.5": { input: 5, cachedInput: 0.5, output: 30 }
+ *   })
+ * ```
+ *
+ * @since 0.8.0
+ * @category pricing
+ */
+export const CodexPricing: Context.Reference<Pricing.PriceTable> = PricingRef.CodexPricing
 
 // ---------------------------------------------------------------------------
 // RunOptions -> app-server params (pure)
@@ -164,11 +253,34 @@ export const refusedTools = (options: RunOptions): ReadonlyArray<string> => [
 ]
 
 /**
+ * `RunSettings.mcpServers` as Codex's `mcp_servers` config, their tools
+ * approved where the sandbox says so (`CodexSandbox`).
+ */
+const codexServers = (servers: NonNullable<RunOptions["mcpServers"]>, approve: boolean): Record<string, P.JsonValue> =>
+  Object.fromEntries(
+    Object.entries(servers).map(([name, s]): [string, P.JsonValue] => [
+      name,
+      {
+        ...(s.type === "http"
+          ? { url: s.url, ...(s.headers !== undefined && { http_headers: { ...s.headers } }) }
+          : { command: s.command, ...(s.args !== undefined && { args: [...s.args] }), ...(s.env !== undefined && { env: { ...s.env } }) }),
+        ...(approve && { default_tools_approval_mode: "approve" }),
+      },
+    ]),
+  )
+
+/**
  * Thread overrides shared by `thread/start` and `thread/resume`.
  *
  * @internal
  */
-export const threadOverrides = (options: RunOptions, extraConfig: Readonly<Record<string, P.JsonValue>> = {}): P.ThreadOverrides => {
+export const threadOverrides = (
+  options: RunOptions,
+  extraConfig: Readonly<Record<string, P.JsonValue>> = {},
+  sandbox: CodexSandbox = { mode: "danger-full-access" },
+): P.ThreadOverrides => {
+  // Only a sandbox asks to approve MCP calls, and a sandbox always approves mcpServers' tools.
+  const approve = sandbox.mode !== "danger-full-access"
   const tools: Record<string, P.JsonValue> = {}
   for (const name of options.disable?.tools ?? []) Object.assign(tools, toolSwitches[name])
   const config: Record<string, P.JsonValue> = {
@@ -176,7 +288,8 @@ export const threadOverrides = (options: RunOptions, extraConfig: Readonly<Recor
     // MCP isolation: no built-in codex_apps (ChatGPT apps/connectors), and no configured servers unless
     // `mcp` lets them load (a hook checks their calls; see `refusedTools`). 0.162.1 ignores
     // `mcp_servers` here for the servers in config.toml, which load regardless.
-    ...(options.mcp === undefined && { mcp_servers: {} }),
+    // The session's own servers join them: the only ones (but those) without `mcp`, beside the configured ones with it.
+    ...((options.mcp === undefined || options.mcpServers !== undefined) && { mcp_servers: codexServers(options.mcpServers ?? {}, approve) }),
     "features.apps": false,
     ...(options.effort !== undefined ? { model_reasoning_effort: codexEffort(options.effort) } : {}),
     // `request_user_input` is already refused in Default mode; this keeps it off if the default changes.
@@ -192,7 +305,7 @@ export const threadOverrides = (options: RunOptions, extraConfig: Readonly<Recor
     cwd: options.cwd,
     ...(options.model !== undefined ? { model: options.model } : {}),
     approvalPolicy: "never",
-    sandbox: "danger-full-access",
+    sandbox: sandbox.mode,
     config,
     // Appends to Codex's instructions; `baseInstructions` would replace them.
     ...(instructions.length > 0 ? { developerInstructions: instructions.join("\n\n") } : {}),
@@ -777,11 +890,12 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
   options: RunOptions,
   trustCache: TrustCache,
 ) {
-  const overrides = threadOverrides(options, agentOptions.config)
-  const pricing = agentOptions.pricing
+  const renamed = Mcp.serverNameProblem(options.mcpServers, provider)
+  if (renamed !== null) return yield* agentError(renamed)
+  const overrides = threadOverrides(options, agentOptions.config, agentOptions.sandbox)
+  const pricing = yield* CodexPricing
   const capUsd = options.spendCapUsd
   if (capUsd !== undefined) {
-    if (pricing === undefined) return yield* agentError("spendCapUsd needs CodexAgent.layer({ pricing }) on Codex")
     if (options.model !== undefined && Pricing.priceFor(pricing, options.model) === undefined) {
       return yield* agentError(`spendCapUsd: no price for model ${options.model}`)
     }
@@ -826,7 +940,7 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
   const threadId = started.thread.id
   yield* Effect.annotateCurrentSpan({ provider, sessionId: threadId, resume: resumed })
   const model = started.model ?? started.thread.model ?? null
-  const price = pricing !== undefined ? Pricing.priceFor(pricing, model) : undefined
+  const price = Pricing.priceFor(pricing, model)
   if (capUsd !== undefined && price === undefined) {
     yield* conn.close
     return yield* agentError(`spendCapUsd: no price for model ${model ?? "(unknown)"}`)
@@ -1463,8 +1577,8 @@ export const make = (options: CodexAgentOptions = {}) =>
         steer: true,
         queue: true,
         resume: true,
-        cost: options.pricing !== undefined ? ("estimated" as const) : ("none" as const),
-        spendCap: options.pricing !== undefined ? ("estimated" as const) : ("none" as const),
+        cost: "estimated" as const,
+        spendCap: "estimated" as const,
         resetTimes: true,
         hooks: true,
         refuseTool: true,
@@ -1498,17 +1612,8 @@ export const make = (options: CodexAgentOptions = {}) =>
  * import { CodexAgent, CodexAppServer } from "@jpowersdev/effect-agent/codex"
  * import { Layer } from "effect"
  *
- * // Codex reports tokens, not cost: prices (USD per million tokens) make
- * // cost estimates and `spendCapUsd` possible.
- * const layer = CodexAgent.layer({
- *   pricing: {
- *     "*": {
- *       input: 1.25,
- *       cachedInput: 0.125,
- *       output: 10
- *     }
- *   }
- * }).pipe(
+ * // Cost is estimated from `CodexPricing` (this release's prices unless provided).
+ * const layer = CodexAgent.layer().pipe(
  *   Layer.provide(CodexAppServer.layer()),
  *   Layer.provide(NodeServices.layer)
  * )

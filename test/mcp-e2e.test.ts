@@ -20,6 +20,7 @@ import { AgentHosts, DetachedAgent } from "../src/host/index.ts"
 import { host } from "./support/hostCommand.ts"
 import * as MockMessages from "./support/mockMessages.ts"
 import * as MockResponses from "./support/mockResponses.ts"
+import * as McpHttpServer from "./support/mcpHttpServer.ts"
 
 const hasCodex = spawnSync("codex", ["--version"]).status === 0
 const timeout = 60_000
@@ -36,8 +37,8 @@ interface World {
   readonly run: (options?: Partial<RunOptions>) => RunOptions
   readonly local: Layer.Layer<Agent>
   readonly detached: Layer.Layer<Agent | AgentHosts>
-  /** The model's next reply calls the fixture's `tool`. */
-  readonly callMcp: (tool: string, input?: unknown) => void
+  /** The model's next reply calls `tool` on `server` (default the fixture). */
+  readonly callMcp: (tool: string, input?: unknown, server?: string) => void
   /** The model's next reply reads one of the fixture's resources. */
   readonly readResource: () => void
   /** The calls that reached the fixture. */
@@ -80,7 +81,7 @@ const claude: Effect.Effect<
     run: (options = {}) => ({ cwd, env, model: "claude-haiku-5-5", ...options }),
     local: ClaudeAgent.layer().pipe(Layer.provide(ClaudeSdk.layer())),
     detached: DetachedAgent.layer({ host, provider: "claude", dir: join(root, "hosts"), onScopeClose: "detach" }).pipe(Layer.provide(NodeServices.layer)),
-    callMcp: (tool, input = {}) => void mock.script.push({ name: `mcp__fixture__${tool}`, input }),
+    callMcp: (tool, input = {}, server = "fixture") => void mock.script.push({ name: `mcp__${server}__${tool}`, input }),
     callTool: (name, input) => void mock.script.push({ name, input }),
     requests: mock.requests,
     readResource: () => void mock.script.push({ name: "ReadMcpResourceTool", input: { server: "fixture", uri: "note://inbox" } }),
@@ -114,7 +115,7 @@ const codex = (layerOptions: { readonly codexPath?: string; readonly config?: Re
         onScopeClose: "detach",
       }).pipe(Layer.provide(NodeServices.layer)),
       // Codex puts a server's tools in a namespace; the hook sees `mcp__fixture__<tool>`.
-      callMcp: (tool, input = {}) => void mock.script.push(MockResponses.functionCall(tool, input, { namespace: "mcp__fixture" })),
+      callMcp: (tool, input = {}, server = "fixture") => void mock.script.push(MockResponses.functionCall(tool, input, { namespace: `mcp__${server}` })),
       readResource: () => void mock.script.push(MockResponses.functionCall("read_mcp_resource", { server: "fixture", uri: "note://inbox" })),
       reached,
       sent: () => JSON.stringify(mock.requests),
@@ -196,6 +197,63 @@ for (const p of providers) {
     )
 
     it.live(
+      "mcpServers: a session's own HTTP server, with its token, loads without mcp and its tools run",
+      () =>
+        Effect.gen(function* () {
+          const w = yield* p.world()
+          const task = yield* McpHttpServer.make
+          w.callMcp("read_note", {}, "task")
+          w.callMcp("send_note", { text: "hi" }, "task")
+          yield* turn(w.run({ mcpServers: { task: { type: "http", url: task.url, headers: { Authorization: `Bearer ${task.token}` } } } })).pipe(
+            Effect.scoped,
+            Effect.provide(w.local),
+          )
+          expect(task.reached()).toEqual(["read_note", "send_note"])
+          expect(task.unauthorized()).toBe(0)
+          expect(w.sent()).toContain("task read_note ran")
+        }).pipe(Effect.scoped),
+      timeout,
+    )
+
+    it.live(
+      "mcpServers: with mcp, they load beside the machine's servers, and mcp.allow checks their calls too",
+      () =>
+        Effect.gen(function* () {
+          const w = yield* p.world()
+          const task = yield* McpHttpServer.make
+          w.callMcp("read_note", {}, "task")
+          w.callMcp("send_note", { text: "hi" }, "task")
+          w.callMcp("read_note")
+          yield* turn(
+            w.run({
+              mcp: { allow: ["{fixture,task}/read_*"], deny: ["*/*send*"] },
+              mcpServers: { task: { type: "http", url: task.url, headers: { Authorization: `Bearer ${task.token}` } } },
+            }),
+          ).pipe(Effect.scoped, Effect.provide(w.local))
+          expect(task.reached()).toEqual(["read_note"])
+          expect(w.reached()).toEqual(["read_note"])
+          expect(w.sent()).toContain("This MCP tool call was refused: task/send_note matches mcp.deny pattern */*send*")
+        }).pipe(Effect.scoped),
+      timeout,
+    )
+
+    it.live(
+      "mcpServers travel to a detached session's host",
+      () =>
+        Effect.gen(function* () {
+          const w = yield* p.world()
+          const task = yield* McpHttpServer.make
+          w.callMcp("read_note", {}, "task")
+          yield* turn(w.run({ mcpServers: { task: { type: "http", url: task.url, headers: { Authorization: `Bearer ${task.token}` } } } })).pipe(
+            Effect.scoped,
+            Effect.provide(w.detached),
+          )
+          expect(task.reached()).toEqual(["read_note"])
+        }).pipe(Effect.scoped),
+      timeout,
+    )
+
+    it.live(
       "on a detached session, the host checks the calls, with no client hook",
       () =>
         Effect.gen(function* () {
@@ -221,6 +279,17 @@ for (const p of providers) {
 }
 
 describe("claude", () => {
+  it.live(
+    "mcpServers: open fails for a server name Claude would rename",
+    () =>
+      Effect.gen(function* () {
+        const w = yield* claude
+        const failed = yield* Effect.flip(turn(w.run({ mcpServers: { "task.v2": { type: "stdio", command: "true" } } })).pipe(Effect.scoped, Effect.provide(w.local)))
+        expect(failed.message).toContain('Claude would rename the server "task.v2"')
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+
   it.live(
     "without mcp, the machine's MCP servers don't load",
     () =>
@@ -255,6 +324,17 @@ describe("claude", () => {
 })
 
 describe.skipIf(!hasCodex)("codex", () => {
+  it.live(
+    "mcpServers: open fails for a server name Codex would rename, as one with a -",
+    () =>
+      Effect.gen(function* () {
+        const w = yield* codex()
+        const failed = yield* Effect.flip(turn(w.run({ mcpServers: { "studio-run": { type: "stdio", command: "true" } } })).pipe(Effect.scoped, Effect.provide(w.local)))
+        expect(failed.message).toContain('Codex would rename the server "studio-run"')
+      }).pipe(Effect.scoped),
+    timeout,
+  )
+
   // A known gap, not a promise: when a Codex release makes `mcp_servers: {}` hold, this fails, and
   // the README's "Where Codex differs" and this test should change with it (see UPGRADING.md).
   it.live(
