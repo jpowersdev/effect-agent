@@ -52,6 +52,8 @@ export type EnvSpec = typeof EnvSpec.Type
 export const ClaudeOptionsSpec = Schema.Struct({
   settingSources: Schema.optionalKey(Schema.Array(Schema.Literals(["user", "project", "local"]))),
   pathToClaudeCodeExecutable: Schema.optionalKey(Schema.String),
+  permissionMode: Schema.optionalKey(Schema.Literals(["bypassPermissions", "dontAsk"])),
+  allowedTools: Schema.optionalKey(Schema.Array(Schema.String)),
   model: Schema.optionalKey(Schema.String),
   checkResume: Schema.optionalKey(Schema.Boolean),
   env: Schema.optionalKey(EnvSpec),
@@ -77,9 +79,9 @@ const ModelPrice = Schema.Struct({
  * @category models
  */
 export const CodexOptionsSpec = Schema.Struct({
-  pricing: Schema.optionalKey(Schema.Record(Schema.String, ModelPrice)),
   config: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   stallGrace: Schema.optionalKey(DurationSpec),
+  sandbox: Schema.optionalKey(Schema.Literals(["danger-full-access", "workspace-write", "read-only"])),
   codexPath: Schema.optionalKey(Schema.String),
   args: Schema.optionalKey(Schema.Array(Schema.String)),
   forceKillAfter: Schema.optionalKey(DurationSpec),
@@ -151,6 +153,8 @@ export type ProviderSpec = typeof ProviderSpec.Type
 export const HostSpec = Schema.Struct({
   ...ProviderSpec.fields,
   run: RunSpec,
+  /** Codex: the client's `CodexAgent.CodexPricing` when it opened the session, provided to the host's `open`. */
+  codexPricing: Schema.optionalKey(Schema.Record(Schema.String, ModelPrice)),
   /** `open` passed hooks, so it fails if the provider can't run them. Otherwise the session opens without them, unless `run.disable` or `run.mcp` needs them. */
   hooks: Schema.optionalKey(Schema.Boolean),
   /** Where the socket, manifest and log go. */

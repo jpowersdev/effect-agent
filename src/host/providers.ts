@@ -17,6 +17,8 @@ import { type ClaudeOptionsSpec, type ProviderSpec, toDuration } from "./HostSpe
 const claudeOptions = (spec: ClaudeOptionsSpec = {}): ClaudeAgentOptions => ({
   ...(spec.settingSources !== undefined && { settingSources: spec.settingSources }),
   ...(spec.pathToClaudeCodeExecutable !== undefined && { pathToClaudeCodeExecutable: spec.pathToClaudeCodeExecutable }),
+  ...(spec.permissionMode !== undefined && { permissionMode: spec.permissionMode }),
+  ...(spec.allowedTools !== undefined && { allowedTools: spec.allowedTools }),
   ...(spec.model !== undefined && { model: spec.model }),
   ...(spec.checkResume !== undefined && { checkResume: spec.checkResume }),
   ...(spec.env !== undefined && { env: spec.env }),
@@ -61,10 +63,10 @@ const codex = (spec: ProviderSpec) =>
             ...(options.forceKillAfter !== undefined && { forceKillAfter: toDuration(options.forceKillAfter) }),
           })
     return CodexAgent.layer({
-      ...(options.pricing !== undefined && { pricing: options.pricing }),
       // Decoded from the JSON spec, so the values are JSON.
       ...(options.config !== undefined && { config: options.config as Readonly<Record<string, JsonValue>> }),
       ...(options.stallGrace !== undefined && { stallGrace: toDuration(options.stallGrace) }),
+      ...(options.sandbox !== undefined && { sandbox: options.sandbox }),
     }).pipe(Layer.provide(server))
   })
 

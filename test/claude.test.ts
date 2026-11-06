@@ -117,6 +117,20 @@ describe("ClaudeAgent.buildOptions", () => {
     expect(options.systemPrompt).toEqual({ type: "preset", preset: "claude_code" })
   })
 
+  it("dontAsk replaces bypassed permissions, with the layer's allowedTools", () => {
+    const options = ClaudeAgent.buildOptions({ cwd: "/x" }, { permissionMode: "dontAsk", allowedTools: ["Read", "Bash(git log:*)"] }, sessionId, {})
+    expect(options).toMatchObject({ permissionMode: "dontAsk", allowedTools: ["Read", "Bash(git log:*)"] })
+    expect(options).not.toHaveProperty("allowDangerouslySkipPermissions")
+  })
+
+  it("passes mcpServers as the SDK's, isolated without mcp and beside the machine's with it", () => {
+    const mcpServers = { task: { type: "http" as const, url: "http://127.0.0.1:1/mcp", headers: { Authorization: "Bearer t" } } }
+    expect(ClaudeAgent.buildOptions({ cwd: "/x", mcpServers }, {}, sessionId, {})).toMatchObject({ strictMcpConfig: true, mcpServers })
+    const withMcp = ClaudeAgent.buildOptions({ cwd: "/x", mcpServers, mcp: { allow: [] } }, {}, sessionId, {})
+    expect(withMcp.mcpServers).toEqual(mcpServers)
+    expect(withMcp).not.toHaveProperty("strictMcpConfig")
+  })
+
   it("lists Workflow among the SDK's builtin tools", async () => {
     const { BUILTIN_TOOL_NAMES } = await import("@anthropic-ai/claude-agent-sdk")
     expect(BUILTIN_TOOL_NAMES).toContain("Workflow")

@@ -224,6 +224,10 @@ describe("helpers", () => {
     )
   })
 
+  it("passes the layer's sandbox, approvals still never", () => {
+    expect(CodexAgent.threadOverrides({ cwd: "/w" }, {}, "workspace-write")).toMatchObject({ approvalPolicy: "never", sandbox: "workspace-write" })
+  })
+
   it("builds thread overrides", () => {
     const overrides = CodexAgent.threadOverrides({
       cwd: "/w",

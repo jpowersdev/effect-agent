@@ -32,6 +32,33 @@ export const Effort = Schema.Literals(["minimal", "low", "medium", "high", "xhig
 export type Effort = typeof Effort.Type
 
 /**
+ * An MCP server for `RunSettings.mcpServers`: Streamable HTTP, or a command
+ * speaking MCP on stdio.
+ *
+ * @since 0.8.0
+ * @category models
+ */
+export const McpServer = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("http"),
+    url: Schema.String,
+    /** Sent with every request, as `{ Authorization: "Bearer ..." }`. */
+    headers: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("stdio"),
+    command: Schema.String,
+    args: Schema.optionalKey(Schema.Array(Schema.String)),
+    env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  }),
+])
+/**
+ * @since 0.8.0
+ * @category models
+ */
+export type McpServer = typeof McpServer.Type
+
+/**
  * Everything in `RunOptions` but `hooks`, as a Schema: plain data that can
  * be stored or sent to another process (`DetachedAgent` sends it to its host).
  * Durations encode as millis; an `env` value of `undefined` as `null`.
@@ -72,8 +99,13 @@ export const RunSettings = Schema.Struct({
    * fails where hooks can't run.
    *
    * `server/tool` is the provider's `mcp__<server>__<tool>` split at the first
-   * `__`, with every character outside `[A-Za-z0-9_-]` already `_`; a claude.ai
-   * connector's server is `claude_ai_<Name>`, as `claude_ai_Slack`. A name
+   * `__`, after the provider has rewritten the names: Claude makes every
+   * character outside `[A-Za-z0-9_-]` `_`; Codex makes every character outside
+   * `[A-Za-z0-9_]` `_` (so `-` too: `my-server/list-files` is
+   * `my_server/list_files`), and adds a hash to servers whose rewritten names
+   * collide. Write globs in the rewritten form. A claude.ai connector's server
+   * is `claude_ai_<Name>`, as `claude_ai_Slack`. The servers `mcpServers` adds
+   * are checked too. A name
    * with another `__` must pass under every reading. Globs are `effect/Glob`'s:
    * `*` stays within the server or the tool, `{a,b}` is either. Reading MCP
    * resources is always refused. Built-in tools are unaffected.
@@ -86,6 +118,18 @@ export const RunSettings = Schema.Struct({
       deny: Schema.optionalKey(Schema.Array(Schema.String)),
     }),
   ),
+  /**
+   * MCP servers for this session alone, by name, as a task's own server with
+   * its own token. They load with or without `mcp`: without it they are the
+   * only servers and every tool on them can be called; with it they load
+   * beside the machine's and `mcp.allow` checks their calls too.
+   *
+   * A name must be what the provider calls the server, so a glob can match
+   * it: `open` fails on Codex for one with a character outside
+   * `[A-Za-z0-9_]` (Codex would rename it), and on Claude outside
+   * `[A-Za-z0-9_-]`.
+   */
+  mcpServers: Schema.optionalKey(Schema.Record(Schema.String, McpServer)),
   /** Spend cap in USD. Native for Claude; estimated from tokens for Codex. */
   spendCapUsd: Schema.optionalKey(Schema.Number),
   /** Resume an existing session; fails with `SessionNotFound` if the provider has no record of it. */

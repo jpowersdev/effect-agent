@@ -93,6 +93,7 @@ import { providerLayer } from "./providers.ts"
 import * as Launcher from "../Launcher.ts"
 import * as ProcessTree from "../ProcessTree.ts"
 import * as EventFile from "./EventFile.ts"
+import { CodexPricing } from "../codex/CodexPricingRef.ts"
 
 /**
  * Options for `layer`.
@@ -897,6 +898,8 @@ export const layer = (
             ...(options.replayKnownSessions !== undefined && { replayKnownSessions: options.replayKnownSessions }),
             ...(options.replayHookLog !== undefined && { replayHookLog: options.replayHookLog }),
             run: settingsOf(run),
+            // Read here, where the caller can provide it; the host only does the math.
+            ...(provider === "codex" && { codexPricing: yield* CodexPricing }),
             dir,
             ...(options.maxEvents !== undefined && { maxEvents: options.maxEvents }),
             ...(options.orphanTimeout !== undefined && { orphanTimeout: Duration.toMillis(Duration.fromInputUnsafe(options.orphanTimeout)) }),

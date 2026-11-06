@@ -31,6 +31,7 @@ import type {
   HookCallback,
   HookCallbackMatcher,
   HookEvent,
+  McpServerConfig,
   Options,
   SDKAssistantMessage,
   SDKRateLimitInfo,
@@ -96,6 +97,20 @@ export interface ClaudeAgentOptions {
   readonly settingSources?: ReadonlyArray<SettingSource>
   /** Use this `claude` binary instead of the one bundled with the SDK. */
   readonly pathToClaudeCodeExecutable?: string
+  /**
+   * How tool calls are permitted. `bypassPermissions` (the default) runs every
+   * tool that isn't disabled or refused. `dontAsk` runs only what a permission
+   * rule allows, from `allowedTools` or the settings files
+   * (`settingSources`), and denies the rest: nobody is there to ask.
+   * `disable`, `mcp` and `beforeTool` refusals hold in both.
+   */
+  readonly permissionMode?: "bypassPermissions" | "dontAsk"
+  /**
+   * Permission rules that allow a tool without asking, in Claude Code's
+   * syntax: `Read`, `Bash(git log:*)`, `Edit(/repo/src/**)`,
+   * `mcp__task__progress`. Only matters with `permissionMode: "dontAsk"`.
+   */
+  readonly allowedTools?: ReadonlyArray<string>
   /** Model when `RunOptions.model` is not set. */
   readonly model?: string
   /**
@@ -355,11 +370,15 @@ export const buildOptions = (
       preset: "claude_code",
       ...(run.appendSystemPrompt !== undefined && { append: run.appendSystemPrompt }),
     },
-    permissionMode: "bypassPermissions",
-    allowDangerouslySkipPermissions: true,
+    ...(config.permissionMode === "dontAsk"
+      ? { permissionMode: "dontAsk" as const }
+      : { permissionMode: "bypassPermissions" as const, allowDangerouslySkipPermissions: true }),
+    ...(config.allowedTools !== undefined && { allowedTools: [...config.allowedTools] }),
     ...(disallowed.length > 0 && { disallowedTools: disallowed }),
     // MCP isolation, unless `mcp` lets the machine's own servers and connectors load (checked by `mcpHooks`).
     ...(run.mcp === undefined && { strictMcpConfig: true, mcpServers: {}, settings: { disableClaudeAiConnectors: true } }),
+    // The session's own servers: the only ones without `mcp`, beside the machine's with it.
+    ...(run.mcpServers !== undefined && { mcpServers: toSdkServers(run.mcpServers) }),
     ...(config.settingSources !== undefined && { settingSources: [...config.settingSources] }),
     ...(run.spendCapUsd !== undefined && { maxBudgetUsd: run.spendCapUsd }),
     ...(config.pathToClaudeCodeExecutable !== undefined && {
@@ -367,6 +386,17 @@ export const buildOptions = (
     }),
   }
 }
+
+/** `RunSettings.mcpServers` in the SDK's shape (the same fields, as mutable arrays). */
+const toSdkServers = (servers: NonNullable<RunOptions["mcpServers"]>): Record<string, McpServerConfig> =>
+  Object.fromEntries(
+    Object.entries(servers).map(([name, s]): [string, McpServerConfig] => [
+      name,
+      s.type === "http"
+        ? { type: "http", url: s.url, ...(s.headers !== undefined && { headers: { ...s.headers } }) }
+        : { type: "stdio", command: s.command, ...(s.args !== undefined && { args: [...s.args] }), ...(s.env !== undefined && { env: { ...s.env } }) },
+    ]),
+  )
 
 /**
  * Options for `status`'s idle query: the same isolation as a session, nothing persisted.
@@ -1051,6 +1081,8 @@ const openSession = Effect.fn("ClaudeAgent.open")(function* (
 ) {
   const sessionId = run.resume ?? SessionId.make(randomUUID())
   yield* Effect.annotateCurrentSpan({ provider, sessionId, resume: run.resume !== undefined })
+  const renamed = Mcp.serverNameProblem(run.mcpServers, "claude")
+  if (renamed !== null) return yield* agentError(renamed)
   const transcript = location(run, sessionId, config)
 
   if (run.resume !== undefined && config.checkResume !== false) {
