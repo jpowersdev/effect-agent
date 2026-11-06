@@ -183,7 +183,6 @@ describe("Codex", () => {
       task: { ...expected.task, default_tools_approval_mode: "approve" },
       local: { ...expected.local, default_tools_approval_mode: "approve" },
     })
-    expect(CodexAgent.threadOverrides({ cwd: "/x", mcpServers }, {}, { mode: "read-only", mcpServerTools: "refuse" }).config!["mcp_servers"]).toEqual(expected)
   })
 
   it("plans an MCP check on the relay", () => {

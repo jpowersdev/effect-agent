@@ -11,6 +11,6 @@ export const CodexSandbox = Schema.Union([
   Schema.Struct({ mode: Schema.Literal("danger-full-access") }),
   Schema.Struct({
     mode: Schema.Literals(["workspace-write", "read-only"]),
-    mcpServerTools: Schema.Literals(["approve", "refuse"]),
+    mcpServerTools: Schema.Literal("approve"),
   }),
 ])

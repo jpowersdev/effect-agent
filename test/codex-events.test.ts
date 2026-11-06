@@ -231,11 +231,11 @@ describe("helpers", () => {
     })
   })
 
-  it("a sandbox must say what happens to mcpServers' tools, and no sandbox can't", () => {
+  it("a sandbox must approve mcpServers' tools, and no sandbox can't", () => {
     const decode = Schema.decodeUnknownExit(CodexAgent.CodexSandbox)
     expect(decode({ mode: "read-only" })._tag).toBe("Failure")
     expect(decode({ mode: "danger-full-access", mcpServerTools: "approve" })).toMatchObject({ _tag: "Success", value: { mode: "danger-full-access" } })
-    expect(decode({ mode: "read-only", mcpServerTools: "refuse" })._tag).toBe("Success")
+    expect(decode({ mode: "read-only", mcpServerTools: "approve" })._tag).toBe("Success")
   })
 
   it("builds thread overrides", () => {

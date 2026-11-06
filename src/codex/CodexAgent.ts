@@ -84,13 +84,13 @@ export interface CodexAgentOptions {
  *   `exclude_tmpdir_env_var`), with no network unless `config` allows it.
  * - `read-only`: commands write nowhere.
  *
- * In a sandbox Codex asks to approve every MCP call, so a sandbox must say
- * what happens to the tools of a session's `mcpServers`: `approve` approves
- * them (`default_tools_approval_mode = "approve"`; `mcp.allow` is still their
- * check), and `refuse` takes none: `open` fails for a session that passes
- * `mcpServers`. Either way a server in `config.toml` is callable in a sandbox
- * only if its own config approves its tools. Without a sandbox Codex asks for
- * no approval, so the field isn't there to set.
+ * In a sandbox Codex asks to approve every MCP call, and with approvals
+ * `never` an unapproved one is refused. So a sandbox approves the tools of a
+ * session's `mcpServers` (`default_tools_approval_mode = "approve"`;
+ * `mcp.allow` is still their check), and says so: `mcpServerTools: "approve"`
+ * is required with a sandbox, and has no place without one, where Codex asks
+ * for no approval. A server in `config.toml` is callable in a sandbox only if
+ * its own config approves its tools.
  *
  * @example
  * ```ts
@@ -279,7 +279,8 @@ export const threadOverrides = (
   extraConfig: Readonly<Record<string, P.JsonValue>> = {},
   sandbox: CodexSandbox = { mode: "danger-full-access" },
 ): P.ThreadOverrides => {
-  const approve = sandbox.mode !== "danger-full-access" && sandbox.mcpServerTools === "approve"
+  // Only a sandbox asks to approve MCP calls, and a sandbox always approves mcpServers' tools.
+  const approve = sandbox.mode !== "danger-full-access"
   const tools: Record<string, P.JsonValue> = {}
   for (const name of options.disable?.tools ?? []) Object.assign(tools, toolSwitches[name])
   const config: Record<string, P.JsonValue> = {
@@ -891,10 +892,6 @@ const openSession = Effect.fn("CodexAgent.open")(function* (
 ) {
   const renamed = Mcp.serverNameProblem(options.mcpServers, provider)
   if (renamed !== null) return yield* agentError(renamed)
-  const sandbox = agentOptions.sandbox
-  if (sandbox !== undefined && sandbox.mode !== "danger-full-access" && sandbox.mcpServerTools === "refuse" && Object.keys(options.mcpServers ?? {}).length > 0) {
-    return yield* agentError(`mcpServers: this layer's ${sandbox.mode} sandbox has mcpServerTools: "refuse", so it takes no mcpServers (their tools couldn't be called)`)
-  }
   const overrides = threadOverrides(options, agentOptions.config, agentOptions.sandbox)
   const pricing = yield* CodexPricing
   const capUsd = options.spendCapUsd

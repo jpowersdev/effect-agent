@@ -21,9 +21,8 @@ agent.open({
 **Permissions, per provider.**
 
 - `ClaudeAgentOptions.permissionMode`: `"bypassPermissions"` (the default, as before) or `"dontAsk"`, which runs only what a permission rule allows and denies the rest; `ClaudeAgentOptions.allowedTools` takes the rules (`Read`, `Bash(git log:*)`, `mcp__task_tools__progress`).
-- `CodexAgentOptions.sandbox` is a `CodexSandbox`: `{ mode: "danger-full-access" }` (as when omitted, the default as before), or `{ mode: "workspace-write" | "read-only", mcpServerTools: "approve" | "refuse" }`. Approvals stay `never`.
-  - In a sandbox Codex asks to approve every MCP call, so a sandbox must say what happens to the tools of a session's `mcpServers`, and the types won't take one without it (or take it without a sandbox, where Codex asks for no approval). `HostSpec` decodes it with the same Schema.
-  - `"approve"` sets `default_tools_approval_mode = "approve"` on them, with `mcp.allow` still their check. `"refuse"` takes none: `open` fails for a session that passes `mcpServers`.
+- `CodexAgentOptions.sandbox` is a `CodexSandbox`: `{ mode: "danger-full-access" }` (as when omitted, the default as before), or `{ mode: "workspace-write" | "read-only", mcpServerTools: "approve" }`. Approvals stay `never`.
+  - In a sandbox Codex asks to approve every MCP call, so a sandbox approves the tools of a session's `mcpServers` (`default_tools_approval_mode = "approve"`, with `mcp.allow` still their check), and has to say so: the types won't take a sandbox without `mcpServerTools: "approve"`, or the field without a sandbox, where Codex asks for no approval. `HostSpec` decodes it with the same Schema.
   - A server in `config.toml` is callable in a sandbox only if its own config approves its tools.
 - Both are in `HostSpec`'s `claude` and `codex` options, so detached sessions take them too.
 
