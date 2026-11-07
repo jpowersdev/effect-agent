@@ -1,5 +1,11 @@
 # @jpowersdev/effect-agent
 
+## 0.9.0
+
+### Minor Changes
+
+- [#22](https://github.com/jpowersdev/effect-agent/pull/22) [`a58ea34`](https://github.com/jpowersdev/effect-agent/commit/a58ea34bbab559b77be398f02308f7c3e7235df2) Thanks [@jpowersdev](https://github.com/jpowersdev)! - `ClaudeAgentOptions.permissionMode: "settings"` passes no permission mode, so the settings files decide, as they do for `claude -p`: their `permissions.defaultMode` applies (`acceptEdits`, `bypassPermissions`, ...), and with none, a tool no rule (or `allowedTools`) allows is denied, since nobody is there to ask. Use it to run an agent under a machine's own Claude Code setup. `bypassPermissions` stays the default; `disable`, `mcp` and `beforeTool` refusals hold in every mode. `HostSpec` takes it too.
+
 ## 0.8.0
 
 ### Minor Changes
