@@ -123,6 +123,18 @@ describe("ClaudeAgent.buildOptions", () => {
     expect(options).not.toHaveProperty("allowDangerouslySkipPermissions")
   })
 
+  it("backgroundTasks: false disables background tasks, over any env", () => {
+    const off = ClaudeAgent.buildOptions(
+      { cwd: "/x", env: { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: undefined } },
+      { backgroundTasks: false },
+      sessionId,
+      {},
+    )
+    expect(off.env?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBe("1")
+    const on = ClaudeAgent.buildOptions({ cwd: "/x" }, { backgroundTasks: true }, sessionId, {})
+    expect(on.env).not.toHaveProperty("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
+  })
+
   it("settings passes no permission mode, so the settings files decide", () => {
     const options = ClaudeAgent.buildOptions({ cwd: "/x" }, { permissionMode: "settings", allowedTools: ["Read"] }, sessionId, {})
     expect(options).not.toHaveProperty("permissionMode")

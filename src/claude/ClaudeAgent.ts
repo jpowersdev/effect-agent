@@ -128,6 +128,15 @@ export interface ClaudeAgentOptions {
    * removes a variable, e.g. `{ CLAUDE_CONFIG_DIR: "/path" }` for another account.
    */
   readonly env?: Readonly<Record<string, string | undefined>>
+  /**
+   * Whether the agent can run Bash commands and subagents in the background.
+   * Default true, as in the CLI. `false` sets
+   * `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`: Bash has no `run_in_background`,
+   * so a wait (CI checks, a long build) blocks in the turn. Use it when each
+   * turn is a whole job: the turn would end before work left in the background
+   * finishes, and the agent would never hear back.
+   */
+  readonly backgroundTasks?: boolean
   /** Default for `RunOptions.watchdog.grace` (10 seconds when neither is set). */
   readonly stallGrace?: Duration.Input
 }
@@ -361,7 +370,11 @@ export const buildOptions = (
   const hooks = run.hooks !== undefined ? sdkHooks(run.hooks, runHookEffect) : undefined
   return {
     cwd: run.cwd,
-    env: buildEnv(hostEnv, { ...config.env, ...run.env }, run.mcp === undefined),
+    env: buildEnv(
+      hostEnv,
+      { ...config.env, ...run.env, ...(config.backgroundTasks === false && { CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1" }) },
+      run.mcp === undefined,
+    ),
     ...(run.mcp !== undefined
       ? { hooks: { ...hooks, PreToolUse: [...mcpHooks(run.mcp), ...(hooks?.PreToolUse ?? [])] } }
       : hooks !== undefined && { hooks }),
