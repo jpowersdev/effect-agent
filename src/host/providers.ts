@@ -22,6 +22,7 @@ const claudeOptions = (spec: ClaudeOptionsSpec = {}): ClaudeAgentOptions => ({
   ...(spec.model !== undefined && { model: spec.model }),
   ...(spec.checkResume !== undefined && { checkResume: spec.checkResume }),
   ...(spec.env !== undefined && { env: spec.env }),
+  ...(spec.backgroundTasks !== undefined && { backgroundTasks: spec.backgroundTasks }),
   ...(spec.stallGrace !== undefined && { stallGrace: toDuration(spec.stallGrace) }),
 })
 

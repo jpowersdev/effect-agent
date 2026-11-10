@@ -58,6 +58,7 @@ export const ClaudeOptionsSpec = Schema.Struct({
   model: Schema.optionalKey(Schema.String),
   checkResume: Schema.optionalKey(Schema.Boolean),
   env: Schema.optionalKey(EnvSpec),
+  backgroundTasks: Schema.optionalKey(Schema.Boolean),
   stallGrace: Schema.optionalKey(DurationSpec),
 })
 /**
